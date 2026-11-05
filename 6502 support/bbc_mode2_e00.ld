@@ -17,8 +17,9 @@ SECTIONS
     *(.paged_gate)
     /* Blitter + sprite bitmaps (games/sprites.s). Must stay below &3000:
        soft stack grows down from &7C00 and shreds high .rodata under COROs.
-       daveld ignores a separate .rodata.sprites wildcard — park in blitter. */
-    *(.text.blitter)
+       daveld ignores a separate .rodata.sprites wildcard — park in blitter.
+       Per-sprite .text.blitter.* lets --gc-sections drop unused game art. */
+    *(.text.blitter .text.blitter.*)
     *(.text* .rodata* .davecc_stacktrace)
   } > ram
   .data : { *(.data* .preinit_array* .init_array* .fini_array*) } > ram

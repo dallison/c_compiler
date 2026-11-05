@@ -92,11 +92,12 @@ The script does these checks; it fails if any of those symbols lands at or above
 - **Assembler**: in davecc `.s` files `.word` is **4 bytes**; use `.hword` for 16-bit pointers and values.
 - **Mode**: call `bbc::mode(129)` **once** in `main`. A second `mode()` re-parks the soft stack and returns to BASIC.
 
-## Snake (same SSD, same link)
+## Snake and Asteroids (same SSD, same link)
 
-Snake now matches Invaders: shadow mode 1, `screen1.s` blitter, sprites in
-`sprites.s`, play helpers in `snake_fx.s`, C++20 coroutines in `snake.cc`,
-linked at `&E00` with `bbc_mode2_e00.ld`. The pack script builds both.
+Snake and Asteroids match Invaders: shadow mode 1, `screen1.s` blitter,
+sprites in `sprites.s`, play helpers in `snake_fx.s` / `asteroids_fx.s`,
+C++20 coroutines, linked at `&E00` with `bbc_mode2_e00.ld`. The pack
+script builds all three (`*RUN SNAKE`, `*RUN INVADER`, `*RUN ASTERO`).
 
 ## After packing
 

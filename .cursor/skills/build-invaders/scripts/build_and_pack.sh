@@ -28,22 +28,22 @@ asm "$SUP/push.s" "$WORK/push.o"
 asm "$ROOT/games/sprites.s" "$WORK/sprites.o"
 asm "$ROOT/games/invaders_fx.s" "$WORK/invaders_fx.o"
 asm "$ROOT/games/snake_fx.s" "$WORK/snake_fx.o"
+asm "$ROOT/games/asteroids_fx.s" "$WORK/asteroids_fx.o"
 
-"$DAVECC" -target "$TARGET" -std=c++20 -fno-exceptions -Os \
-  -ffunction-sections -Wl,--gc-sections \
-  -Wl,-T -Wl,"$SUP/bbc_mode2_e00.ld" \
-  "$ROOT/games/invaders.cc" \
-  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o" \
-  "$WORK/push.o" \
-  -o "$WORK/invaders.elf"
+build_game() {
+  local src="$1" fx="$2" out="$3"
+  "$DAVECC" -target "$TARGET" -std=c++20 -fno-exceptions -Os \
+    -ffunction-sections -Wl,--gc-sections \
+    -Wl,-T -Wl,"$SUP/bbc_mode2_e00.ld" \
+    "$ROOT/games/$src" \
+    "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/$fx" \
+    "$WORK/push.o" \
+    -o "$WORK/$out"
+}
 
-"$DAVECC" -target "$TARGET" -std=c++20 -fno-exceptions -Os \
-  -ffunction-sections -Wl,--gc-sections \
-  -Wl,-T -Wl,"$SUP/bbc_mode2_e00.ld" \
-  "$ROOT/games/snake.cc" \
-  "$WORK/bbc_vdu.o" "$WORK/screen1.o" "$WORK/sprites.o" "$WORK/snake_fx.o" \
-  "$WORK/push.o" \
-  -o "$WORK/snake.elf"
+build_game invaders.cc invaders_fx.o invaders.elf
+build_game snake.cc snake_fx.o snake.elf
+build_game asteroids.cc asteroids_fx.o asteroids.elf
 
 check_elf() {
   local elf="$1" name="$2"
@@ -66,14 +66,17 @@ PY
 
 check_elf "$WORK/invaders.elf" INVADER
 check_elf "$WORK/snake.elf" SNAKE
+check_elf "$WORK/asteroids.elf" ASTERO
 
-# Everything screen1.s, sprites.s and *_fx.s define is read or run while
-# the shadow screen is mapped at &3000, so it must sit below &3000.
+# Blitter/sprite symbols that survived --gc-sections must stay below &3000
+# (readable while the shadow screen is mapped). Unused per-sprite sections
+# are dropped, so do not require every sprites.o symbol to appear.
 if command -v nm >/dev/null 2>&1; then
-  for elf in invaders snake; do
+  for elf in invaders snake asteroids; do
     case $elf in
       invaders) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o") ;;
       snake) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/snake_fx.o") ;;
+      asteroids) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/asteroids_fx.o") ;;
     esac
     nm "${objs[@]}" |
       awk 'NF == 3 && $2 ~ /[TDB]/ {print $3}' | sort -u >"$WORK/low_syms_$elf.txt"
@@ -85,12 +88,11 @@ for line in sys.stdin:
     parts = line.split()
     if len(parts) == 3 and parts[2] in want:
         found[parts[2]] = int(parts[0], 16)
-missing = sorted(want - set(found))
-if missing:
-    print(sys.argv[2] + " missing low symbols: " + " ".join(missing), file=sys.stderr)
+if not found:
+    print(sys.argv[2] + " has no low blitter/sprite symbols", file=sys.stderr)
     sys.exit(1)
 high = max(found, key=found.get)
-print(f"{sys.argv[2]} highest low symbol {high}=0x{found[high]:x}")
+print(f"{sys.argv[2]} highest low symbol {high}=0x{found[high]:x} ({len(found)} kept)")
 over = sorted(n for n, a in found.items() if a >= 0x3000)
 if over:
     print(sys.argv[2] + " at or above &3000: " + " ".join(over), file=sys.stderr)
@@ -100,7 +102,33 @@ if over:
 fi
 
 python3 "$SUP/elf2ssd.py" "$SSD" \
-  "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf"
+  "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
+  "ASTERO=$WORK/asteroids.elf"
+
+# DFS *RUN loads the reloc wrapper at PAGE (&1F00). Mode-7 HIMEM is &7C00;
+# past that MOS returns "Bad program" before the reloc stub can run.
+
+python3 - <<PY
+# Confirm catalog entries fit under mode-7 HIMEM (&7C00).
+ssd = open(r"$SSD", "rb").read()
+himem = 0x7C00
+nfiles = ssd[0x105] // 8
+bad = []
+for i in range(nfiles):
+    raw = ssd[8 + i * 8 : 16 + i * 8]
+    name = raw[:7].decode("ascii", "replace").rstrip()
+    if name.startswith("!"):
+        continue
+    meta = ssd[0x108 + i * 8 : 0x110 + i * 8]
+    load = meta[0] | (meta[1] << 8) | ((meta[6] & 0x0C) << 14)
+    length = meta[4] | (meta[5] << 8) | ((meta[6] & 0x30) << 12)
+    end = load + length
+    print(f"{name} DFS load={load:#x} len={length} end={end:#x} room_7c00={himem - end}")
+    if end > himem:
+        bad.append(name)
+if bad:
+    raise SystemExit("DFS image past HIMEM &7C00 (Bad program): " + ", ".join(bad))
+PY
 
 echo "packed $SSD"
-echo "On the emulator: *CAT then *RUN INVADER (Shift-Break boots !BOOT)."
+echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO."

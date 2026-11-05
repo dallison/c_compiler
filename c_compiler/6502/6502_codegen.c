@@ -2105,7 +2105,12 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
         }
       
       case W65C02_OP(symbol): {
-        if (!put_in_zero_page && (inst->flags & k6502NeedAddress) == 0) {
+        // Ordinary scalar / function uses keep the absolute symbol.  Only
+        // addressof and aggregate decay need a materialized pointer — and
+        // never a sticky NeedAddress flag on the shared symbol (that used
+        // to poison later value loads after &global).
+        if (!put_in_zero_page && node->opcode != IR_OP(addressof) &&
+            !TypeIsArray(node->type) && !TypeIsStructOrUnion(node->type)) {
           return inst;
         }
         // lda symbol+0
@@ -2119,8 +2124,7 @@ static TargetInstruction* Materialize(W65C02Generator* g, IRNode* node, int size
             TypeIsFunction(node->type) ||
             TypeIsFunction(symbol->symbol->type) ||
             TypeIsStructOrUnion(node->type) ||
-            node->opcode == IR_OP(addressof) ||
-            (inst->flags & k6502NeedAddress) != 0) {
+            node->opcode == IR_OP(addressof)) {
           mode = kAddrModeSymbolAddr;
         }
         bool materializing_address = mode == kAddrModeSymbolAddr;
@@ -2201,11 +2205,12 @@ static TargetInstruction* GetAddress(W65C02Generator* g, IRNode* addr_node, bool
       result = TempRegister(g, addr_node->type, 2);
       Copy(g, result, addr, 0, 0, 2, GetAddrMode(result), kAddrModeSymbolAddr);
      
+      // Indirect through the pointer for scalar values.  ZeroPage (pointer
+      // bits as the value) only when the node itself is an address / decay.
       AddressingMode mode = kAddrModeIndirectIndexed;
       if (TypeIsArray(addr_node->type) || TypeIsFunction(addr_node->type) ||
           TypeIsStructOrUnion(addr_node->type) ||
-          addr_node->opcode == IR_OP(addressof) ||
-          (addr->flags & k6502NeedAddress) != 0) {
+          addr_node->opcode == IR_OP(addressof)) {
         mode = kAddrModeZeroPage;
       }
       SetAddrMode(result, mode);
@@ -5707,7 +5712,8 @@ static TargetInstruction* Push(W65C02Generator* g, IRNode* node, int size) {
           TargetSymbol* symbol = (TargetSymbol*)lowered;
           if (TypeIsArray(node->type) || TypeIsFunction(node->type) ||
               TypeIsFunction(symbol->symbol->type) ||
-              (lowered->flags & k6502NeedAddress) != 0) {
+              node->opcode == IR_OP(addressof) ||
+              TypeIsStructOrUnion(node->type)) {
             // Keep symbolic addresses in X:Y through the push instead of
             // copying them through a temporary zero-page register.
             GetAddressXY(g, node);
@@ -6636,12 +6642,21 @@ static TargetInstruction* AddressOfVariable(W65C02Generator* g, IRNode* node, IR
 
 
 static TargetInstruction* AddressOfStaticVariable(W65C02Generator* g, IRNode* node, IRNode* var) {
-  TargetInstruction* result = GetAddress(g, var, false);
+  // Materialize into a distinct temp.  Never set k6502NeedAddress on the
+  // shared symbol instruction: that flag is sticky and later value uses of
+  // the same global (friction(&v); x += v) would then widen the address
+  // bytes instead of loading v.
+  TargetInstruction* sym = GetAddress(g, var, false);
+  TargetInstruction* result;
   if (node->dest != NULL) {
-    TargetInstruction* dest = GetAddress(g, node->dest, true);
-    Copy(g, dest, result, 0, 0, 2, GetAddrMode(dest), kAddrModeSymbolAddr);
-    AddSpillPoint(g, dest);
-    result = dest;
+    result = GetAddress(g, node->dest, true);
+  } else {
+    result = TempRegister(g, NewPointerTo(kQualPlain, var->type), 2);
+  }
+  Copy(g, result, sym, 0, 0, 2, GetAddrMode(result), kAddrModeSymbolAddr);
+  AddSpillPoint(g, result);
+  if (node->dest == NULL) {
+    SetAddrMode(result, kAddrModeZeroPage);
   }
   result->flags |= k6502NeedAddress;
   return SetLoweredNode(node, result);
