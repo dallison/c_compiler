@@ -535,6 +535,7 @@ cc_library(
         "c_compiler/util/bitset.c",
         "c_compiler/util/buffer.c",
         "c_compiler/util/config.c",
+        "c_compiler/util/cxx_demangle.c",
         "c_compiler/util/dstring.c",
         "c_compiler/util/hashtable.c",
         "c_compiler/util/list.c",
@@ -642,6 +643,14 @@ cc_library(
     ],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
+)
+
+cc_test(
+    name = "cxx_demangle_test",
+    srcs = ["tests/cxx_demangle_test.c"],
+    copts = COMMON_COPTS,
+    includes = COMMON_INCLUDES,
+    deps = [":utils"],
 )
 
 cc_test(
@@ -1466,9 +1475,8 @@ cc_binary(
     srcs = ["6502dasm/main.c"],
     copts = COMMON_COPTS,
     deps = [
-        ":6502_lib",
+        ":disassembler",
         ":elf",
-        ":loader",
         ":utils",
     ],
 )
@@ -4715,7 +4723,6 @@ sh_test(
         "$(rootpath :6502asm)",
         "$(rootpath :6502dasm)",
         "$(rootpath :elfdump)",
-        "$(rootpath :davecc)",
     ],
     data = [
         ":6502asm",
@@ -4724,7 +4731,6 @@ sh_test(
         ":aarch64dasm",
         ":armasm",
         ":armdasm",
-        ":davecc",
         ":elfdump",
         ":riscvdasm",
         ":rvasm",

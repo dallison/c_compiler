@@ -87,6 +87,7 @@ davecc_library(davecc_utils
   c_compiler/util/bitset.c
   c_compiler/util/buffer.c
   c_compiler/util/config.c
+  c_compiler/util/cxx_demangle.c
   c_compiler/util/dstring.c
   c_compiler/util/hashtable.c
   c_compiler/util/list.c
@@ -581,7 +582,7 @@ davecc_executable(davecc_6502asm_bin 6502asm 6502asm/main.c)
 target_link_libraries(davecc_6502asm_bin PRIVATE davecc_compiler davecc_elf davecc_linker davecc_loader davecc_utils)
 
 davecc_executable(davecc_6502dasm_bin 6502dasm 6502dasm/main.c)
-target_link_libraries(davecc_6502dasm_bin PRIVATE davecc_6502_lib davecc_elf davecc_loader davecc_utils)
+target_link_libraries(davecc_6502dasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)
 
 davecc_executable(davecc_riscvdasm_bin riscvdasm riscvdasm/main.c)
 target_link_libraries(davecc_riscvdasm_bin PRIVATE davecc_disassembler davecc_elf davecc_utils)

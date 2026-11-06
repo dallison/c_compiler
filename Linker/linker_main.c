@@ -97,7 +97,11 @@ String* Link(int argc, char** argv) {
             fprintf(stderr, "-chdir needs a dir\n");
             break;
           }
-          chdir(argv[i]);
+          if (chdir(argv[i]) != 0) {
+            fprintf(stderr, "cannot chdir to %s: %s\n", argv[i],
+                    strerror(errno));
+            break;
+          }
           option_ok = true;
       } else if (strcmp(argv[i], "-origin") == 0) {
         i++;

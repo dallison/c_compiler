@@ -13,7 +13,6 @@ x86_64dasm=$8
 asm6502=$9
 dasm6502=${10}
 elfdump=${11}
-davecc=${12}
 
 work=${TEST_TMPDIR:-$(mktemp -d)}
 mkdir -p "$work"
@@ -92,22 +91,6 @@ run_shared_case() {
   done
 }
 
-run_6502_case() {
-  local case_name=$1
-  local src=$2
-  shift 2
-  local obj="$work/6502-$case_name.o"
-  local exe="$work/6502-$case_name.exe"
-  local dis="$work/6502-$case_name.dis"
-
-  "$asm6502" "$src" -o "$obj"
-  "$davecc" -target 6502 -static -nostdlib -Wl,-e -Wl,_start \
-    "$obj" -o "$exe"
-  "$dasm6502" "$exe" 0 256 >"$dis"
-  for pattern in "$@"; do
-    assert_has "6502" "$case_name" "$dis" "$pattern"
-  done
-}
 
 cat >"$work/riscv.s" <<'EOF'
 .text
@@ -712,8 +695,8 @@ c02_external:
 
 EOF
 
-run_6502_case full "$work/6502.s" \
-  'brk' 'bpl' 'bmi' 'bvc' 'bvs' 'bcc' 'bcs' 'bne' 'beq' 'bra' 'jsr' \
+run_shared_case 6502 full "$asm6502" "$dasm6502" "$work/6502.s" \
+  '^_start:' 'brk' 'bpl' 'bmi' 'bvc' 'bvs' 'bcc' 'bcs' 'bne' 'beq' 'bra' 'jsr' \
   'jmp' 'rti' 'rts' 'lda' 'ldx' 'ldy' 'sta' 'stx' 'sty' 'cmp' 'cpy' \
   'cpx' 'bit' 'ora' 'and' 'eor' 'adc' 'sbc' 'asl' 'rol' 'lsr' 'ror' \
   'dec' 'inc' 'dey' 'dex' 'iny' 'inx' 'php' 'clc' 'plp' 'sec' 'pha' \

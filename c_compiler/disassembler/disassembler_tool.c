@@ -12,7 +12,7 @@
 
 static void Usage(FILE* fp, const char* tool_name, DAsmArchitecture arch) {
   fprintf(fp,
-          "usage: %s [--help] [--all] filename [addr [length]]\n"
+          "usage: %s [--help] [--all] [-C|--demangle] filename [addr [length]]\n"
           "\n"
           "Disassemble executable sections from a %s ELF file.\n"
           "\n"
@@ -23,7 +23,8 @@ static void Usage(FILE* fp, const char* tool_name, DAsmArchitecture arch) {
           "\n"
           "Options:\n"
           "  -h, --help     Show this help message\n"
-          "  --all          Print section names before disassembly\n",
+          "  --all          Print section names before disassembly\n"
+          "  -C, --demangle Demangle DaveCC C++ symbol names\n",
           tool_name, DAsmArchitectureName(arch));
 }
 
@@ -32,6 +33,7 @@ int DAsmToolMain(int argc, const char** argv, DAsmArchitecture arch,
   DAsmOptions options = {
       .arch = arch,
       .print_section_names = false,
+      .demangle = false,
   };
   const char* filename = NULL;
   int positional = 0;
@@ -43,6 +45,10 @@ int DAsmToolMain(int argc, const char** argv, DAsmArchitecture arch,
     }
     if (strcmp(argv[i], "--all") == 0) {
       options.print_section_names = true;
+      continue;
+    }
+    if (strcmp(argv[i], "-C") == 0 || strcmp(argv[i], "--demangle") == 0) {
+      options.demangle = true;
       continue;
     }
     if (argv[i][0] == '-') {

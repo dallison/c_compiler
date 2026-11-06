@@ -411,8 +411,12 @@ ARFile* ARFileCopyFromArchive(ARFile* file, FILE* fp) {
   // Allocate space for contents and populate it from the original archive
   // file.
   new_file->contents = malloc(new_file->size);
-  fseek(fp, file->file_offset, SEEK_SET);
-  fread(new_file->contents, 1, new_file->size, fp);
+  if (fseek(fp, file->file_offset, SEEK_SET) != 0 ||
+      (new_file->size > 0 &&
+       fread(new_file->contents, 1, new_file->size, fp) != new_file->size)) {
+    ARFileDelete(new_file);
+    return NULL;
+  }
   new_file->delete_contents = true;
   return new_file;
 }
@@ -778,6 +782,9 @@ void ARArchiveBuilderCopyArchive(ARArchiveBuilder* to, ARArchive* from, FILE* fp
        continue;
      }
     ARFile* to_file = ARFileCopyFromArchive(from_file, fp);
+    if (to_file == NULL) {
+      continue;
+    }
     ARArchiveBuilderAddExisingFile(to, to_file);
     
     // Add mapping from from_file to to_file for symbol conversion.

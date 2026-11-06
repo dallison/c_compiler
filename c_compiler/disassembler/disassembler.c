@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cxx_demangle.h"
 #include "dstring.h"
 
 void DAsmInitInstruction(DAsmInstruction* inst, const void* bytes,
@@ -195,65 +196,74 @@ bool DAsmDisassembleInstruction(DAsmArchitecture arch, const void* bytes,
 }
 
 static const char* FindRelocationName(const DAsmOptions* options,
-                                      uint64_t address) {
+                                      uint64_t address, uint32_t shndx) {
   if (options == NULL || options->relocations == NULL) {
     return NULL;
   }
   for (size_t i = 0; i < options->num_relocations; i++) {
-    if (options->relocations[i].address == address &&
-        options->relocations[i].name != NULL &&
-        options->relocations[i].name[0] != '\0') {
-      return options->relocations[i].name;
+    const DAsmRelocation* reloc = &options->relocations[i];
+    if (reloc->address == address && reloc->shndx == shndx &&
+        reloc->name != NULL && reloc->name[0] != '\0') {
+      return reloc->name;
     }
   }
   return NULL;
 }
 
-static const char* FindSymbolName(const DAsmOptions* options,
-                                  uint64_t address) {
+static bool SymbolInSection(const DAsmSymbol* symbol, uint32_t shndx) {
+  return symbol != NULL && symbol->shndx == shndx;
+}
+
+static const char* FindSymbolName(const DAsmOptions* options, uint64_t address,
+                                  uint32_t shndx) {
   if (options == NULL || options->symbols == NULL) {
     return NULL;
   }
   for (size_t i = 0; i < options->num_symbols; i++) {
-    if (options->symbols[i].address == address &&
-        options->symbols[i].name != NULL && options->symbols[i].name[0] != '\0') {
-      return options->symbols[i].name;
+    const DAsmSymbol* symbol = &options->symbols[i];
+    if (symbol->address == address && SymbolInSection(symbol, shndx) &&
+        symbol->name != NULL && symbol->name[0] != '\0') {
+      return symbol->name;
     }
   }
   return NULL;
 }
 
 static bool IsFunctionLabel(const DAsmOptions* options, uint64_t address,
-                            size_t index) {
+                            uint32_t shndx, size_t index) {
   if (options == NULL || options->symbols == NULL ||
       index >= options->num_symbols) {
     return false;
   }
-  return options->symbols[index].is_function &&
-         options->symbols[index].address == address &&
-         options->symbols[index].name != NULL &&
-         options->symbols[index].name[0] != '\0';
+  const DAsmSymbol* symbol = &options->symbols[index];
+  return symbol->is_function && symbol->address == address &&
+         SymbolInSection(symbol, shndx) && symbol->name != NULL &&
+         symbol->name[0] != '\0';
 }
 
 static void PrintFunctionLabels(FILE* fp, const DAsmOptions* options,
-                                uint64_t address) {
+                                uint64_t address, uint32_t shndx) {
   if (options == NULL || options->symbols == NULL) {
     return;
   }
   for (size_t i = 0; i < options->num_symbols; i++) {
-    if (!IsFunctionLabel(options, address, i)) {
+    if (!IsFunctionLabel(options, address, shndx, i)) {
       continue;
     }
     bool duplicate = false;
     for (size_t j = 0; j < i; j++) {
-      if (IsFunctionLabel(options, address, j) &&
+      if (IsFunctionLabel(options, address, shndx, j) &&
           strcmp(options->symbols[j].name, options->symbols[i].name) == 0) {
         duplicate = true;
         break;
       }
     }
     if (!duplicate) {
-      fprintf(fp, "%s:\n", options->symbols[i].name);
+      char demangled[512];
+      const char* name =
+          CXXFormatSymbol(options->symbols[i].name, options->demangle,
+                          demangled, sizeof(demangled));
+      fprintf(fp, "%s:\n", name);
     }
   }
 }
@@ -286,13 +296,17 @@ static void ReplaceLastHexTarget(DAsmInstruction* inst, const char* name) {
 }
 
 static void SymbolizeInstruction(DAsmInstruction* inst,
-                                 const DAsmOptions* options) {
-  const char* name = FindRelocationName(options, inst->address);
+                                 const DAsmOptions* options, uint32_t shndx) {
+  const char* name = FindRelocationName(options, inst->address, shndx);
   if (name == NULL && inst->has_target_address) {
-    name = FindSymbolName(options, inst->target_address);
+    name = FindSymbolName(options, inst->target_address, shndx);
   }
   if (name != NULL) {
-    ReplaceLastHexTarget(inst, name);
+    char demangled[512];
+    const char* printed =
+        CXXFormatSymbol(name, options != NULL && options->demangle, demangled,
+                        sizeof(demangled));
+    ReplaceLastHexTarget(inst, printed);
   }
 }
 
@@ -321,7 +335,7 @@ static bool AddressInRange(uint64_t addr, const DAsmOptions* options) {
 }
 
 static void DisassembleBytes(DAsmArchitecture arch, const unsigned char* bytes,
-                             size_t length, uint64_t address,
+                             size_t length, uint64_t address, uint32_t shndx,
                              const DAsmOptions* options, FILE* fp) {
   size_t offset = 0;
   while (offset < length) {
@@ -330,7 +344,7 @@ static void DisassembleBytes(DAsmArchitecture arch, const unsigned char* bytes,
       offset++;
       continue;
     }
-    PrintFunctionLabels(fp, options, pc);
+    PrintFunctionLabels(fp, options, pc, shndx);
     DAsmInstruction inst;
     if (!DAsmDisassembleInstruction(arch, bytes + offset, length - offset, pc,
                                     &inst) ||
@@ -338,7 +352,7 @@ static void DisassembleBytes(DAsmArchitecture arch, const unsigned char* bytes,
       DAsmInitInstruction(&inst, bytes + offset, length - offset, pc, 1);
       DAsmUnknownInstruction(&inst, ".byte 0x%02" PRIx64, inst.bytes[0]);
     }
-    SymbolizeInstruction(&inst, options);
+    SymbolizeInstruction(&inst, options, shndx);
     DAsmPrintInstruction(fp, &inst);
     offset += inst.size;
   }
@@ -364,6 +378,12 @@ static void CollectSymbols(ELFReaderFile* elf, Vector* symbols) {
       if (elf_sym.name == 0) {
         continue;
       }
+      // Skip undefined / absolute / common symbols for labels.  Undefined
+      // names still appear via relocations when symbolizing operands.
+      if (elf_sym.shndx == 0 || elf_sym.shndx == SHN_ABS ||
+          elf_sym.shndx == SHN_COM || elf_sym.shndx >= SHN_LORESERVE) {
+        continue;
+      }
       int type = ELF_ST_TYPE(elf_sym.info);
       if (type == STT(section) || type == STT(file)) {
         continue;
@@ -371,6 +391,7 @@ static void CollectSymbols(ELFReaderFile* elf, Vector* symbols) {
       DAsmSymbol* dasm_sym = malloc(sizeof(*dasm_sym));
       dasm_sym->address = elf_sym.value;
       dasm_sym->name = (const char*)strtab->contents + elf_sym.name;
+      dasm_sym->shndx = elf_sym.shndx;
       dasm_sym->is_function = type == STT(func);
       VectorAppend(symbols, dasm_sym);
     }
@@ -421,6 +442,7 @@ static void CollectRelocations(ELFReaderFile* elf, Vector* relocations) {
       DAsmRelocation* dasm_rel = malloc(sizeof(*dasm_rel));
       dasm_rel->address = target_section->header->addr + elf_rel.offset;
       dasm_rel->name = (const char*)strtab->contents + elf_sym.name;
+      dasm_rel->shndx = reltab->header->info;
       VectorAppend(relocations, dasm_rel);
     }
   }
@@ -476,21 +498,18 @@ bool DAsmDisassembleELF(ELFReaderFile* elf, const DAsmOptions* options,
     elf_options.num_relocations = relocations.length;
   }
 
-  Vector code_sections;
-  VectorInit(&code_sections);
-  ELFReaderFileFindSectionsByType(elf, SHT(progbits), &code_sections);
-  for (size_t i = 0; i < code_sections.length; i++) {
-    ELFReaderSection* section = code_sections.value.p[i];
-    if ((section->header->flags & SHF(execinstr)) == 0) {
+  for (size_t i = 0; i < elf->sections.length; i++) {
+    ELFReaderSection* section = elf->sections.value.p[i];
+    if (section->header->type != SHT(progbits) ||
+        (section->header->flags & SHF(execinstr)) == 0) {
       continue;
     }
     if (options != NULL && options->print_section_names) {
       fprintf(fp, "%s:\n", section->name.value);
     }
     DisassembleBytes(arch, section->contents, (size_t)section->header->size,
-                     section->header->addr, &elf_options, fp);
+                     section->header->addr, (uint32_t)i, &elf_options, fp);
   }
-  VectorDestruct(&code_sections);
   FreePointerVector(&symbols);
   FreePointerVector(&relocations);
   free(symbol_array);

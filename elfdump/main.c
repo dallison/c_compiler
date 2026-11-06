@@ -12,8 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
+#include "cxx_demangle.h"
 #include "disassembler.h"
 #include "elf_reader.h"
+
+static bool g_demangle = false;
 
 static void Usage(FILE* fp, const char* program_name) {
   fprintf(fp,
@@ -30,6 +33,7 @@ static void Usage(FILE* fp, const char* program_name) {
           "  -r               Print relocations\n"
           "  -d               Print dynamic section\n"
           "  -c               Disassemble code sections\n"
+          "  -C, --demangle   Demangle DaveCC C++ symbol names\n"
           "  -x SECTION       Hex dump section number SECTION\n"
           "  -a               Print all standard sections\n",
           program_name);
@@ -321,9 +325,12 @@ static void PrintSymbol(ELFReaderFile* elf,
     }
   }
   
+  char demangled[512];
+  const char* printed =
+      CXXFormatSymbol(sym_name, g_demangle, demangled, sizeof(demangled));
   printf("%3zd: %08" PRIx64 " %5" PRId64 " %-8s %-6s %-8s(%d) %s\n", index,
          sym->value, sym->size,
-         type, bind, section_name, sym->shndx, sym_name);
+         type, bind, section_name, sym->shndx, printed);
   
 }
 
@@ -670,9 +677,11 @@ static void PrintRelocation(ELFReaderFile* elf, size_t i, ELFRelocation* reloc,
     StringInit(&sym_name, string_table_address + elf_sym->name);
   }
   ELFReaderSection* target_section = elf->sections.value.p[target_section_index];
+  char demangled[512];
+  const char* printed =
+      CXXFormatSymbol(sym_name.value, g_demangle, demangled, sizeof(demangled));
   printf("%3zd: %-8s %08" PRIx64 " %-24s %-16s\t", i, target_section->name.value,
-         reloc->offset, type.value,
-         sym_name.value);
+         reloc->offset, type.value, printed);
   if (addend != 0) {
     printf(" + %" PRId64 "", addend);
   }
@@ -749,6 +758,7 @@ static void Disassemble(ELFReaderFile* elf) {
   DAsmOptions options = {
       .arch = kDAsmUnknown,
       .print_section_names = true,
+      .demangle = g_demangle,
   };
   DAsmDisassembleELF(elf, &options, stdout);
 }
@@ -1133,50 +1143,60 @@ int main(int argc, const char * argv[]) {
       Usage(stdout, program_name);
       return 0;
     }
+    if (strcmp(argv[i], "--demangle") == 0) {
+      g_demangle = true;
+      continue;
+    }
     if (argv[i][0] == '-') {
-      // Flags here.
-      switch (argv[i][1]) {
-        case 'h':
-          Usage(stdout, program_name);
-          return 0;
-        case 'H':
-          command = kHeader;
-          break;
-        case 'S':
-          command = kSections;
-          break;
-        case 's':
-          command = kSymbols;
-          break;
-        case 'l':
-          command = kSegments;
-          break;
-        case 'r':
-           command = kRelocations;
-           break;
-        case 'd':
-           command = kDynamic;
-           break;
-        case 'c':
-           command = kDisassemble;
-           break;
-        case 'x':
-          command = kHexDump;
-          i++;
-          if (i >= argc) {
-            fprintf(stderr, "elfdump: -x needs a section number\n\n");
+      // Flags here.  Multi-letter short flags may combine (-Cs).
+      const char* flags = argv[i] + 1;
+      for (size_t fi = 0; flags[fi] != '\0'; fi++) {
+        switch (flags[fi]) {
+          case 'h':
+            Usage(stdout, program_name);
+            return 0;
+          case 'H':
+            command = kHeader;
+            break;
+          case 'S':
+            command = kSections;
+            break;
+          case 's':
+            command = kSymbols;
+            break;
+          case 'l':
+            command = kSegments;
+            break;
+          case 'r':
+             command = kRelocations;
+             break;
+          case 'd':
+             command = kDynamic;
+             break;
+          case 'c':
+             command = kDisassemble;
+             break;
+          case 'C':
+             g_demangle = true;
+             break;
+          case 'x':
+            command = kHexDump;
+            i++;
+            if (i >= argc) {
+              fprintf(stderr, "elfdump: -x needs a section number\n\n");
+              Usage(stderr, program_name);
+              return 1;
+            }
+            command_arg = atoi(argv[i]);
+            break;
+          case 'a':
+            command = kAll;
+            break;
+          default:
+            fprintf(stderr, "elfdump: unknown option '-%c'\n\n", flags[fi]);
             Usage(stderr, program_name);
             return 1;
-          }
-          command_arg = atoi(argv[i]);
-          break;
-        case 'a':
-          command = kAll;
-          break;
-        default:
-          fprintf(stderr, "elfdump: unknown option '%s'\n\n", argv[i]);
-          Usage(stderr, program_name);
-          return 1;
+        }
       }
     } else {
       if (filename.length != 0) {

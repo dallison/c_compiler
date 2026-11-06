@@ -110,23 +110,18 @@ other preprocessor flags go through the same option parser as `davecc`.
 
 These print executable sections. Addresses accept decimal or `0x`.
 
-Shared CLI (`riscvdasm`, `aarch64dasm`, `armdasm`, `x86_64dasm`,
+Shared CLI (`6502dasm`, `riscvdasm`, `aarch64dasm`, `armdasm`, `x86_64dasm`,
 `xtensadasm`, `bpfdasm`, `pcodedasm`):
 
 ```sh
-riscvdasm [--help] [--all] filename [addr [length]]
+riscvdasm [--help] [--all] [-C|--demangle] filename [addr [length]]
 ```
 
-`--all` prints the section name before each block. `addr` is the first
-address to show; `length` is a byte count.
-
-`6502dasm` is older and loader-based:
-
-```sh
-6502dasm filename [addr [length]]
-```
-
-Default range is the full 64 KiB image. No `--help` / `--all`.
+`--all` prints the section name before each block. `-C` / `--demangle`
+pretty-prints DaveCC Itanium-style C++ names (`_ZN4Game4quitEv` →
+`Game::quit()`). `addr` is the first address to show; `length` is a byte
+count. Accepts both relocatable objects (`ET_REL`) and linked executables
+(`ET_EXEC`).
 
 | Binary | ELF machine |
 | --- | --- |
@@ -156,6 +151,7 @@ elfdump [option] filename
 | `-H` | ELF header |
 | `-S` | Sections |
 | `-s` | Symbols |
+| `-C`, `--demangle` | Demangle DaveCC C++ names (with `-s`, `-c`, `-r`, …) |
 | `-l` | Program headers / segments |
 | `-r` | Relocations |
 | `-d` | Dynamic section |

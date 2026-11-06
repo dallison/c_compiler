@@ -665,7 +665,9 @@ void DebuggerLoop(W65C02Interpreter* interpreter) {
     char buf[256];
     printf("6502> ");
     fflush(stdout);
-    fgets(buf, sizeof(buf), stdin);
+    if (fgets(buf, sizeof(buf), stdin) == NULL) {
+      exit(0);
+    }
     const char* p = buf;
     while (isspace(*p) && *p != '\n') {
       p++;

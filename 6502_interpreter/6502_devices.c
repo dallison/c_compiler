@@ -23,7 +23,8 @@ static void ConsoleWrite(Device* dev, uint16_t addr, int v) {
   if (addr == acia->data_addr) {
     char buf[1];
     buf[0] = v & 0xff;
-    write(1, buf, 1);
+    ssize_t n = write(1, buf, 1);
+    (void)n;
   } else if (addr == acia->csr_addr) {
     // Ignore for now.
   }
@@ -33,7 +34,9 @@ static int ConsoleRead(Device* dev, uint16_t addr) {
   ACIADevice* acia = (ACIADevice*)dev;
   if (addr == acia->data_addr) {
     char buf[1];
-    read(0, buf, 1);
+    if (read(0, buf, 1) != 1) {
+      return 0;
+    }
     return buf[0];
   }
   if (addr == acia->csr_addr) {

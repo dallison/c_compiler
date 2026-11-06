@@ -44,12 +44,18 @@ typedef struct {
 typedef struct {
   uint64_t address;
   const char* name;
+  // ELF st_shndx.  Labels and address lookups are scoped to the section
+  // being disassembled so ET_REL function-sections (each at address 0)
+  // do not dump every function name at every section start.
+  uint32_t shndx;
   bool is_function;
 } DAsmSymbol;
 
 typedef struct {
   uint64_t address;
   const char* name;
+  // Section that owns this relocation (ELF section index).
+  uint32_t shndx;
 } DAsmRelocation;
 
 typedef struct {
@@ -59,6 +65,7 @@ typedef struct {
   bool has_start_address;
   bool has_length;
   bool print_section_names;
+  bool demangle;
   const DAsmSymbol* symbols;
   size_t num_symbols;
   const DAsmRelocation* relocations;
