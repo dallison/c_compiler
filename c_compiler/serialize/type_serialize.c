@@ -508,9 +508,12 @@ static TemplateParameter* ReadTemplateParameter(DeserializeContext* ctx,
       case kTParam_has_default_int:
         WireReadBool(in, &p->has_default_int);
         break;
-      case kTParam_default_int_value:
-        WireReadInt64(in, &p->default_int_value);
+      case kTParam_default_int_value: {
+        int64_t v = 0;
+        WireReadInt64(in, &v);
+        p->default_int_value = v;
         break;
+      }
       case kTParam_default_template_parameter_index:
         WireReadInt32(in, &p->default_template_parameter_index);
         break;
@@ -735,9 +738,12 @@ static TemplateArgument* ReadTemplateArgument(DeserializeContext* ctx,
         a->type = (TypeRecord*)SReadRef(ctx, in, kSerialKindType);
         TypeRecordIncRef(a->type);
         break;
-      case kTArg_int_value:
-        WireReadInt64(in, &a->int_value);
+      case kTArg_int_value: {
+        int64_t v = 0;
+        WireReadInt64(in, &v);
+        a->int_value = v;
         break;
+      }
       case kTArg_template_parameter_index:
         WireReadInt32(in, &a->template_parameter_index);
         break;

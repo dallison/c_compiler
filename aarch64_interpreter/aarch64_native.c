@@ -5,13 +5,14 @@
 
 #include "aarch64_native.h"
 
+#include <stdio.h>
+
+#if defined(__aarch64__)
 #include "aarch64_runtime.h"
 
 #include <errno.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
@@ -113,7 +114,6 @@ static bool MakeEntryExecutable(Loader* loader, uint64_t entry_address,
   return true;
 }
 
-#if defined(__aarch64__)
 __attribute__((target("branch-protection=none")))
 static int CallGuestEntry(Loader* loader, uint64_t entry, int argc,
                           char** argv) {

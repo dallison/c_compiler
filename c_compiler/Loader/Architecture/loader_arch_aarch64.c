@@ -64,6 +64,8 @@ static uint32_t EncodeBr(int rn) {
   return 0xD61F0000u | ((uint32_t)rn << 5);
 }
 
+#if !defined(__linux__)
+// Used by BindPltEager on non-Linux hosts to rewrite bl@plt call sites.
 static uint32_t EncodeBlImm(uint64_t pc, uint64_t target) {
   int64_t offset = (int64_t)(target - pc);
   int32_t imm26 = (int32_t)(offset >> 2);
@@ -107,6 +109,7 @@ static void RedirectCallsToPlt(Loader* loader, LoadedDynamicLibrary* lib,
     }
   }
 }
+#endif
 
 static bool SectionLinkedAddress(LoadedDynamicLibrary* lib, const char* name,
                                  uint64_t* linked) {
