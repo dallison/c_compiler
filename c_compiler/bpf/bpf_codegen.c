@@ -1443,10 +1443,14 @@ static TargetInstruction* LowerMemcpy(BPFGenerator* bpf, IRNode* node) {
 
 static TargetInstruction* LowerMemzero(BPFGenerator* bpf, IRNode* node) {
   // memzero names only the destination.  The byte count is the object's size.
+  // Prefer the backing symbol's size, but fall back to the memzero node's type
+  // when the destination is a symbol-less slot (e.g. an sret return location).
+  // tmp/structreturn are IRIsVariable but are plain IRNodes — use
+  // IRGetVariableSymbol rather than casting to IRVariable.
   IRNode* destination_node = node->inputs.value.p[0];
-  IRVariable* variable = (IRVariable*)destination_node;
-  int64_t size = (IRIsVariable(destination_node) && variable->symbol != NULL)
-                     ? variable->symbol->type->size
+  Symbol* symbol = IRGetVariableSymbol(destination_node);
+  int64_t size = (symbol != NULL && symbol->type != NULL)
+                     ? symbol->type->size
                      : (node->type != NULL ? node->type->size : 0);
   TargetInstruction* dest = Materialize(bpf, destination_node);
   if (size <= 0) {

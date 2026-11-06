@@ -21,6 +21,11 @@ def darwin_libc_archive(
             ":davecc",
         ] + support_sources,
         outs = ["libc/" + output],
+        # Host cc -arch arm64 + codesign-style Darwin link; skip on Linux //...
+        target_compatible_with = [
+            "@platforms//cpu:arm64",
+            "@platforms//os:macos",
+        ],
         cmd = """
 set -euo pipefail
 out="$@"

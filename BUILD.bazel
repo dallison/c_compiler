@@ -1136,6 +1136,7 @@ cc_library(
     ],
     includes = COMMON_INCLUDES,
     deps = [
+        ":ar_lib",
         ":disassembler",
         ":elf",
         ":utils",
@@ -1809,13 +1810,21 @@ genrule(
         "aarch64_interpreter/aarch64.entitlements",
     ],
     outs = ["aarch64_signed_bin"],
-    cmd = """
+    # codesign is macOS-only (needed for -n / JIT entitlements there).
+    # On Linux just ship an unsigned copy so //... still builds.
+    cmd = select({
+        "@platforms//os:macos": """
 cp $(location :aarch64) $@
 codesign -s - --options runtime \
   --entitlements $(location aarch64_interpreter/aarch64.entitlements) \
   -f $@
 chmod +x $@
 """,
+        "//conditions:default": """
+cp $(location :aarch64) $@
+chmod +x $@
+""",
+    }),
     executable = True,
 )
 

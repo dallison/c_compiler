@@ -2104,9 +2104,11 @@ static TargetInstruction* LowerMemoryZero(Wasm32Generator* wasm,
   // return slot, carries the size on the memzero node instead.
   assert(node->inputs.length == 1);
   IRNode* destination_node = node->inputs.value.p[0];
-  IRVariable* variable = (IRVariable*)destination_node;
-  int64_t size = (IRIsVariable(destination_node) && variable->symbol != NULL)
-                     ? variable->symbol->type->size
+  // tmp/structreturn are IRIsVariable but are plain IRNodes — use
+  // IRGetVariableSymbol rather than casting to IRVariable.
+  Symbol* symbol = IRGetVariableSymbol(destination_node);
+  int64_t size = (symbol != NULL && symbol->type != NULL)
+                     ? symbol->type->size
                      : (node->type != NULL ? node->type->size : 0);
   if (size <= 0) {
     return NULL;
