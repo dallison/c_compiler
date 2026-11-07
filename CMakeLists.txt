@@ -66,6 +66,9 @@ function(davecc_common_target target)
   if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(${target} PRIVATE -fPIC)
   endif()
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_compile_definitions(${target} PRIVATE _GNU_SOURCE)
+  endif()
 endfunction()
 
 function(davecc_library target)
@@ -120,6 +123,13 @@ davecc_library(davecc_wireformat
 davecc_library(davecc_filesystem_host
   c_compiler/Loader/filesystem_host.c
 )
+
+davecc_library(davecc_posix_host
+  c_compiler/Loader/posix_host.c
+)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(davecc_posix_host PUBLIC rt pthread)
+endif()
 
 davecc_library(davecc_chrono_host
   c_compiler/Loader/chrono_host.c
@@ -449,6 +459,7 @@ target_link_libraries(davecc_6502_lib PUBLIC
   davecc_filesystem_host
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
 )
@@ -466,6 +477,7 @@ target_link_libraries(davecc_risc_v_lib PUBLIC
   davecc_guest_addr_wait
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
   m
@@ -486,6 +498,7 @@ target_link_libraries(davecc_aarch64_lib PUBLIC
   davecc_guest_addr_wait
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
 )
@@ -502,6 +515,7 @@ target_link_libraries(davecc_arm_lib PUBLIC
   davecc_guest_addr_wait
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
   m
@@ -521,6 +535,7 @@ target_link_libraries(davecc_x86_64_lib PUBLIC
   davecc_guest_addr_wait
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
 )
@@ -528,7 +543,7 @@ target_link_libraries(davecc_x86_64_lib PUBLIC
 davecc_library(davecc_xtensa_lib
   xtensa_interpreter/xtensa_interpreter.c
 )
-target_link_libraries(davecc_xtensa_lib PUBLIC davecc_elf davecc_loader davecc_utils davecc_xtensa_isa)
+target_link_libraries(davecc_xtensa_lib PUBLIC davecc_elf davecc_loader davecc_posix_host davecc_utils davecc_xtensa_isa)
 
 davecc_library(davecc_pcode_lib
   p_code_interpreter/p_code_disassembler.c
@@ -542,6 +557,7 @@ target_link_libraries(davecc_pcode_lib PUBLIC
   davecc_filesystem_host
   davecc_linker
   davecc_loader
+  davecc_posix_host
   davecc_random_host
   davecc_utils
 )
@@ -645,7 +661,7 @@ davecc_library(davecc_bpf_lib
   bpf_interpreter/bpf_interpreter.c
 )
 target_include_directories(davecc_bpf_lib PUBLIC bpf_interpreter)
-target_link_libraries(davecc_bpf_lib PUBLIC davecc_elf davecc_linker davecc_loader davecc_utils)
+target_link_libraries(davecc_bpf_lib PUBLIC davecc_elf davecc_linker davecc_loader davecc_posix_host davecc_utils)
 
 davecc_executable(davecc_bpf_bin bpf bpf_interpreter/main.c)
 target_include_directories(davecc_bpf_bin PRIVATE bpf_interpreter)

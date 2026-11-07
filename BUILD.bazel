@@ -1190,6 +1190,13 @@ cc_library(
     ],
     copts = COMMON_COPTS,
     includes = COMMON_INCLUDES,
+    linkopts = select({
+        "@platforms//os:linux": [
+            "-lrt",
+            "-lpthread",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 cc_library(
@@ -1787,7 +1794,7 @@ cc_library(
         "bpf_interpreter/*.h",
     ]) + ["libc/include/davecc_guest_syscalls.h"],
     copts = COMMON_COPTS,
-    includes = COMMON_INCLUDES + ["bpf_interpreter", "libc/include"],
+    includes = COMMON_INCLUDES + ["bpf_interpreter"],
     deps = [
         ":elf",
         ":linker",

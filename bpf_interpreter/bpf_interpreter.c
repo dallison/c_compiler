@@ -9,7 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "davecc_guest_syscalls.h"
+#include "../libc/include/davecc_guest_syscalls.h"
 #include "bpf_machine.h"
 #include "elf.h"
 #include "posix_host.h"
