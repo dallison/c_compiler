@@ -1371,7 +1371,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       assert(inst->operand[0]->reg != NULL);
       if (TargetIsConst(inst->operand[1])) {
         int offset = (int)TargetIntValue(inst->operand[1]);
-        assert(AARCH64IsPossibleImmediate(offset));
+        assert(offset >= -256 && offset <= 0xfff * 16);
         fprintf(fp, "%s, [%s, #%d]\n",
                 GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
                 GetRegisterName(inst->operand[0], kSize64Bit, buf2,
@@ -1416,7 +1416,7 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       assert(inst->operand[1]->reg != NULL);
       if (TargetIsConst(inst->operand[2])) {
         int offset = (int)TargetIntValue(inst->operand[2]);
-        assert(AARCH64IsPossibleImmediate(offset));
+        assert(offset >= -256 && offset <= 0xfff * 16);
         fprintf(fp, "%s, [%s, #%d]\n",
                 GetRegisterName(inst->operand[0], reg_size, buf1,
                                sizeof(buf1)),

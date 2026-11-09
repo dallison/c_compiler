@@ -2024,6 +2024,66 @@ static bool StatementContainsLabel(ASTNode* node) {
   }
 }
 
+// Branches to |target| when |cond| is |when_true|.  A && or || in a statement
+// condition becomes a chain of branches instead of a boolean value, which as a
+// value has to be merged through a stack temporary.
+static bool IsIntegerToBool(ASTNode* node) {
+  switch (node->op) {
+    case AST_OP(i2b):
+    case AST_OP(s2b):
+    case AST_OP(l2b):
+    case AST_OP(ll2b):
+    case AST_OP(c2b):
+      return ((UnaryASTNode*)node)->sub != NULL;
+    default:
+      return false;
+  }
+}
+
+static void GenerateConditionBranch(Generator* gen, ASTNode* cond,
+                                    bool when_true, IRNode* target) {
+  bool branch_form = OptLevel1() && !gen->for_constant_evaluation;
+  if (branch_form && IsIntegerToBool(cond)) {
+    ASTNode* sub = ((UnaryASTNode*)cond)->sub;
+    if (sub->op == AST_OP(logand) || sub->op == AST_OP(logor) ||
+        sub->op == AST_OP(not) || IsIntegerToBool(sub)) {
+      GenerateConditionBranch(gen, sub, when_true, target);
+      return;
+    }
+  }
+  if (branch_form &&
+      (cond->op == AST_OP(logand) || cond->op == AST_OP(logor))) {
+    BinaryASTNode* logical = (BinaryASTNode*)cond;
+    IRSetLocation(cond->location);
+    // The left operand settles the result when it is false for && or true
+    // for ||.
+    bool settles_on = cond->op == AST_OP(logor);
+    if (settles_on == when_true) {
+      GenerateConditionBranch(gen, logical->left, when_true, target);
+      GenerateConditionBranch(gen, logical->right, when_true, target);
+    } else {
+      IRNode* skip = NewIR(IR_OP(label));
+      GenerateConditionBranch(gen, logical->left, settles_on, skip);
+      GenerateConditionBranch(gen, logical->right, when_true, target);
+      GeneratorEmit(gen, skip);
+    }
+    return;
+  }
+  if (branch_form && cond->op == AST_OP(not) &&
+      ((UnaryASTNode*)cond)->sub != NULL &&
+      ((UnaryASTNode*)cond)->sub->type != NULL &&
+      (TypeIsIntegral(((UnaryASTNode*)cond)->sub->type) ||
+       TypeIsPointer(((UnaryASTNode*)cond)->sub->type))) {
+    IRSetLocation(cond->location);
+    GenerateConditionBranch(gen, ((UnaryASTNode*)cond)->sub, !when_true,
+                            target);
+    return;
+  }
+  IRNode* value = GenerateExpression(gen, cond);
+  GeneratorEmit(gen, NewIR2(when_true ? IR_OP(btrue) : IR_OP(bfalse), value,
+                            target));
+}
+
 static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   if (node->is_consteval) {
     bool select_if_part =
@@ -2063,8 +2123,6 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
     return;
   }
   
-  // cond
-  IRNode* cond = GenerateExpression(gen, node->cond);
   IRNode* else_label = NewIR(IR_OP(label));
   IRNode* end_label = NULL;
   if (node->else_part != NULL) {
@@ -2111,22 +2169,22 @@ static void GenerateIfStatement(Generator* gen, IfStatementASTNode* node) {
   if (break_stmt != NULL) {
     // if (cond) { break; } -> if(cond) goto break_label;
     // btrue cond, break_label
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->break_label));
+    GenerateConditionBranch(gen, node->cond, true, gen->break_label);
   } else if (continue_stmt != NULL) {
       // if (cond) { continue; } -> if(cond) goto continue_label;
       // btrue cond, continue_label
-      GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, gen->continue_label));
+      GenerateConditionBranch(gen, node->cond, true, gen->continue_label);
   } else if (goto_stmt != NULL) {
     GotoStatementASTNode* go = (GotoStatementASTNode*)goto_stmt;
     LabelASTNode* label_node = (LabelASTNode*)go->label;
     if (label_node->label == NULL) {
       label_node->label = NewIR(IR_OP(label));
     }
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, label_node->label));
+    GenerateConditionBranch(gen, node->cond, true, label_node->label);
   } else {
     // Regular if (cond) stmt;
     // bfalse cond, else_label
-    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, else_label));
+    GenerateConditionBranch(gen, node->cond, false, else_label);
 
     // if_part
     GenerateStatement(gen, node->if_part);
@@ -2310,10 +2368,9 @@ static void GenerateWhileStatement(Generator* gen,
       // bra continue_label
       // break_label:
       GeneratorEmit(gen, gen->continue_label);
-      IRNode* cond = GenerateExpression(gen, node->cond);
 
       // bfalse cond, break_label
-      GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+      GenerateConditionBranch(gen, node->cond, false, gen->break_label);
 
       // stmt
       GenerateStatement(gen, node->stmt);
@@ -2339,8 +2396,7 @@ static void GenerateWhileStatement(Generator* gen,
       GeneratorEmit(gen, gen->continue_label);
 
       if (const_cond == NULL) {
-        IRNode* cond = GenerateExpression(gen, node->cond);
-        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
+        GenerateConditionBranch(gen, node->cond, true, loop_label);
       } else {
         GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));
       }
@@ -2383,11 +2439,8 @@ static void GenerateDoStatement(Generator* gen,
       // do ... while(false) - no loop back
     }
   } else {
-    // cond
-    IRNode* cond = GenerateExpression(gen, node->cond);
-    
     // btrue cond, loop_label
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
+    GenerateConditionBranch(gen, node->cond, true, loop_label);
   }
 
   // break_label:
@@ -2691,9 +2744,8 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
       GeneratorEmit(gen, loop_label);
       
       if (node->c2 != NULL && !constant_condition) {
-        IRNode* cond = GenerateExpression(gen, node->c2);
         // bfalse cond, break_label
-        GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, gen->break_label));
+        GenerateConditionBranch(gen, node->c2, false, gen->break_label);
       }
     
       // stmt
@@ -2737,9 +2789,8 @@ static void GenerateForStatement(Generator* gen, ForStatementASTNode* node) {
 
       if (node->c2 != NULL && !constant_condition) {
         GeneratorEmit(gen, condition_label);
-        IRNode* cond = GenerateExpression(gen, node->c2);
         // btrue cond, loop_label
-        GeneratorEmit(gen, NewIR2(IR_OP(btrue), cond, loop_label));
+        GenerateConditionBranch(gen, node->c2, true, loop_label);
       } else {
         // bra loop_label
         GeneratorEmit(gen, NewIR1(IR_OP(bra), loop_label));

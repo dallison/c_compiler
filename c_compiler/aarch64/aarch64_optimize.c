@@ -398,30 +398,90 @@ static bool IsFoldableStore(TargetInstruction* inst) {
   }
 }
 
-static bool LoadStoreOffsetInRange(int64_t offset) {
-  return offset >= -256 && offset <= 255;
+// Bytes moved by a load or store, which scales its unsigned offset field.
+// Mirrors the size the program emitter derives for the encoding.
+static int AccessBytes(TargetInstruction* inst) {
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(ldrb):
+    case AARCH64_OP(ldurb):
+    case AARCH64_OP(ldrsb):
+    case AARCH64_OP(ldursb):
+    case AARCH64_OP(strb):
+    case AARCH64_OP(sturb):
+      return 1;
+    case AARCH64_OP(ldrh):
+    case AARCH64_OP(ldurh):
+    case AARCH64_OP(ldrsh):
+    case AARCH64_OP(ldursh):
+    case AARCH64_OP(strh):
+    case AARCH64_OP(sturh):
+      return 2;
+    case AARCH64_OP(ldursw):
+      return 4;
+    default:
+      break;
+  }
+  switch (InstructionSize(inst)) {
+    case kSize128Bit:
+      return 16;
+    case kSize32Bit:
+      return 4;
+    default:
+      return 8;
+  }
 }
 
-static void FoldAddressAdd(AARCH64Generator* generator,
+static bool IsUnscaledOnly(TargetInstruction* inst) {
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(ldur):
+    case AARCH64_OP(ldurb):
+    case AARCH64_OP(ldurh):
+    case AARCH64_OP(ldursb):
+    case AARCH64_OP(ldursh):
+    case AARCH64_OP(ldursw):
+    case AARCH64_OP(stur):
+    case AARCH64_OP(sturb):
+    case AARCH64_OP(sturh):
+      return true;
+    default:
+      return false;
+  }
+}
+
+// The signed 9-bit unscaled form, or the unsigned 12-bit form scaled by the
+// access size.
+static bool LoadStoreOffsetInRange(TargetInstruction* memory, int64_t offset) {
+  if (offset >= -256 && offset <= 255) {
+    return true;
+  }
+  if (IsUnscaledOnly(memory)) {
+    return false;
+  }
+  int bytes = AccessBytes(memory);
+  return offset >= 0 && offset % bytes == 0 && offset / bytes <= 0xfff;
+}
+
+static bool FoldAddressAdd(AARCH64Generator* generator,
                            TargetInstruction* memory,
                            int base_index, int offset_index) {
   TargetInstruction* base = memory->operand[base_index];
   TargetInstruction* offset = memory->operand[offset_index];
   if (!IsAddressAdd(base) || offset == NULL ||
       !AARCH64IsIntConst(offset)) {
-    return;
+    return false;
   }
   int64_t combined =
       (int64_t)AARCH64IntValue(offset) +
       (int64_t)AARCH64IntValue(base->operand[1]);
-  if (!LoadStoreOffsetInRange(combined)) {
-    return;
+  if (!LoadStoreOffsetInRange(memory, combined)) {
+    return false;
   }
   TargetReplaceOperand(memory, base_index, base->operand[0]);
   TargetReplaceOperand(
       memory, offset_index,
       TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, combined));
   TargetBasicBlockRemoveInstruction(&generator->base, base->block, base);
+  return true;
 }
 
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
@@ -433,9 +493,11 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
        inst = prev) {
     prev = TargetPrev(inst);
     if (IsFoldableLoad(inst)) {
-      FoldAddressAdd(generator, inst, 0, 1);
+      while (FoldAddressAdd(generator, inst, 0, 1)) {
+      }
     } else if (IsFoldableStore(inst)) {
-      FoldAddressAdd(generator, inst, 1, 2);
+      while (FoldAddressAdd(generator, inst, 1, 2)) {
+      }
     }
   }
 }

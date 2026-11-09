@@ -371,6 +371,37 @@ static bool IsUnsafeSpillVictim(TargetInstruction* owner, BitSet* reentered) {
 
 static TargetInstruction* InstructionRegisterHolder(TargetInstruction* inst);
 static bool BlockIsLoopHeader(TargetGenerator* gen, TargetBasicBlock* block);
+static AARCH64Register* ScratchRegister(AARCH64RegisterAllocator* allocator,
+                                        AARCH64RegisterType type);
+static AARCH64RegisterType RegisterTypeFromInstruction(TargetInstruction* inst);
+
+// RepairProcessedRead stages a spilled value through the one scratch register,
+// so it cannot fix a read that already stages a different spilled value that
+// way.  Taking the register of a value with such a read leaves the read naming
+// whatever is put in the register next.
+static bool HasUnrepairableProcessedRead(AARCH64RegisterAllocator* allocator,
+                                         TargetInstruction* owner) {
+  AARCH64Register* scratch =
+      ScratchRegister(allocator, RegisterTypeFromInstruction(owner));
+  for (size_t i = 0; i < owner->users.length; i++) {
+    TargetInstruction* user = owner->users.value.p[i];
+    if ((user->flags & TARGET_INST_PROCESSED) == 0 ||
+        (int)user->opcode == (int)AARCH64_OP(spill) ||
+        (int)user->opcode == (int)AARCH64_OP(reload)) {
+      continue;
+    }
+    if (scratch == NULL) {
+      return true;
+    }
+    for (size_t op = 0; op < TARGET_MAX_OPERANDS; op++) {
+      TargetInstruction* other = user->operand[op];
+      if (other != NULL && other != owner && other->reg == &scratch->base) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // Copies of the same pointer can share one physical register while only one
 // of them is the owner.  A processed read in a block we can reenter may name
@@ -421,6 +452,8 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
   TargetBasicBlockReachableAfter(&allocator->g->base, block, &reentered);
   int unsafe_cost = INT_MAX;
   TargetInstruction* unsafe_victim = NULL;
+  int unrepairable_cost = INT_MAX;
+  TargetInstruction* unrepairable_victim = NULL;
   int min_cost = INT_MAX;
   TargetInstruction* victim = NULL;
   int min_var_cost = INT_MAX;
@@ -467,6 +500,13 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
               RegisterNamedByProcessedRead(&allocator->g->base, owner->reg,
                                            &reentered) ||
               shares_register_with_a_value) {
+            if (HasUnrepairableProcessedRead(allocator, owner)) {
+              if (cost < unrepairable_cost) {
+                unrepairable_cost = cost;
+                unrepairable_victim = owner;
+              }
+              continue;
+            }
             if (cost < unsafe_cost) {
               unsafe_cost = cost;
               unsafe_victim = owner;
@@ -491,6 +531,9 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
   BitSetDestruct(&reentered);
   if (victim == NULL) {
     victim = var_victim;
+  }
+  if (unsafe_victim == NULL) {
+    unsafe_victim = unrepairable_victim;
   }
   if (unsafe != NULL) {
     *unsafe = unsafe_victim;

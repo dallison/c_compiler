@@ -6921,11 +6921,24 @@ static IRNode* GenerateToInt(Generator* gen, ASTNode* node, IROpcode op,
 }
 
 static IRNode* ShortenInt(Generator* gen, ASTNode* node, IRNode* sub) {
-  if (TypeIsUnsigned(sub->type)) {
-    return GenerateZeroExtend(gen, node, sub);
-  } else {
+  // Narrowing keeps the low bits.  An unsigned result is zero-extended so the
+  // register holds that unsigned value: `(unsigned short)(base + index)` for
+  // base 0xE100 must stay 0xE10E, not become the sign-extended displacement
+  // 0xFFFFE10E.  A signed result is sign-extended.  Widening that still
+  // reaches this helper follows the source type, as LengthenInt does.
+  int dest_size = node->type != NULL ? node->type->size : 0;
+  int src_size = sub->type != NULL ? sub->type->size : 0;
+  if (dest_size != 0 && dest_size < src_size && !TypeIsBitInt(node->type) &&
+      (sub->type == NULL || !TypeIsBitInt(sub->type))) {
+    if (TypeIsUnsigned(node->type) || TypeIsBool(node->type)) {
+      return GenerateZeroExtend(gen, node, sub);
+    }
     return GenerateSignExtend(gen, sub, node);
   }
+  if (TypeIsUnsigned(sub->type) || TypeIsBool(sub->type)) {
+    return GenerateZeroExtend(gen, node, sub);
+  }
+  return GenerateSignExtend(gen, sub, node);
 }
 
 static IRNode* LengthenInt(Generator* gen, ASTNode* node, IRNode* sub) {

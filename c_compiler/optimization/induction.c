@@ -388,6 +388,35 @@ static IRNode* MaterializeBaseInPreheader(Generator* gen, LoopInfo* loop,
   return EmitBeforeTerminator(gen, loop->preheader, clone);
 }
 
+// SSA renaming locates the variable behind an annotated memory operation by
+// following input 0 through loads, stores and address arithmetic.  Operations
+// further along an address chain, e.g. the load of p[i]->field, can carry the
+// same annotation as the access whose address we rewrote.  Their chains no
+// longer end at that symbol, so drop the annotation from them as well.
+static void ClearDownstreamAnnotations(IRNode* inst, const Symbol* symbol) {
+  if (symbol == NULL) {
+    return;
+  }
+  for (size_t i = 0; i < inst->outputs.length; i++) {
+    IRNode* user = inst->outputs.value.p[i];
+    if ((!IRIsLoad(user) && !IRIsStore(user) &&
+         user->opcode != IR_OP(adda)) ||
+        user->inputs.length == 0 || user->inputs.value.p[0] != inst) {
+      continue;
+    }
+    if (IRIsVarRef(user) && user->var.use == symbol) {
+      user->flags &= ~kIRVarUse;
+    }
+    if (IRIsVarDef(user) && user->var.def == symbol) {
+      user->flags &= ~kIRVarDef;
+    }
+    if (user->block != NULL) {
+      RebuildVariableMetadata(user->block);
+    }
+    ClearDownstreamAnnotations(user, symbol);
+  }
+}
+
 static void StrengthReduceDerivedAddress(
     Generator* gen, LoopInfo* loop, const CanonicalInductionVariable* iv,
     const DerivedAddress* derived) {
@@ -419,7 +448,14 @@ static void StrengthReduceDerivedAddress(
   // following its address expression.  That path now ends at |pointer|, so
   // leave aliasing to the explicit memory operation instead of asking SSA to
   // rename an unrelated symbol through the new address.
+  Symbol* annotated = NULL;
+  if (IRIsVarRef(memory_user)) {
+    annotated = memory_user->var.use;
+  } else if (IRIsVarDef(memory_user)) {
+    annotated = memory_user->var.def;
+  }
   memory_user->flags &= ~(kIRVarUse | kIRVarDef);
+  ClearDownstreamAnnotations(memory_user, annotated);
   GeneratorReplaceInstruction(gen, derived->address, pointer_load);
 
   IRNode* pointer_update = NewIR2(
