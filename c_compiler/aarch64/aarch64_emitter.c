@@ -2779,9 +2779,13 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       return;
     case AARCH64_OP(fmv_s):
     case AARCH64_OP(fmv_d):
-      ProgramMoveTargetRegister(
-          module, dest, inst->operand[0],
-          inst->opcode == (TargetOpcode)AARCH64_OP(fmv_d), true);
+      // A register move onto itself is a no-op (as in the text emitter).
+      if (inst->operand[0] == NULL ||
+          dest != ProgramRegNum(inst->operand[0])) {
+        ProgramMoveTargetRegister(
+            module, dest, inst->operand[0],
+            inst->opcode == (TargetOpcode)AARCH64_OP(fmv_d), true);
+      }
       return;
     case AARCH64_OP(mv):
       if (inst->operand[1] != NULL) {
@@ -2791,7 +2795,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       } else if (TargetIsConst(inst->operand[0])) {
         ProgramMoveImmediate(module, dest, is_64bit,
                              (uint64_t)TargetIntValue(inst->operand[0]));
-      } else {
+      } else if (dest != ProgramRegNum(inst->operand[0])) {
         ProgramMoveTargetRegister(module, dest, inst->operand[0], is_64bit,
                                   ProgramRegIsFP(inst));
       }
@@ -2805,7 +2809,7 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       } else if (TargetIsConst(inst->operand[0])) {
         ProgramMoveImmediate(module, dest, is_64bit,
                              (uint64_t)TargetIntValue(inst->operand[0]));
-      } else {
+      } else if (dest != ProgramRegNum(inst->operand[0])) {
         ProgramMoveTargetRegister(module, dest, inst->operand[0], is_64bit,
                                   ProgramRegIsFP(inst));
       }
@@ -3643,6 +3647,9 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       return;
     case AARCH64_OP(fmov):
       if (ProgramRegIsFP(inst) == ProgramRegIsFP(inst->operand[0])) {
+        if (dest == ProgramRegNum(inst->operand[0])) {
+          return;
+        }
         ProgramMoveRegister(module, dest, ProgramRegNum(inst->operand[0]),
                             is_64bit, true);
       } else {
