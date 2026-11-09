@@ -1072,6 +1072,41 @@ static bool VariableRegisterDeadAfterCopy(AARCH64RegisterAllocator* allocator,
   return true;
 }
 
+// True when some instruction other than the excluded ones holds `reg`
+// with a value that may still be read after this point: it has a user
+// that has not been allocated yet, or it is live out of its own block
+// (read in a successor, possibly across a loop back edge).  Register
+// ownership in this allocator is per-block and approximate across
+// regions, so a register that looks free in this block may still hold a
+// live value on another path through the function.
+static bool RegisterHasOtherLiveHolder(
+    AARCH64RegisterAllocator* allocator, TargetRegister* reg,
+    TargetInstruction* keep1, TargetInstruction* keep2,
+    TargetInstruction* keep3) {
+  for (size_t b = 0; b < allocator->g->base.basic_blocks.length; b++) {
+    TargetBasicBlock* block =
+        VectorGet(&allocator->g->base.basic_blocks, b);
+    for (TargetInstruction* q = block->code; q != NULL; q = TargetNext(q)) {
+      if (q != keep1 && q != keep2 && q != keep3 && q->reg == reg) {
+        if (q->block != NULL &&
+            BitSetContains(&q->block->output_ids, q->id)) {
+          return true;
+        }
+        for (size_t i = 0; i < q->users.length; i++) {
+          TargetInstruction* user = q->users.value.p[i];
+          if (!(user->flags & TARGET_INST_PROCESSED)) {
+            return true;
+          }
+        }
+      }
+      if (q == block->end_code) {
+        break;
+      }
+    }
+  }
+  return false;
+}
+
 // The destination variable already has a register the copy cannot change,
 // but when the copied value is computed in this same block and dies at the
 // copy, its definition can write the variable's register directly instead.
@@ -1151,13 +1186,29 @@ static bool TryRetargetCopySourceDefinition(
   if ((varreg->flags & TARGET_INST_SPILLED) != 0) {
     return false;
   }
-  TargetRegister* target_owner = varreg->reg->owner;
+  TargetInstruction* target_owner = varreg->reg->owner;
   if (target_owner != NULL && target_owner != varreg &&
       target_owner != src && target_owner != definition) {
     return false;
   }
+  // Another value live into this block may share the variable's register
+  // (chosen in a sibling region where it was free) and be read after the
+  // copy; writing the definition into the register here would clobber it.
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != varreg && input != src && input != definition &&
+          input->reg == varreg->reg) {
+        return false;
+      }
+    }
+  }
   if (inst->block != NULL &&
       BitSetContains(&inst->block->output_ids, src->id)) {
+    return false;
+  }
+  if (RegisterHasOtherLiveHolder(allocator, varreg->reg, src, definition,
+                                  varreg)) {
     return false;
   }
   TargetRegister* target = varreg->reg;
@@ -1257,6 +1308,28 @@ static bool TryCoalesceCopyIntoVariableRegister(
   AARCH64Register* reg = (AARCH64Register*)src->reg;
   if (reg->base.reserved) { return false; }
   if (reg->type != RegisterTypeFromInstruction(varreg)) {
+    return false;
+  }
+  // The register must not be another variable's home, nor hold a value
+  // live into this block: the variable keeps it for the rest of the
+  // function, across regions where those owners are still read.
+  for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+    RegisterVariable* variable = allocator->g->var_regs.value.p[i];
+    if (variable->inst != varreg && variable->inst != src &&
+        variable->inst->reg == &reg->base) {
+      return false;
+    }
+  }
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != src && input->reg == &reg->base) {
+        return false;
+      }
+    }
+  }
+  if (RegisterHasOtherLiveHolder(allocator, &reg->base, src, varreg,
+                                  NULL)) {
     return false;
   }
   // The hidden aggregate-result variable has a dedicated register.

@@ -914,6 +914,404 @@ static void AllocateVariableRegister(ARMRegisterAllocator* allocator,
   AssignRegister(allocator, reg, inst);
 }
 
+// The single already-allocated definition of variable register `src`, or
+// NULL when it has none or several.
+static TargetInstruction* VariableRegisterDefinition(
+    ARMRegisterAllocator* allocator, TargetInstruction* src) {
+  TargetInstruction* definition = NULL;
+  int definitions = 0;
+  for (size_t b = 0; b < allocator->g->base.basic_blocks.length; b++) {
+    TargetBasicBlock* block =
+        VectorGet(&allocator->g->base.basic_blocks, b);
+    for (TargetInstruction* p = block->code; p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        definitions++;
+        definition = p;
+        if (!(p->flags & TARGET_INST_PROCESSED)) {
+          return NULL;
+        }
+      }
+      if (p == block->end_code) {
+        break;
+      }
+    }
+  }
+  return definitions == 1 ? definition : NULL;
+}
+
+// True when variable register `src` is dead once `copy` has read it: it has
+// exactly one definition in the function (already allocated, so the copy
+// reads the register that definition wrote), every other user has already
+// been allocated (a user in a successor or in this block later would still
+// be unprocessed; a user that executes again via a back edge makes `src`
+// live out of this block, which the caller rejects), and nothing later in
+// this block reads or rewrites it.
+static bool VariableRegisterDeadAfterCopy(ARMRegisterAllocator* allocator,
+                                          TargetInstruction* copy,
+                                          TargetInstruction* src) {
+  TargetBasicBlock* copy_block = copy->block;
+  TargetInstruction* definition =
+      VariableRegisterDefinition(allocator, src);
+  if (definition == NULL) {
+    return false;
+  }
+  // The defining value shares the variable's register, so its own users
+  // read that register too and must be just as dead.
+  if (copy_block != NULL &&
+      BitSetContains(&copy_block->output_ids, definition->id)) {
+    return false;
+  }
+  for (size_t i = 0; i < src->users.length; i++) {
+    TargetInstruction* user = src->users.value.p[i];
+    if (user != copy && !(user->flags & TARGET_INST_PROCESSED)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < definition->users.length; i++) {
+    TargetInstruction* user = definition->users.value.p[i];
+    if (!(user->flags & TARGET_INST_PROCESSED)) {
+      return false;
+    }
+  }
+  if (copy_block != NULL) {
+    for (TargetInstruction* p = TargetNext(copy); p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        return false;
+      }
+      for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+        if (p->operand[i] == src || p->operand[i] == definition) {
+          return false;
+        }
+      }
+      if (p == copy_block->end_code) {
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+// True when instruction `q` holds its value in `reg`, including the
+// second half of a 128-bit float pair claimed alongside the base.
+static bool InstructionHoldsRegister(TargetInstruction* q,
+                                     TargetRegister* reg) {
+  if (q->reg == NULL || reg == NULL) {
+    return false;
+  }
+  if (q->reg == reg) {
+    return true;
+  }
+  return ARMGetRegisterSize(q) == kSize128Bit &&
+         ((ARMRegister*)q->reg)->type == kARMRegTypeFloat &&
+         ((ARMRegister*)reg)->type == kARMRegTypeFloat &&
+         ((ARMRegister*)q->reg)->base.num + 2 ==
+             ((ARMRegister*)reg)->base.num;
+}
+
+// True when some instruction other than the excluded ones holds `reg`
+// with a value that may still be read after this point: it has a user
+// that has not been allocated yet, or it is live out of its own block
+// (read in a successor, possibly across a loop back edge).  Register
+// ownership in this allocator is per-block and approximate across
+// regions, so a register that looks free in this block may still hold a
+// live value on another path through the function.
+static bool RegisterHasOtherLiveHolder(ARMRegisterAllocator* allocator,
+                                       TargetRegister* reg,
+                                       TargetInstruction* keep1,
+                                       TargetInstruction* keep2,
+                                       TargetInstruction* keep3) {
+  for (size_t b = 0; b < allocator->g->base.basic_blocks.length; b++) {
+    TargetBasicBlock* block =
+        VectorGet(&allocator->g->base.basic_blocks, b);
+    for (TargetInstruction* q = block->code; q != NULL; q = TargetNext(q)) {
+      if (q != keep1 && q != keep2 && q != keep3 &&
+          InstructionHoldsRegister(q, reg)) {
+        if (q->block != NULL &&
+            BitSetContains(&q->block->output_ids, q->id)) {
+          return true;
+        }
+        for (size_t i = 0; i < q->users.length; i++) {
+          TargetInstruction* user = q->users.value.p[i];
+          if (!(user->flags & TARGET_INST_PROCESSED)) {
+            return true;
+          }
+        }
+      }
+      if (q == block->end_code) {
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+// The destination variable already has a register the copy cannot change,
+// but when the copied value is computed in this same block and dies at the
+// copy, its definition can write the variable's register directly instead.
+// Nothing between the definition and the copy may read or write that
+// register (other than the definition's own operands, e.g. `v = v + 1`
+// routed through a temporary), and a call in between requires the register
+// to be callee-saved.
+static bool TryRetargetCopySourceDefinition(
+    ARMRegisterAllocator* allocator, TargetInstruction* inst,
+    TargetInstruction* varreg, TargetInstruction* src) {
+  if (inst->block == NULL) {
+    return false;
+  }
+  TargetInstruction* definition = src;
+  if (ARMIsVarRegister(src)) {
+    if (!VariableRegisterDeadAfterCopy(allocator, inst, src)) {
+      return false;
+    }
+    definition = VariableRegisterDefinition(allocator, src);
+    if (definition == NULL || definition->block != inst->block) {
+      return false;
+    }
+  } else {
+    if (src->block != inst->block || ARMIsFixedRegister(src) ||
+        src->dest != NULL || src->uses != 1 ||
+        (ARMOpcode)src->opcode == ARM_OP(tmp)) {
+      return false;
+    }
+    // A holder whose value is written by another instruction in this block
+    // (the `tmp` staging pattern) computes nothing itself; renaming it
+    // would not rename the actual writer.
+    for (TargetInstruction* p = inst->block->code; p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        return false;
+      }
+      if (p == inst->block->end_code) {
+        break;
+      }
+    }
+  }
+  // Some definitions produce their result in an architecturally fixed
+  // register (call results) or expand later and need a register of their
+  // own (atomics); renaming their destination register would lose it.
+  switch ((ARMOpcode)definition->opcode) {
+    case ARM_OP(bl):
+    case ARM_OP(blr):
+    case ARM_OP(resulti):
+    case ARM_OP(resultf):
+    case ARM_OP(resultd):
+    case ARM_OP(atomic_load):
+    case ARM_OP(atomic_fetch_add):
+    case ARM_OP(atomic_fetch_sub):
+    case ARM_OP(atomic_add_fetch):
+    case ARM_OP(atomic_sub_fetch):
+    case ARM_OP(atomic_compare_exchange_bool):
+    case ARM_OP(atomic_compare_exchange_val):
+    case ARM_OP(atomic_compare_exchange_n):
+      return false;
+    default:
+      break;
+  }
+  if ((definition->flags & TARGET_INST_SPILLED) != 0 ||
+      (src->flags & TARGET_INST_SPILLED) != 0 ||
+      ARMGetRegisterSize(src) == kSize128Bit ||
+      ARMGetRegisterSize(varreg) == kSize128Bit ||
+      ((ARMRegister*)varreg->reg)->type !=
+          RegisterTypeFromInstruction(src)) {
+    return false;
+  }
+  // A spilled variable's register may currently belong to another live
+  // value (the copy would normally be routed through a scratch register
+  // and stored back to the slot).  More generally the register must be
+  // owned by the variable itself, by the source, or by nobody: writing the
+  // definition into a stranger's register would clobber its value.
+  if ((varreg->flags & TARGET_INST_SPILLED) != 0) {
+    return false;
+  }
+  TargetInstruction* target_owner = varreg->reg->owner;
+  if (target_owner != NULL && target_owner != varreg &&
+      target_owner != src && target_owner != definition) {
+    return false;
+  }
+  // Another value live into this block may share the variable's register
+  // (chosen in a sibling region where it was free) and be read after the
+  // copy; writing the definition into the register here would clobber it
+  // before the allocator's displaced-owner spill could preserve it.
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != varreg && input != src && input != definition &&
+          InstructionHoldsRegister(input, varreg->reg)) {
+        return false;
+      }
+    }
+  }
+  if (inst->block != NULL &&
+      BitSetContains(&inst->block->output_ids, src->id)) {
+    return false;
+  }
+  if (RegisterHasOtherLiveHolder(allocator, varreg->reg, src, definition,
+                                  varreg)) {
+    return false;
+  }
+  TargetRegister* target = varreg->reg;
+  bool saved = IsSavedReg((ARMRegister*)target);
+  bool found = false;
+  for (TargetInstruction* p = inst->block->code; p != NULL;
+       p = TargetNext(p)) {
+    if (p == inst) {
+      break;
+    }
+    if (found) {
+      if (InstructionHoldsRegister(p, target) || p->dest == varreg ||
+          (p->dest != NULL && p->dest->reg == target)) {
+        return false;
+      }
+      for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+        TargetInstruction* operand = p->operand[i];
+        if (operand != NULL && operand != src &&
+            InstructionHoldsRegister(operand, target)) {
+          return false;
+        }
+      }
+      ARMOpcode opcode = (ARMOpcode)p->opcode;
+      if (!saved && (opcode == ARM_OP(bl) || opcode == ARM_OP(blr))) {
+        return false;
+      }
+    }
+    if (p == definition) {
+      found = true;
+    }
+    if (p == inst->block->end_code) {
+      break;
+    }
+  }
+  if (!found) {
+    return false;
+  }
+  // The register the definition used to write is abandoned; drop its stale
+  // ownership so a later spill victim search cannot act on this definition
+  // through it (the definition now names the variable's register).
+  TargetRegister* old = src->reg;
+  if (old != target && (old->owner == src || old->owner == definition)) {
+    old->owner = NULL;
+  }
+  definition->reg = target;
+  src->reg = target;
+  target->owner = varreg;
+  return true;
+}
+
+// Record a callee-saved register taken over by a variable so the prologue
+// saves and restores it, mirroring AllocateRegisterWithType.
+static void NoteUsedSavedRegister(ARMRegisterAllocator* allocator,
+                                  ARMRegister* reg) {
+  if (!IsSavedReg(reg)) {
+    return;
+  }
+  if (reg->type == kARMRegTypeFloat) {
+    BitSetInsert(&allocator->used_float_regs, reg->base.num);
+  } else {
+    BitSetInsert(&allocator->used_int_regs, reg->base.num);
+  }
+}
+
+// A pure copy `mov src -> varreg` whose source dies at the copy need not
+// move at all: either the variable takes over the source's register (when
+// it has none yet), or the source's definition is retargeted to write the
+// variable's register directly.  Both are only sound when the source has
+// no other remaining use and is not live out of the block (so no successor,
+// including one reached by a loop back edge, can still read it), when
+// neither side is tied to another variable or a fixed register, and when
+// a register the variable needs preserved across a call is callee-saved.
+static bool TryCoalesceCopyIntoVariableRegister(
+    ARMRegisterAllocator* allocator, TargetInstruction* inst) {
+  ARMOpcode opcode = (ARMOpcode)inst->opcode;
+  if (opcode != ARM_OP(mv) && opcode != ARM_OP(mov) &&
+      opcode != ARM_OP(fmov) && opcode != ARM_OP(fmv_s) &&
+      opcode != ARM_OP(fmv_d)) {
+    return false;
+  }
+  TargetInstruction* varreg = inst->dest;
+  TargetInstruction* src = inst->operand[0];
+  if (varreg == NULL || src == NULL || inst->operand[1] != NULL ||
+      src == varreg) {
+    return false;
+  }
+  if (src->reg == NULL || (src->flags & TARGET_INST_SPILLED) != 0) {
+    return false;
+  }
+  if (varreg->reg != NULL) {
+    if (varreg->reg == src->reg) {
+      return true;
+    }
+    return TryRetargetCopySourceDefinition(allocator, inst, varreg, src);
+  }
+  if (ARMIsFixedRegister(src)) {
+    return false;
+  }
+  if (src->dest != NULL) {
+    return false;
+  }
+  if (ARMIsVarRegister(src) &&
+      !VariableRegisterDeadAfterCopy(allocator, inst, src)) {
+    return false;
+  }
+  if (src->uses != 1) {
+    return false;
+  }
+  if (inst->block != NULL &&
+      BitSetContains(&inst->block->output_ids, src->id)) {
+    return false;
+  }
+  ARMRegister* reg = (ARMRegister*)src->reg;
+  if (reg->base.reserved || ARMGetRegisterSize(src) == kSize128Bit ||
+      ARMGetRegisterSize(varreg) == kSize128Bit ||
+      reg->type != RegisterTypeFromInstruction(varreg)) {
+    return false;
+  }
+  // The register must not be another variable's home, nor hold a value
+  // live into this block: the variable keeps it for the rest of the
+  // function, across regions where those owners are still read.
+  for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+    RegisterVariable* variable = allocator->g->var_regs.value.p[i];
+    if (variable->inst != varreg && variable->inst != src &&
+        variable->inst->reg == &reg->base) {
+      return false;
+    }
+  }
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != src && InstructionHoldsRegister(input, &reg->base)) {
+        return false;
+      }
+    }
+  }
+  if (RegisterHasOtherLiveHolder(allocator, &reg->base, src, varreg,
+                                  NULL)) {
+    return false;
+  }
+  // The hidden aggregate-result variable has a dedicated register.
+  if (reg->type == kARMRegTypeInt &&
+      allocator->g->struct_return_reg >= 0) {
+    for (size_t i = 0; i < allocator->g->var_regs.length; i++) {
+      RegisterVariable* variable = allocator->g->var_regs.value.p[i];
+      if (variable->inst == varreg && !variable->is_fp &&
+          variable->varnum == allocator->g->struct_return_reg) {
+        return false;
+      }
+    }
+  }
+  if ((!CanUseTemp(allocator, inst) || !CanUseTemp(allocator, varreg)) &&
+      !IsSavedReg(reg)) {
+    return false;
+  }
+  varreg->reg = &reg->base;
+  varreg->uses = (int)varreg->users.length;
+  varreg->flags |= TARGET_INST_PROCESSED;
+  reg->base.owner = varreg;
+  NoteUsedSavedRegister(allocator, reg);
+  return true;
+}
+
 static COMPILER_UNUSED void AllocateForRmov(ARMRegisterAllocator* allocator,
                             TargetInstruction* inst) {
   assert(((int)inst->opcode == (int)ARM_OP(mv)) || ((int)inst->opcode == (int)ARM_OP(fmv_s)) ||
@@ -1131,7 +1529,10 @@ static void AllocateRegisterOnce(ARMRegisterAllocator* allocator,
   }
 
   if (inst->dest != NULL) {
-    if (inst->dest->reg == NULL) {
+    if (ARMIsVarRegister(inst->dest) &&
+        TryCoalesceCopyIntoVariableRegister(allocator, inst)) {
+      // Copy coalesced: the destination already names the right register.
+    } else if (inst->dest->reg == NULL) {
       if (ARMIsVarRegister(inst->dest)) {
         // Assignment to a variable register,
         AllocateVariableRegister(allocator, inst->dest);

@@ -855,10 +855,413 @@ static void ReloadSpills(RV32RegisterAllocator* allocator,
 static void EnsureOperandsAllocated(RV32RegisterAllocator* allocator,
                                     TargetInstruction* inst);
 
+// The single already-allocated definition of variable register `src`, or
+// NULL when it has none or several.
+static TargetInstruction* VariableRegisterDefinition(
+    RV32RegisterAllocator* allocator, TargetInstruction* src) {
+  TargetInstruction* definition = NULL;
+  int definitions = 0;
+  for (size_t b = 0; b < allocator->rv->base.basic_blocks.length; b++) {
+    TargetBasicBlock* block =
+        VectorGet(&allocator->rv->base.basic_blocks, b);
+    for (TargetInstruction* p = block->code; p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        definitions++;
+        definition = p;
+        if (!(p->flags & TARGET_INST_PROCESSED)) {
+          return NULL;
+        }
+      }
+      if (p == block->end_code) {
+        break;
+      }
+    }
+  }
+  return definitions == 1 ? definition : NULL;
+}
+
+// True when variable register `src` is dead once `copy` has read it: it has
+// exactly one definition in the function (already allocated, so the copy
+// reads the register that definition wrote), every other user has already
+// been allocated (a user in a successor or in this block later would still
+// be unprocessed; a user that executes again via a back edge makes `src`
+// live out of this block, which the caller rejects), and nothing later in
+// this block reads or rewrites it.
+static bool VariableRegisterDeadAfterCopy(RV32RegisterAllocator* allocator,
+                                          TargetInstruction* copy,
+                                          TargetInstruction* src) {
+  TargetBasicBlock* copy_block = copy->block;
+  TargetInstruction* definition =
+      VariableRegisterDefinition(allocator, src);
+  if (definition == NULL) {
+    return false;
+  }
+  // The defining value shares the variable's register, so its own users
+  // read that register too and must be just as dead.
+  if (copy_block != NULL &&
+      BitSetContains(&copy_block->output_ids, definition->id)) {
+    return false;
+  }
+  for (size_t i = 0; i < src->users.length; i++) {
+    TargetInstruction* user = src->users.value.p[i];
+    if (user != copy && !(user->flags & TARGET_INST_PROCESSED)) {
+      return false;
+    }
+  }
+  for (size_t i = 0; i < definition->users.length; i++) {
+    TargetInstruction* user = definition->users.value.p[i];
+    if (!(user->flags & TARGET_INST_PROCESSED)) {
+      return false;
+    }
+  }
+  if (copy_block != NULL) {
+    for (TargetInstruction* p = TargetNext(copy); p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        return false;
+      }
+      for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+        if (p->operand[i] == src || p->operand[i] == definition) {
+          return false;
+        }
+      }
+      if (p == copy_block->end_code) {
+        break;
+      }
+    }
+  }
+  return true;
+}
+
+// True when some instruction other than the excluded ones holds `reg`
+// with a value that may still be read after this point: it has a user
+// that has not been allocated yet, or it is live out of its own block
+// (read in a successor, possibly across a loop back edge).  Register
+// ownership in this allocator is per-block and approximate across
+// regions, so a register that looks free in this block may still hold a
+// live value on another path through the function.
+static bool RegisterHasOtherLiveHolder(RV32RegisterAllocator* allocator,
+                                       TargetRegister* reg,
+                                       TargetInstruction* keep1,
+                                       TargetInstruction* keep2,
+                                       TargetInstruction* keep3) {
+  for (size_t b = 0; b < allocator->rv->base.basic_blocks.length; b++) {
+    TargetBasicBlock* block =
+        VectorGet(&allocator->rv->base.basic_blocks, b);
+    for (TargetInstruction* q = block->code; q != NULL; q = TargetNext(q)) {
+      if (q != keep1 && q != keep2 && q != keep3 && q->reg == reg) {
+        if (q->block != NULL &&
+            BitSetContains(&q->block->output_ids, q->id)) {
+          return true;
+        }
+        for (size_t i = 0; i < q->users.length; i++) {
+          TargetInstruction* user = q->users.value.p[i];
+          if (!(user->flags & TARGET_INST_PROCESSED)) {
+            return true;
+          }
+        }
+      }
+      if (q == block->end_code) {
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+// The destination variable already has a register the copy cannot change,
+// but when the copied value is computed in this same block and dies at the
+// copy, its definition can write the variable's register directly instead.
+// Nothing between the definition and the copy may read or write that
+// register (other than the definition's own operands, e.g. `v = v + 1`
+// routed through a temporary), and a call in between requires the register
+// to be callee-saved.
+static bool TryRetargetCopySourceDefinition(
+    RV32RegisterAllocator* allocator, TargetInstruction* inst,
+    TargetInstruction* varreg, TargetInstruction* src) {
+  if (inst->block == NULL) {
+    return false;
+  }
+  TargetInstruction* definition = src;
+  if (RV32IsVarRegister(src)) {
+    if (!VariableRegisterDeadAfterCopy(allocator, inst, src)) {
+      return false;
+    }
+    definition = VariableRegisterDefinition(allocator, src);
+    if (definition == NULL || definition->block != inst->block) {
+      return false;
+    }
+  } else {
+    if (src->block != inst->block || RV32IsFixedRegister(src) ||
+        src->dest != NULL || src->uses != 1 ||
+        (RV32Opcode)src->opcode == RV32_OP(tmp)) {
+      return false;
+    }
+    // A holder whose value is written by another instruction in this block
+    // (the `tmp` staging pattern) computes nothing itself; renaming it
+    // would not rename the actual writer.
+    for (TargetInstruction* p = inst->block->code; p != NULL;
+         p = TargetNext(p)) {
+      if (p->dest == src) {
+        return false;
+      }
+      if (p == inst->block->end_code) {
+        break;
+      }
+    }
+  }
+  // Some definitions produce their result in an architecturally fixed
+  // register (call results) or expand later and need a register of their
+  // own (atomics); renaming their destination register would lose it.
+  switch ((RV32Opcode)definition->opcode) {
+    case RV32_OP(call):
+    case RV32_OP(rcall):
+    case RV32_OP(callf):
+    case RV32_OP(rcallf):
+    case RV32_OP(resulti):
+    case RV32_OP(resultf):
+    case RV32_OP(resultd):
+    case RV32_OP(atomic_load):
+    case RV32_OP(atomic_fetch_add):
+    case RV32_OP(atomic_fetch_sub):
+    case RV32_OP(atomic_add_fetch):
+    case RV32_OP(atomic_sub_fetch):
+    case RV32_OP(atomic_compare_exchange_bool):
+    case RV32_OP(atomic_compare_exchange_val):
+    case RV32_OP(atomic_compare_exchange_n):
+      return false;
+    default:
+      break;
+  }
+  if ((definition->flags & TARGET_INST_SPILLED) != 0 ||
+      (src->flags & TARGET_INST_SPILLED) != 0 ||
+      ((RV32Register*)varreg->reg)->type !=
+          RegisterTypeFromInstruction(src)) {
+    return false;
+  }
+  // A spilled variable's register may currently belong to another live
+  // value (the copy would normally be routed through a scratch register
+  // and stored back to the slot).  More generally the register must be
+  // owned by the variable itself, by the source, or by nobody: writing the
+  // definition into a stranger's register would clobber its value.
+  if ((varreg->flags & TARGET_INST_SPILLED) != 0) {
+    return false;
+  }
+  TargetInstruction* target_owner = varreg->reg->owner;
+  if (target_owner != NULL && target_owner != varreg &&
+      target_owner != src && target_owner != definition) {
+    return false;
+  }
+  // Another value live into this block may share the variable's register
+  // (chosen in a sibling region where it was free) and be read after the
+  // copy; writing the definition into the register here would clobber it
+  // before the allocator's displaced-owner spill could preserve it.
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != varreg && input != src && input != definition &&
+          input->reg == varreg->reg) {
+        return false;
+      }
+    }
+  }
+  if (inst->block != NULL &&
+      BitSetContains(&inst->block->output_ids, src->id)) {
+    return false;
+  }
+  if (RegisterHasOtherLiveHolder(allocator, varreg->reg, src, definition,
+                                  varreg)) {
+    return false;
+  }
+  TargetRegister* target = varreg->reg;
+  bool saved = IsSavedReg((RV32Register*)target);
+  bool found = false;
+  for (TargetInstruction* p = inst->block->code; p != NULL;
+       p = TargetNext(p)) {
+    if (p == inst) {
+      break;
+    }
+    if (found) {
+      if (p->reg == target || p->dest == varreg ||
+          (p->dest != NULL && p->dest->reg == target)) {
+        return false;
+      }
+      for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+        TargetInstruction* operand = p->operand[i];
+        if (operand != NULL && operand != src && operand->reg == target) {
+          return false;
+        }
+      }
+      RV32Opcode opcode = (RV32Opcode)p->opcode;
+      if (!saved && (opcode == RV32_OP(call) || opcode == RV32_OP(rcall) ||
+                     opcode == RV32_OP(callf) || opcode == RV32_OP(rcallf))) {
+        return false;
+      }
+    }
+    if (p == definition) {
+      found = true;
+    }
+    if (p == inst->block->end_code) {
+      break;
+    }
+  }
+  if (!found) {
+    return false;
+  }
+  // The register the definition used to write is abandoned; drop its stale
+  // ownership so a later spill victim search cannot act on this definition
+  // through it (the definition now names the variable's register).
+  TargetRegister* old = src->reg;
+  if (old != target && (old->owner == src || old->owner == definition)) {
+    old->owner = NULL;
+  }
+  definition->reg = target;
+  src->reg = target;
+  target->owner = varreg;
+  return true;
+}
+
+// Record a callee-saved register taken over by a variable so the prologue
+// saves and restores it, mirroring AllocateVariableRegister.
+static void NoteUsedSavedRegister(RV32RegisterAllocator* allocator,
+                                  RV32Register* reg) {
+  if (!IsSavedReg(reg)) {
+    return;
+  }
+  if (reg->type == kRV32RegTypeFloat) {
+    BitSetInsert(&allocator->used_float_regs, reg->base.num);
+  } else {
+    BitSetInsert(&allocator->used_int_regs, reg->base.num);
+  }
+}
+
+// A pure copy `mv src -> varreg` whose source dies at the copy need not
+// move at all: either the variable takes over the source's register (when
+// it has none yet), or the source's definition is retargeted to write the
+// variable's register directly.  Both are only sound when the source has
+// no other remaining use and is not live out of the block (so no successor,
+// including one reached by a loop back edge, can still read it), when
+// neither side is tied to another variable or a fixed register, and when
+// a register the variable needs preserved across a call is callee-saved.
+static bool TryCoalesceCopyIntoVariableRegister(
+    RV32RegisterAllocator* allocator, TargetInstruction* inst) {
+  RV32Opcode opcode = (RV32Opcode)inst->opcode;
+  if (opcode != RV32_OP(mv) && opcode != RV32_OP(fmv_s) &&
+      opcode != RV32_OP(fmv_d)) {
+    return false;
+  }
+  TargetInstruction* varreg = inst->dest;
+  TargetInstruction* src = inst->operand[0];
+  if (varreg == NULL || src == NULL || inst->operand[1] != NULL ||
+      src == varreg) {
+    return false;
+  }
+  if (src->reg == NULL || (src->flags & TARGET_INST_SPILLED) != 0) {
+    return false;
+  }
+  if (varreg->reg != NULL) {
+    if (varreg->reg == src->reg) {
+      return true;
+    }
+    return TryRetargetCopySourceDefinition(allocator, inst, varreg, src);
+  }
+  if (RV32IsFixedRegister(src)) {
+    return false;
+  }
+  if (src->dest != NULL) {
+    return false;
+  }
+  if (RV32IsVarRegister(src) &&
+      !VariableRegisterDeadAfterCopy(allocator, inst, src)) {
+    return false;
+  }
+  if (src->uses != 1) {
+    return false;
+  }
+  if (inst->block != NULL &&
+      BitSetContains(&inst->block->output_ids, src->id)) {
+    return false;
+  }
+  RV32Register* reg = (RV32Register*)src->reg;
+  if (reg->base.reserved ||
+      reg->type != RegisterTypeFromInstruction(varreg)) {
+    return false;
+  }
+  // The register must not be another variable's home, nor hold a value
+  // live into this block: the variable keeps it for the rest of the
+  // function, across regions where those owners are still read.
+  for (size_t i = 0; i < allocator->rv->var_regs.length; i++) {
+    RegisterVariable* variable = allocator->rv->var_regs.value.p[i];
+    if (variable->inst != varreg && variable->inst != src &&
+        variable->inst->reg == &reg->base) {
+      return false;
+    }
+  }
+  if (inst->block != NULL) {
+    for (size_t i = 0; i < inst->block->inputs.length; i++) {
+      TargetInstruction* input = inst->block->inputs.value.p[i];
+      if (input != src && input->reg == &reg->base) {
+        return false;
+      }
+    }
+  }
+  if (RegisterHasOtherLiveHolder(allocator, &reg->base, src, varreg,
+                                  NULL)) {
+    return false;
+  }
+  // The hidden aggregate-result variable has a dedicated register.
+  if (reg->type == kRV32RegTypeInt &&
+      allocator->rv->struct_return_reg >= 0) {
+    for (size_t i = 0; i < allocator->rv->var_regs.length; i++) {
+      RegisterVariable* variable = allocator->rv->var_regs.value.p[i];
+      if (variable->inst == varreg &&
+          variable->varnum == allocator->rv->struct_return_reg) {
+        return false;
+      }
+    }
+  }
+  // The return-address register is in this allocator's temporary pool;
+  // a variable must never inherit it (the first call overwrites it).
+  if (reg->type == kRV32RegTypeInt && reg->base.num == RV32_RET_REG) {
+    return false;
+  }
+  // In a function that makes calls, variable registers are normally given
+  // callee-saved registers outright (see AllocateVariableRegister); the
+  // per-value preserved marking is only an approximation, so a variable in
+  // such a function may only inherit a callee-saved register.
+  if ((allocator->rv->base.num_calls > 0 || !CanUseTemp(allocator, inst) ||
+       !CanUseTemp(allocator, varreg)) &&
+      !IsSavedReg(reg)) {
+    return false;
+  }
+  varreg->reg = &reg->base;
+  varreg->uses = (int)varreg->users.length;
+  varreg->flags |= TARGET_INST_PROCESSED;
+  reg->base.owner = varreg;
+  NoteUsedSavedRegister(allocator, reg);
+  return true;
+}
+
 static bool AllocateUsingDest(RV32RegisterAllocator* allocator,
                               TargetInstruction* inst) {
   if (inst->dest == NULL) {
     return false;
+  }
+  // A pure copy into a variable register may be coalesced away entirely;
+  // that decision needs the source's register, so for copies the operands
+  // are reloaded and allocated before the destination (below the usual
+  // order is the other way around).
+  bool operands_ready = false;
+  if (RV32IsVarRegister(inst->dest) &&
+      ((RV32Opcode)inst->opcode == RV32_OP(mv) ||
+       (RV32Opcode)inst->opcode == RV32_OP(fmv_s) ||
+       (RV32Opcode)inst->opcode == RV32_OP(fmv_d)) &&
+      inst->operand[0] != NULL && inst->operand[1] == NULL) {
+    ReloadSpills(allocator, inst);
+    EnsureOperandsAllocated(allocator, inst);
+    operands_ready = true;
+    TryCoalesceCopyIntoVariableRegister(allocator, inst);
   }
   if (inst->dest->reg == NULL) {
     if (RV32IsVarRegister(inst->dest)) {
@@ -903,8 +1306,10 @@ static bool AllocateUsingDest(RV32RegisterAllocator* allocator,
                           inst->dest);
     inst->dest->reg->owner = inst->dest;
   }
-  ReloadSpills(allocator, inst);
-  EnsureOperandsAllocated(allocator, inst);
+  if (!operands_ready) {
+    ReloadSpills(allocator, inst);
+    EnsureOperandsAllocated(allocator, inst);
+  }
   inst->reg = inst->dest->reg;
   if (inst->operand[0] != NULL) {
     inst->operand[0]->uses++;
