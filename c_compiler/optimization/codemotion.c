@@ -89,9 +89,34 @@ static bool UsesVLAStorage(IRNode* inst) {
   return uses_vla;
 }
 
+// `base + small constant` used only as load/store addresses folds into those
+// accesses; hoisting it would occupy a register for the whole loop instead.
+static bool IsFoldedAddressOffset(IRNode* inst) {
+  if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2 ||
+      !IRIsIntConst(inst->inputs.value.p[1])) {
+    return false;
+  }
+  int64_t value = ((IRConstant*)inst->inputs.value.p[1])->value.ivalue;
+  if (value < 0 || value >= 4096 || inst->outputs.length == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < inst->outputs.length; i++) {
+    IRNode* user = inst->outputs.value.p[i];
+    if ((!IRIsLoadOnly(user) && !IRIsStoreOnly(user)) ||
+        user->inputs.length == 0 || user->inputs.value.p[0] != inst ||
+        (user->inputs.length > 1 && user->inputs.value.p[1] == inst)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
                              LoopMemoryEffects effects, Set* moved,
                              IRNode* inst) {
+  if (IsFoldedAddressOffset(inst)) {
+    return false;
+  }
   if (inst->dest != NULL || inst->inputs.length == 0 ||
       IRHasSideEffects(inst) || IRIsVariable(inst) ||
       inst->opcode == IR_OP(literalref) ||

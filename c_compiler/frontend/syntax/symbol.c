@@ -1975,6 +1975,7 @@ Symbol* SymbolClone(Symbol* sym) {
   new_sym->overload_next = NULL;
   new_sym->is_constexpr_representable = sym->is_constexpr_representable;
   new_sym->requires_ast_constexpr = sym->requires_ast_constexpr;
+  new_sym->is_structured_binding_object = sym->is_structured_binding_object;
   new_sym->location = sym->location;
   new_sym->template_parameter_index = sym->template_parameter_index;
   new_sym->namespace_ = sym->namespace_;

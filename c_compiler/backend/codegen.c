@@ -682,6 +682,9 @@ void GeneratorReplaceInstruction(Generator* gen, IRNode* old, IRNode* new) {
 IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
                                 int64_t value) {
   PoolEntry* entry;
+  if (type == NULL) {
+    type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
+  }
   for (size_t i = 0; i < gen->int_constant_pool.length; i++) {
     entry = gen->int_constant_pool.value.p[i];
     if (entry->value.ivalue == value &&
@@ -695,15 +698,7 @@ IRNode* GeneratorGetIntConstant(Generator* gen, TypeRecord* type,
   // No constant found, add a new one.
   entry = malloc(sizeof(PoolEntry));
   entry->value.ivalue = value;
-  if (type != NULL) {
-    entry->type = type->type;
-  } else {
-    entry->type = kTypeInt;
-  }
-  if (type == NULL) {
-    type = NewTypeRecordWithSize(kTypeInt, kQualPlain);
-  }
-
+  entry->type = type->type;
   entry->pooled = GeneratorEmitConstant(gen, NewIntIRConstant(type, value));
   VectorAppend(&gen->int_constant_pool, entry);
   return entry->pooled;
@@ -2276,6 +2271,10 @@ void OptimizeFunctionIR(Generator* gen) {
 
   if (OptLevel2()) {
     StrengthReductionOptimization(gen);
+
+    if (compiler->ir_optimizations.copy_prop) {
+      SSAVariableCopyPropagation(gen);
+    }
 
     if (compiler->ir_optimizations.gvn) {
       GlobalValueNumberingOptimization(gen);

@@ -1078,6 +1078,21 @@ void AppendRangeForTemporaryDestructorStatements(ASTNode* range_decl,
 // none of its temporaries end with the full-expression; keeping a by-value
 // argument alive longer is harmless.  An object constructed on only some
 // evaluation paths is not destroyed.
+// A reference parameter binds a temporary for the full expression of the call,
+// not for the lifetime of the parameter.  After inlining, that parameter is a
+// local reference in the inline_call compound; extending the temporary to that
+// local destroys it again on top of the caller's full-expression destructor.
+static bool DeclIsInlinedReferenceParameter(VariableDeclarationASTNode* decl) {
+  if (decl == NULL || decl->base.parent == NULL ||
+      decl->base.parent->op != AST_OP(decl_list)) {
+    return false;
+  }
+  ASTNode* compound = decl->base.parent->parent;
+  return compound != NULL && compound->op == AST_OP(compound) &&
+         compound->parent != NULL &&
+         compound->parent->op == AST_OP(inline_call);
+}
+
 static void AppendReferenceTemporaryDestructorStatements(
     VariableDeclarationASTNode* decl, Vector* out) {
   Symbol* sym = decl->symbol;
@@ -1085,7 +1100,8 @@ static void AppendReferenceTemporaryDestructorStatements(
       decl->initializer == NULL || StorageIs(sym->storage, STO(static)) ||
       StorageIs(sym->storage, STO(extern)) ||
       StorageIs(sym->storage, STO(thread)) ||
-      StorageIs(sym->storage, STO(typedef))) {
+      StorageIs(sym->storage, STO(typedef)) ||
+      DeclIsInlinedReferenceParameter(decl)) {
     return;
   }
   CXXTemporaryCollection collection;

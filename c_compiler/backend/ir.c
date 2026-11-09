@@ -7,6 +7,7 @@
 //
 
 #include "ir.h"
+#include "basic_block.h"
 #include "compiler.h"
 #include "member_pointer.h"
 #include <assert.h>
@@ -369,12 +370,57 @@ static bool IRWritesVariable(IRNode* inst, IRNode* var) {
           inst->opcode == IR_OP(memzero));
 }
 
+// An argument or local variable whose address is never taken and that is
+// written at most once (before `load`) keeps that value for the rest of the
+// function.
+static bool IRVariableNeverRedefinedAfter(IRNode* load, IRNode* var) {
+  Symbol* symbol = ((IRVariable*)var)->symbol;
+  if (symbol == NULL || symbol->flags.address_taken) {
+    return false;
+  }
+  IRNode* single_store = NULL;
+  for (size_t i = 0; i < var->outputs.length; i++) {
+    IRNode* user = var->outputs.value.p[i];
+    if (IRIsLoadOnly(user) && user->inputs.value.p[0] == var) {
+      continue;
+    }
+    if (var->opcode != IR_OP(argument) && IRIsStoreOnly(user) &&
+        user->inputs.length == 2 && user->inputs.value.p[0] == var &&
+        single_store == NULL) {
+      single_store = user;
+      continue;
+    }
+    return false;
+  }
+  if (single_store == NULL) {
+    return var->opcode == IR_OP(argument);
+  }
+  if (single_store->block == NULL || load->block == NULL) {
+    return false;
+  }
+  if (single_store->block == load->block) {
+    for (IRNode* inst = IRNext(single_store);
+         inst != NULL && inst->block == load->block; inst = IRNext(inst)) {
+      if (inst == load) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return BitSetContains(&load->block->dominators, single_store->block->block_id) &&
+         BitSetCount(&single_store->block->in_back_edges) == 0 &&
+         single_store->block->loop_nesting == 0;
+}
+
 bool IRLoadedVariableRedefinedBeforeUse(IRNode* load) {
   if (load == NULL || load->inputs.length == 0 ||
       !IRIsVariable(load->inputs.value.p[0])) {
     return false;
   }
   IRNode* var = load->inputs.value.p[0];
+  if (IRVariableNeverRedefinedAfter(load, var)) {
+    return false;
+  }
   size_t remaining = load->outputs.length;
   for (IRNode* inst = IRNext(load); inst != NULL && remaining > 0;
        inst = IRNext(inst)) {

@@ -816,6 +816,12 @@ static void AssembleAddSubImmediate(AARCH64Assembler* assembler,
     immed = -immed;
     op ^= 1;
   }
+  // Like GNU as, encode a multiple of 4096 without an explicit shift as the
+  // shifted form.
+  if (!shift && immed > 0xfff && (immed & 0xfff) == 0) {
+    immed >>= 12;
+    shift = 1;
+  }
   CheckImmediateWidth(assembler, immed, 12);
   AARCH64EmitAddSubImmediate(&ASMO, rd, rn, immed, op != 0, s != 0, shift);
   (void)sf;

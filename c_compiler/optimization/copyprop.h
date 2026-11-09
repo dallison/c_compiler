@@ -8,4 +8,8 @@
 // exception landing pads.
 void CopyPropagationOptimization(Generator* gen);
 
+// In SSA form, redirect reads of a variable copied from a symbol's only
+// version to that version, and drop definitions that nothing reads.
+void SSAVariableCopyPropagation(Generator* gen);
+
 #endif

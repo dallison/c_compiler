@@ -282,6 +282,26 @@ static int StackFrameSize(AARCH64Emitter* emitter) {
   return stack_frame_size;
 }
 
+// The callee-saved integer registers occupy descending 8-byte slots starting
+// at saved_reg_offset, in used_int_regs order.  Neighbouring slots are saved
+// and restored with one stp/ldp when the lower slot is within the pair
+// instruction's signed 7-bit scaled offset.
+static size_t SavedIntRegisters(AARCH64Emitter* emitter,
+                                int regs[AARCH64_NUM_INT_REGS]) {
+  size_t count = 0;
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
+  while (!BitSetIteratorDone(&it) && count < AARCH64_NUM_INT_REGS) {
+    regs[count++] = (int)BitSetIteratorValue(&it);
+    BitSetIteratorNext(&it);
+  }
+  return count;
+}
+
+static bool PairSlotInRange(int offset) {
+  return offset % 8 == 0 && offset >= -512 && offset <= 504;
+}
+
 static bool EmptyStackFrame(AARCH64Emitter* emitter) {
   // A frame is only truly empty when there is nothing to store on the stack:
   // no locals, no calls (so no saved x29/x30), and no callee-saved or spilled
@@ -293,6 +313,30 @@ static bool EmptyStackFrame(AARCH64Emitter* emitter) {
          BitSetCount(&emitter->regs->used_int_regs) == 0 &&
          BitSetCount(&emitter->regs->used_float_regs) == 0 &&
          emitter->spill_region_size == 0;
+}
+
+// Addresses the spill slot `offset` bytes below x29 with a single load or
+// store when possible: x29-relative for short offsets, otherwise sp-relative
+// while sp stays at the fixed frame bottom.
+static bool SpillSlotOperand(AARCH64Emitter* emitter, int offset, int scale,
+                             int* base, int* disp) {
+  if (offset <= 256) {
+    *base = 29;
+    *disp = -offset;
+    return true;
+  }
+  AARCH64Generator* g = emitter->g;
+  if (g->moves_sp || g->calls_move_sp || g->base.varargs ||
+      EmptyStackFrame(emitter)) {
+    return false;
+  }
+  int from_sp = StackFrameSize(emitter) - offset;
+  if (from_sp < 0 || from_sp % scale != 0 || from_sp / scale > 0xfff) {
+    return false;
+  }
+  *base = 31;
+  *disp = from_sp;
+  return true;
 }
 
 static void DecrementStackPointer(AARCH64Emitter* emitter, int stack_frame_size,
@@ -522,23 +566,33 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   // Record offset for last saved register for reloading->base.
   emitter->saved_reg_offset = saved_reg_offset;
-  
-  BitSetIterator it;
 
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  if (!BitSetIteratorDone(&it)) {
+  int int_regs[AARCH64_NUM_INT_REGS];
+  size_t num_int_regs = SavedIntRegisters(emitter, int_regs);
+  if (num_int_regs > 0) {
     fprintf(fp, "\t// Saved integer registers.\n");
   }
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    int offset = saved_reg_offset;
-    saved_reg_offset -= 8;
+  for (size_t i = 0; i < num_int_regs;) {
+    if (i + 1 < num_int_regs && PairSlotInRange(saved_reg_offset - 8)) {
+      fprintf(fp, "\tstp %s, %s, [sp, #%d]\n",
+              AARCH64RegisterNameFromNum(int_regs[i + 1], kAARCH64RegTypeInt,
+                                         kSize64Bit, buf1, sizeof(buf1)),
+              AARCH64RegisterNameFromNum(int_regs[i], kAARCH64RegTypeInt,
+                                         kSize64Bit, buf2, sizeof(buf2)),
+              saved_reg_offset - 8);
+      saved_reg_offset -= 16;
+      i += 2;
+      continue;
+    }
     fprintf(fp, "\tstr %s, [sp, #%d]\n",
-            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeInt, kSize64Bit, buf1, sizeof(buf1)),
-            offset);
-    BitSetIteratorNext(&it);
+            AARCH64RegisterNameFromNum(int_regs[i], kAARCH64RegTypeInt,
+                                       kSize64Bit, buf1, sizeof(buf1)),
+            saved_reg_offset);
+    saved_reg_offset -= 8;
+    i++;
   }
-  
+
+  BitSetIterator it;
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
   if (!BitSetIteratorDone(&it)) {
     fprintf(fp, "\t// Saved floating point registers.\n");
@@ -564,7 +618,7 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // ldp x29, x30, [sp], #16
 
   int stack_frame_size = StackFrameSize(emitter);
-  char buf1[8];
+  char buf1[8], buf2[8];
 
   bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
           !emitter->g->not_leaf;
@@ -574,7 +628,7 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
     fprintf(fp, "\t// Restored registers.\n");
   }
 
-  if (!EmptyStackFrame(emitter)) {
+  if (!EmptyStackFrame(emitter) && emitter->g->moves_sp) {
     // A VLA or over-aligned local may have moved sp below the fixed frame.
     // Reconstruct the frame bottom from x29 before reading saved registers or
     // applying the ordinary fixed-size epilogue.
@@ -593,14 +647,26 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // floating-point.  The two sequences must iterate identically, otherwise a
   // register is reloaded from another register's slot (e.g. a callee-saved d8
   // restored from where x10 was spilled), silently corrupting its value.
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
+  int int_regs[AARCH64_NUM_INT_REGS];
+  size_t num_int_regs = SavedIntRegisters(emitter, int_regs);
+  for (size_t i = 0; i < num_int_regs;) {
+    if (i + 1 < num_int_regs && PairSlotInRange(offset - 8)) {
+      fprintf(fp, "\tldp %s, %s, [sp, #%d]\n",
+              AARCH64RegisterNameFromNum(int_regs[i + 1], kAARCH64RegTypeInt,
+                                         kSize64Bit, buf1, sizeof(buf1)),
+              AARCH64RegisterNameFromNum(int_regs[i], kAARCH64RegTypeInt,
+                                         kSize64Bit, buf2, sizeof(buf2)),
+              offset - 8);
+      offset -= 16;
+      i += 2;
+      continue;
+    }
     fprintf(fp, "\tldr %s, [sp, #%d]\n",
-            AARCH64RegisterNameFromNum(reg, kAARCH64RegTypeInt, kSize64Bit, buf1, sizeof(buf1)),
+            AARCH64RegisterNameFromNum(int_regs[i], kAARCH64RegTypeInt,
+                                       kSize64Bit, buf1, sizeof(buf1)),
             offset);
     offset -= 8;
-    BitSetIteratorNext(&it);
+    i++;
   }
 
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
@@ -1088,6 +1154,22 @@ static void PrintSpillSlotAddress(int offset, FILE* fp) {
   fprintf(fp, "\tsub %s, %s, %s\n", spill, frame, spill);
 }
 
+// Writes the memory operand for a spill slot to `slot`, first printing the
+// x16 address computation when no single instruction reaches it.
+static void SpillSlotText(AARCH64Emitter* emitter, int offset, int scale,
+                          char* slot, size_t slot_size, FILE* fp) {
+  int base = 0;
+  int disp = 0;
+  if (!SpillSlotOperand(emitter, offset, scale, &base, &disp)) {
+    PrintSpillSlotAddress(offset, fp);
+    snprintf(slot, slot_size, "[x16, #0]");
+  } else if (base == 29) {
+    snprintf(slot, slot_size, "[x29, #%d]", disp);
+  } else {
+    snprintf(slot, slot_size, "[sp, #%d]", disp);
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -1309,10 +1391,12 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       int offset = (int)TargetIntValue(inst->operand[1]) + emitter->first_spill_offset;
       int spill_size = GetRegisterSize(inst) == kSize128Bit ? kSize128Bit
                                                             : kSize64Bit;
-      PrintSpillSlotAddress(offset, fp);
-      fprintf(fp, "\t%s %s, [x16, #0]\t// Spilled @%d\n",
+      char slot[32];
+      SpillSlotText(emitter, offset, spill_size == kSize128Bit ? 16 : 8, slot,
+                    sizeof(slot), fp);
+      fprintf(fp, "\t%s %s, %s\t// Spilled @%d\n",
               reg->type == kAARCH64RegTypeInt ? "str" : "fstr",
-              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)),
+              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)), slot,
               inst->operand[0]->id);
       return;
     }
@@ -1323,10 +1407,12 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
       int offset = (int)TargetIntValue(spill->operand[1]) + emitter->first_spill_offset;
       int spill_size = GetRegisterSize(spill) == kSize128Bit ? kSize128Bit
                                                              : kSize64Bit;
-      PrintSpillSlotAddress(offset, fp);
-      fprintf(fp, "\t%s %s, [x16, #0]\t// Reloaded spilled @%d\n",
+      char slot[32];
+      SpillSlotText(emitter, offset, spill_size == kSize128Bit ? 16 : 8, slot,
+                    sizeof(slot), fp);
+      fprintf(fp, "\t%s %s, %s\t// Reloaded spilled @%d\n",
               reg->type == kAARCH64RegTypeInt ? "ldr" : "fldr",
-              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)),
+              AARCH64RegisterName(reg, spill_size, buf1, sizeof(buf1)), slot,
               spill->operand[0]->id);
       return;
     }
@@ -2027,6 +2113,29 @@ static void ProgramSpillAddress(AsmModule* module, int offset) {
   }
 }
 
+// Stores (or with `load`, reloads) the callee-saved integer registers into
+// their slots below `offset`, returning the offset past the last slot.
+static int ProgramTransferSavedIntRegisters(AARCH64Emitter* emitter,
+                                            AsmModule* module, bool load,
+                                            int offset) {
+  int regs[AARCH64_NUM_INT_REGS];
+  size_t count = SavedIntRegisters(emitter, regs);
+  for (size_t i = 0; i < count;) {
+    if (i + 1 < count && PairSlotInRange(offset - 8)) {
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStorePair(2, false, load, 2, regs[i + 1],
+                                             regs[i], 31, offset - 8));
+      offset -= 16;
+      i += 2;
+      continue;
+    }
+    ProgramLoadStore(module, load, false, 3, false, regs[i], 31, offset);
+    offset -= 8;
+    i++;
+  }
+  return offset;
+}
+
 static void ProgramSaveRegisters(AARCH64Emitter* emitter,
                                  const char* label_stem, AsmModule* module) {
   int stack_frame_size = StackFrameSize(emitter);
@@ -2093,18 +2202,12 @@ static void ProgramSaveRegisters(AARCH64Emitter* emitter,
   emitter->first_spill_offset = local_vars + 8;
   emitter->saved_reg_offset = saved_reg_offset;
 
-  BitSetIterator it;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  if (!BitSetIteratorDone(&it)) {
+  if (BitSetCount(&emitter->regs->used_int_regs) > 0) {
     AsmModuleComment(module, "Saved integer registers.");
   }
-  while (!BitSetIteratorDone(&it)) {
-    int reg = (int)BitSetIteratorValue(&it);
-    ProgramLoadStore(module, false, false, 3, false, reg, 31,
-                     saved_reg_offset);
-    saved_reg_offset -= 8;
-    BitSetIteratorNext(&it);
-  }
+  saved_reg_offset = ProgramTransferSavedIntRegisters(emitter, module, false,
+                                                      saved_reg_offset);
+  BitSetIterator it;
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
   if (!BitSetIteratorDone(&it)) {
     AsmModuleComment(module, "Saved floating point registers.");
@@ -2126,20 +2229,14 @@ static void ProgramRestoreRegisters(AARCH64Emitter* emitter,
   if (!is_leaf) {
     AsmModuleComment(module, "Restored registers.");
   }
-  if (!EmptyStackFrame(emitter)) {
+  if (!EmptyStackFrame(emitter) && emitter->g->moves_sp) {
     int frame_adjustment =
         stack_frame_size - VarargsSaveAreaSize(emitter);
     ProgramAddSubImmediate(module, 31, 29, true, false, frame_adjustment);
   }
-  int offset = emitter->saved_reg_offset;
+  int offset = ProgramTransferSavedIntRegisters(emitter, module, true,
+                                                emitter->saved_reg_offset);
   BitSetIterator it;
-  BitSetIteratorStart(&it, &emitter->regs->used_int_regs);
-  while (!BitSetIteratorDone(&it)) {
-    ProgramLoadStore(module, true, false, 3, false,
-                     (int)BitSetIteratorValue(&it), 31, offset);
-    offset -= 8;
-    BitSetIteratorNext(&it);
-  }
   BitSetIteratorStart(&it, &emitter->regs->used_float_regs);
   while (!BitSetIteratorDone(&it)) {
     ProgramLoadStore(module, true, true, 3, false,
@@ -2565,6 +2662,42 @@ static void ProgramUnsupportedInstruction(TargetInstruction* inst,
   fprintf(stderr, "Unsupported programmatic AArch64 opcode %s\n",
           AARCH64OpcodeName(inst->opcode));
   module->failed = true;
+}
+
+// Mirrors the instructions ProgramEmitInstruction emits no machine code for.
+static bool EmitsCode(TargetInstruction* inst) {
+  return inst->block != NULL &&
+         inst->opcode != (TargetOpcode)AARCH64_OP(label) &&
+         inst->opcode != (TargetOpcode)AARCH64_OP(named_label) &&
+         inst->opcode != (TargetOpcode)AARCH64_OP(loc) && IsPrintable(inst) &&
+         !inst->observable_checkpoint;
+}
+
+static bool IsUnconditionalBranch(TargetInstruction* inst) {
+  return inst->opcode == (TargetOpcode)AARCH64_OP(b) &&
+         ProgramCondition(inst->operand[0]) == AARCH64_ASM_COND_AL;
+}
+
+// An unconditional branch to a label reached by falling through.
+static bool BranchesToNextInstruction(TargetInstruction* inst) {
+  if (!IsUnconditionalBranch(inst) || inst->block == NULL) {
+    return false;
+  }
+  TargetInstruction* target = inst->operand[1];
+  if (target == NULL ||
+      target->opcode != (TargetOpcode)AARCH64_OP(label)) {
+    return false;
+  }
+  for (TargetInstruction* next = TargetNext(inst); next != NULL;
+       next = TargetNext(next)) {
+    if (next == target) {
+      return true;
+    }
+    if (EmitsCode(next)) {
+      return false;
+    }
+  }
+  return false;
 }
 
 static void ProgramEmitInstruction(AARCH64Emitter* emitter,
@@ -3343,9 +3476,13 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       int offset = (int)TargetIntValue(inst->operand[1]) +
                    emitter->first_spill_offset;
       int size = GetRegisterSize(inst) == kSize128Bit ? 4 : 3;
-      ProgramSpillAddress(module, offset);
-      ProgramLoadStore(module, false, ProgramRegIsFP(inst), size, false, dest, 16,
-                       0);
+      int base = 16;
+      int disp = 0;
+      if (!SpillSlotOperand(emitter, offset, 1 << size, &base, &disp)) {
+        ProgramSpillAddress(module, offset);
+      }
+      ProgramLoadStore(module, false, ProgramRegIsFP(inst), size, false, dest,
+                       base, disp);
       return;
     }
     case AARCH64_OP(reload): {
@@ -3353,9 +3490,13 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       int offset = (int)TargetIntValue(spill->operand[1]) +
                    emitter->first_spill_offset;
       int size = GetRegisterSize(spill) == kSize128Bit ? 4 : 3;
-      ProgramSpillAddress(module, offset);
-      ProgramLoadStore(module, true, ProgramRegIsFP(inst), size, false, dest, 16,
-                       0);
+      int base = 16;
+      int disp = 0;
+      if (!SpillSlotOperand(emitter, offset, 1 << size, &base, &disp)) {
+        ProgramSpillAddress(module, offset);
+      }
+      ProgramLoadStore(module, true, ProgramRegIsFP(inst), size, false, dest,
+                       base, disp);
       return;
     }
     case AARCH64_OP(atomic_load):
@@ -3765,8 +3906,20 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
     AsmModuleComment(module, "bti c");
     AARCH64ProgramEmitWord(module, 0xd503241fu);
   }
+  bool in_jump_table = false;
   for (TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
        inst != NULL && !module->failed; inst = TargetNext(inst)) {
+    if (EmitsCode(inst)) {
+      if (inst->opcode == (TargetOpcode)AARCH64_OP(br) &&
+          (inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+        in_jump_table = true;
+      } else if (!IsUnconditionalBranch(inst)) {
+        in_jump_table = false;
+      }
+    }
+    if (!in_jump_table && BranchesToNextInstruction(inst)) {
+      continue;
+    }
     ProgramEmitInstruction(emitter, inst, label_stem.value, module);
   }
   // The debug information finds the end of the function by this name.

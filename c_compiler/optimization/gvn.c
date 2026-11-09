@@ -7,6 +7,7 @@
 //
 
 #include "gvn.h"
+#include "compiler.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <inttypes.h>
@@ -129,7 +130,81 @@ static COMPILER_UNUSED bool CanPoolFromDominator(Generator* gen, BasicBlock* blo
 // For commutative operations we sort the op values so that operand 1 value
 // is less or equal to than operand 2 value.
 
-static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
+static bool IsRegisterScalar(Symbol* symbol) {
+  TypeRecord* type = symbol->type;
+  return !symbol->flags.address_taken && !symbol->is_nrvo && type != NULL &&
+         !TypeIsVolatile(type) && !TypeIsAtomic(type) &&
+         !TypeIsStructOrUnion(type) && !TypeIsArray(type) &&
+         !TypeIsVector(type) && !TypeIsReference(type) &&
+         !TypeUsesLongDoubleRepresentation(type) && !TypeIsInt128(type) &&
+         !TypeIsVLA(type) && !SymbolNeedsDynamicStackAllocation(symbol);
+}
+
+// In SSA form every write to a register scalar creates a new ssavar, so a
+// version is only ever written by the one store that defines it.  Loads of
+// such a version all read the same value and can be numbered like any other
+// pure expression.  Anything else touching the node (an address, a store that
+// was not renamed, an inc/dec) means its contents can change.
+static bool LoadsSSAValue(IRNode* load) {
+  if (!IRIsLoadOnly(load) || load->inputs.length != 1 || load->dest != NULL ||
+      (load->flags & ~kIRVarUse) != 0) {
+    return false;
+  }
+  IRNode* var = load->inputs.value.p[0];
+  switch (var->opcode) {
+    case IR_OP(ssavar):
+    case IR_OP(argument):
+    case IR_OP(localvar):
+    case IR_OP(tempvar):
+      break;
+    default:
+      return false;
+  }
+  Symbol* symbol = ((IRVariable*)var)->symbol;
+  if (symbol == NULL || !IsRegisterScalar(symbol)) {
+    return false;
+  }
+  size_t stores = 0;
+  for (size_t i = 0; i < var->outputs.length; i++) {
+    IRNode* user = var->outputs.value.p[i];
+    if (user->opcode == IR_OP(phi)) {
+      continue;
+    }
+    if (user->inputs.length == 0 || user->inputs.value.p[0] != var) {
+      return false;
+    }
+    if (IRIsLoadOnly(user)) {
+      continue;
+    }
+    if (var->opcode == IR_OP(ssavar) && IRIsStoreOnly(user) &&
+        IRIsVarDef(user) && user->var.def == symbol && ++stores == 1) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+
+// A small constant offset folds into the addressing mode of each load or store
+// that uses it.  Sharing one adda across blocks instead keeps the address live
+// in a register for nothing.
+static bool IsFoldableAddressOffset(IRNode* inst) {
+  if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2) {
+    return false;
+  }
+  IRNode* offset = inst->inputs.value.p[1];
+  if (!IRIsIntConst(offset)) {
+    return false;
+  }
+  int64_t value = ((IRConstant*)offset)->value.ivalue;
+  return value >= 0 && value < 4096;
+}
+
+// `ssa_loads` enables LoadsSSAValue.  Exception edges are not in the CFG, so in
+// a function with handlers a landing pad can read a variable whose SSA version
+// is stale; the reload there must stay a real read.
+static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst,
+                                        bool ssa_loads) {
   uint32_t id;
   
   // Lower 20 bits are either the node id or the opcode
@@ -215,6 +290,11 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
       id = inst->opcode;
       break;
   }
+  if (ssa_loads && LoadsSSAValue(inst)) {
+    id = inst->opcode;
+  } else if (IsFoldableAddressOffset(inst)) {
+    id = inst->id + last_ir_opcode;
+  }
 
   uint64_t key = id;
   
@@ -261,7 +341,7 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst) {
   // Get the values for the operands.
   for (size_t i = 0; i < n; i++) {
     IRNode* input = inst->inputs.value.p[i];
-    int64_t input_key = CalculateInstructionKey(table, input);
+    int64_t input_key = CalculateInstructionKey(table, input, ssa_loads);
     Value* v = HashTableSearch(table, (void*)input_key);
     if (v == NULL) {
       // Operand is not available in this block's value set yet.
@@ -377,8 +457,9 @@ static bool DefinitionPrecedesUse(BlockLayout* layout, IRNode* definition,
 //
 // If the instruction isn't found, add a new entry in the hash
 // table with the next value.
-static IRNode* LookupInstruction(ValueSet* set, IRNode* inst) {
-  uint64_t key = CalculateInstructionKey(&set->values, inst);
+static IRNode* LookupInstruction(ValueSet* set, IRNode* inst,
+                                 bool ssa_loads) {
+  uint64_t key = CalculateInstructionKey(&set->values, inst, ssa_loads);
   Value* value = HashTableSearch(&set->values, (void*)key);
   if (value != NULL) {
     return value->instruction;
@@ -439,7 +520,8 @@ static void DoLocalValueNumbering(Generator* gen, BlockLayout* layout,
       continue;
     }
     if (IRIsExpression(inst)) {
-      IRNode* prev_inst = LookupInstruction(set, inst);
+      IRNode* prev_inst =
+          LookupInstruction(set, inst, gen->exception_ranges.length == 0);
       if (prev_inst != inst && DefinitionPrecedesUse(layout, prev_inst, inst)) {
         GeneratorReplaceInstruction(gen, inst, prev_inst);
         BasicBlockRemoveInstruction(gen, block, inst);
@@ -518,7 +600,42 @@ static void DoGlobalValueNumbering(Generator* gen, BlockLayout* layout,
   }
 }
 
+// AArch64 loads and stores take an unsigned 12-bit offset.  Rewrite
+// `base + C` with a larger C as `(base + (C & ~0xfff)) + (C & 0xfff)` so the
+// high part, a single `add ..., lsl #12`, is shared between the accesses to
+// one large object and the low part folds into each load or store.
+static void SplitLargeAddressOffsets(Generator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block->end_code == NULL) {
+      continue;
+    }
+    for (IRNode* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : IRNext(inst)) {
+      if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2 ||
+          inst->dest != NULL || !IRIsIntConst(inst->inputs.value.p[1])) {
+        continue;
+      }
+      int64_t value = ((IRConstant*)inst->inputs.value.p[1])->value.ivalue;
+      if (value < 4096 || value > 0xffffff || (value & 0xfff) == 0) {
+        continue;
+      }
+      IRNode* base_input = inst->inputs.value.p[0];
+      IRNode* base = IRSetType(
+          NewIR2(IR_OP(adda), base_input,
+                 GeneratorGetIntConstant(gen, NULL, value & ~(int64_t)0xfff)),
+          base_input->type != NULL ? base_input->type : inst->type);
+      BasicBlockEmitBefore(gen, block, base, inst);
+      IRReplaceInput(inst, 0, base);
+      IRReplaceInput(inst, 1, GeneratorGetIntConstant(gen, NULL, value & 0xfff));
+    }
+  }
+}
+
 void GlobalValueNumberingOptimization(Generator* gen) {
+  if (StringEqual(compiler->target_name, "aarch64")) {
+    SplitLargeAddressOffsets(gen);
+  }
   BlockLayout layout;
   BlockLayoutInit(&layout, gen);
   DoGlobalValueNumbering(gen, &layout, gen->entry_block);

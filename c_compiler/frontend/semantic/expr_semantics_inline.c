@@ -48,7 +48,9 @@ typedef struct {
 static void AddInlineLocalSymbol(Inliner* inliner, Symbol* symbol);
 static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data);
-static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call, Inliner* inliner);
+static void CopyArguments(FunctionInfo* info, VectorASTNode* call,
+                          Inliner* inliner, Vector* statements,
+                          bool reuse_parameter_objects);
 static Symbol* CallThisReceiverSymbol(VectorASTNode* call);
 static Symbol* InlineMappedSymbol(Inliner* inliner, Symbol* original);
 static ASTNode* NewCallerContractStatement(ContractAssertion* assertion, Inliner* inliner, VectorASTNode* call, TypeRecord* caller_func);
@@ -72,7 +74,8 @@ static bool InliningBlockedByDefinitionAndLinkage(
 static bool InliningBlockedByCalleeFormals(FunctionInfo* func);
 static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
                                                  bool force_inline,
-                                                 bool unmarked_small);
+                                                 bool unmarked_small,
+                                                 int64_t static_uses);
 
 // Contract: Clones local symbols into `inliner->argument_map` and global local list.
 static void AddInlineLocalSymbol(Inliner* inliner, Symbol* symbol) {
@@ -227,20 +230,82 @@ static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data) {
   return node;
 }
 
-// Build declaration list for all formal args and initialize them with
-// the actual args.  Since these are no longer arguments we need
-// to copy the Symbols too.  The ownership of all actual expressions is
-// changed to the variable declaration.  The inliner's argument_map
-// will contains a mapping of old symbol to new symbol.
-// Contract: Moves call actuals into param decls; fills `argument_map`; may allocate
-// return temporary symbol.
-static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call,
-                              Inliner* inliner) {
+// The caller's argument conversion has already materialized a by-value class
+// parameter as a temporary (`P(__tmp, actual), __tmp` or a compound literal).
+// That temporary is the parameter object: the caller destroys it at the end of
+// the full expression.  Cloning a second local and copying into it runs the
+// destructor twice on one construction.
+// Contract: Read-only peel of `actual` to that temporary, or NULL.
+static Symbol* ByValueClassParameterObject(TypeRecord* formal_type,
+                                           ASTNode* actual) {
+  if (!CompilerIsCXX() || formal_type == NULL || actual == NULL ||
+      TypeIsReference(formal_type) || !TypeIsStructOrUnion(formal_type)) {
+    return NULL;
+  }
+  ASTNode* node = actual;
+  for (;;) {
+    if (node->op == AST_OP(comma)) {
+      node = ((BinaryASTNode*)node)->right;
+      continue;
+    }
+    if (node->op == AST_OP(cast)) {
+      node = ((CastASTNode*)node)->expr;
+      continue;
+    }
+    break;
+  }
+  Symbol* sym = NULL;
+  if (node->op == AST_OP(compound_literal)) {
+    ASTNode* sym_node = ((CompoundLiteralASTNode*)node)->sym;
+    if (sym_node != NULL && sym_node->op == AST_OP(identifier)) {
+      sym = ((IdentifierASTNode*)sym_node)->symbol;
+    }
+  } else if (node->op == AST_OP(identifier)) {
+    sym = ((IdentifierASTNode*)node)->symbol;
+  }
+  if (sym == NULL || !sym->flags.is_temp || sym->type == NULL ||
+      !TypeEqualIgnoringQualifiers(sym->type, formal_type)) {
+    return NULL;
+  }
+  return sym;
+}
+
+// Build initializers for all formal args.  Scalar and reference parameters
+// become locals.  A by-value class parameter reuses the temporary the caller
+// already built.  The inliner's argument_map maps each original formal to the
+// symbol the cloned body should name.
+// Contract: Moves call actuals into the caller's statement list; fills
+// `argument_map`; may allocate a return temporary symbol.
+static void CopyArguments(FunctionInfo* info, VectorASTNode* call,
+                          Inliner* inliner, Vector* statements,
+                          bool reuse_parameter_objects) {
   SourceLocation location = call->base.location;
   Vector* decls = NewVector();
   for (size_t i = 0; i < info->prototype.length; i++) {
     Symbol* original_formal = info->prototype.value.p[i];
     ASTNode* actual = ASTNodeMove(call->children->value.p[i]);
+    Symbol* existing = reuse_parameter_objects
+                           ? ByValueClassParameterObject(original_formal->type,
+                                                         actual)
+                           : NULL;
+    if (existing != NULL) {
+      if (decls->length > 0) {
+        VectorAppend(statements,
+                     NewDeclarationListASTNode(decls, location));
+        decls = NewVector();
+      }
+      MapKeyValue kv;
+      kv.key.p = original_formal;
+      kv.value.p = existing;
+      MapInsert(&inliner->argument_map, kv);
+      // Evaluating the actual constructs the temporary.  Its destructor stays
+      // with the caller's full expression; this statement must not add another.
+      ASTNode* statement =
+          NewExpressionStatementASTNode(actual, actual->location);
+      statement->flags |= kASTAnalyzed;
+      VectorAppend(statements, statement);
+      continue;
+    }
     Symbol* formal = SymbolClone(original_formal);
     formal->flags.is_argument = false;
     formal->flags.is_local = true;
@@ -279,7 +344,11 @@ static ASTNode* CopyArguments(FunctionInfo* info, VectorASTNode* call,
   } else {
     inliner->return_value = NULL;
   }
-  return NewDeclarationListASTNode(decls, location);
+  if (decls->length > 0) {
+    VectorAppend(statements, NewDeclarationListASTNode(decls, location));
+  } else {
+    VectorDelete(decls);
+  }
 }
 
 // Contract: Read-only peel to `this`/object identifier for ctor/dtor inlining.
@@ -397,8 +466,8 @@ ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
       (info->is_constructor || info->is_destructor) ? CallThisReceiverSymbol(call)
                                                     : NULL;
 
-  VectorAppend(statements,
-               CopyArguments(info, call, &inliner));
+  CopyArguments(info, call, &inliner, statements,
+                /*reuse_parameter_objects=*/true);
   ASTNode* inlined = NewCompoundStatementASTNode(statements, info->body->location);
   inliner.top_stmt = inlined;
 
@@ -582,8 +651,8 @@ ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
   inliner.return_is_reference = TypeIsReference(caller_func->next);
 
   Vector* statements = NewVector();
-  VectorAppend(statements,
-               CopyArguments(&caller_func->info.function, call, &inliner));
+  CopyArguments(&caller_func->info.function, call, &inliner, statements,
+                /*reuse_parameter_objects=*/false);
 
   Symbol* this_formal =
       caller_func->info.function.prototype.length != 0
@@ -706,10 +775,32 @@ typedef struct {
 } GotoFinder;
 
 // Contract: Visitor; counts nodes and detects goto/inline_call/stmt_expr for inline eligibility.
+static bool InlineCallNodeIsInside(ASTNode* node) {
+  for (ASTNode* parent = node->parent; parent != NULL;
+       parent = parent->parent) {
+    if (parent->op == AST_OP(inline_call)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
   GotoFinder* finder = data;
-  finder->node_count++;
-  if (node->op == AST_OP(goto) || node->op == AST_OP(inline_call) ||
+  // A nested inlined call costs about as much as the call it replaced, not as
+  // much as its whole expanded body; counting the expansion would reject
+  // inlining a function merely because its own callees were inlined into it.
+  if (!InlineCallNodeIsInside(node)) {
+    finder->node_count++;
+  }
+  // Gotos produced by an inlined call are re-resolved when the inline_call is
+  // cloned, so only user gotos block inlining.
+  if ((node->op == AST_OP(goto) &&
+       !InlineCallNodeIsInside(node)) ||
       node->op == AST_OP(stmt_expr)) {
     finder->found_goto = true;
   }
@@ -867,7 +958,7 @@ static void FindInlineUnsafeLocal(ASTNode* node, void* data, int child_id,
   if (node->op == AST_OP(vardecl)) {
     Symbol* symbol = ((VariableDeclarationASTNode*)node)->symbol;
     if (symbol != NULL &&
-        (StorageIs(symbol->storage, STO(static)) ||
+        ((StorageIs(symbol->storage, STO(static)) && CompilerIsCXX()) ||
          StorageIs(symbol->storage, STO(thread)))) {
       *found = true;
     }
@@ -887,6 +978,38 @@ static bool InliningBlockedByUnsafeBody(FunctionInfo* func) {
   bool found = false;
   ASTNodeVisit(func->body, FindInlineUnsafeLocal, 0, &found);
   return found;
+}
+
+// Inlining a noexcept function into its caller drops the terminate boundary.
+// A body with no throw and no call cannot violate the specification.
+static void FindNoexceptEscape(ASTNode* node, void* data, int child_id,
+                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren) {
+    return;
+  }
+  if (node->op == AST_OP(throw) || node->op == AST_OP(call) ||
+      node->op == AST_OP(inline_call)) {
+    *(bool*)data = true;
+  }
+}
+
+static void CountInlineCalls(ASTNode* node, void* data, int child_id,
+                             VisitorMode mode) {
+  (void)child_id;
+  if (mode == kVisitPreChildren && node->op == AST_OP(inline_call) &&
+      !InlineCallNodeIsInside(node)) {
+    *(int*)data += 1;
+  }
+}
+
+static bool InliningBlockedByNoexceptBoundary(FunctionInfo* func) {
+  if (func == NULL || !func->is_noexcept || func->body == NULL) {
+    return false;
+  }
+  bool escapes = false;
+  ASTNodeVisit(func->body, FindNoexceptEscape, 0, &escapes);
+  return escapes;
 }
 
 // `std::coroutine_handle<Promise>::{done,resume,destroy}`.  These only load
@@ -996,6 +1119,19 @@ static bool InliningBlockedByCalleeOrCompilerFlags(FunctionInfo* func) {
     return true;
   }
   if (func->symbol != NULL && func->symbol->flags.noinline) {
+    return true;
+  }
+  // A coroutine body is tied to its frame.  Cloning it into the caller drops
+  // the frame and the suspend points.
+  if (func->is_coroutine) {
+    return true;
+  }
+  // A new-expression's exception cleanup identifies the allocation by the
+  // call to operator new.  Inlining that call also lets the constructed-element
+  // count be folded as if every element finished.
+  if (func->symbol != NULL &&
+      (StringEqual(&func->symbol->name, "operator new") ||
+       StringEqual(&func->symbol->name, "operator new[]"))) {
     return true;
   }
   return false;
@@ -1117,7 +1253,7 @@ static bool InliningBlockedByDefinitionAndLinkage(
     FunctionInfo* func, bool* force_inline_out, bool* unmarked_small_out) {
   bool force_inline =
       func->symbol != NULL && func->symbol->flags.always_inline;
-  bool unmarked_small = (OptLevel3() || compiler->lto) && !func->is_inline &&
+  bool unmarked_small = (OptLevel2() || compiler->lto) && !func->is_inline &&
                         !force_inline;
   *force_inline_out = force_inline;
   *unmarked_small_out = unmarked_small;
@@ -1153,13 +1289,163 @@ static bool InliningBlockedByCalleeFormals(FunctionInfo* func) {
   return false;
 }
 
+enum { kManyUses = 1 << 20 };
+
+static bool IsIdentifierChar(char c) {
+  return isalnum((unsigned char)c) || c == '_' || c == '$';
+}
+
+// Counts the references to each identifier in `file`.  An identifier at file
+// scope preceded by a name or `*` is taken to be a declaration; any other
+// occurrence is a use.  A name in a macro body may expand any number of times.
+static void CountFileIdentifierUses(File* file, Map* counts) {
+  int depth = 0;
+  bool in_comment = false;
+  bool in_define = false;
+  char previous = 0;
+  char word[256];
+  for (int lineno = 1;; lineno++) {
+    const char* line = SourceFileLineText(file, lineno);
+    if (line == NULL) {
+      break;
+    }
+    const char* p = line;
+    while (*p == ' ' || *p == '\t') {
+      p++;
+    }
+    bool directive = in_define;
+    if (!in_comment && !in_define && *p == '#') {
+      directive = true;
+      const char* d = p + 1;
+      while (*d == ' ' || *d == '\t') {
+        d++;
+      }
+      in_define = strncmp(d, "define", 6) == 0 && !IsIdentifierChar(d[6]);
+    }
+    for (; *p != '\0'; p++) {
+      if (in_comment) {
+        if (p[0] == '*' && p[1] == '/') {
+          in_comment = false;
+          p++;
+        }
+        continue;
+      }
+      if (p[0] == '/' && p[1] == '*') {
+        in_comment = true;
+        p++;
+        continue;
+      }
+      if (p[0] == '/' && p[1] == '/') {
+        break;
+      }
+      if (*p == '"' || *p == '\'') {
+        char quote = *p;
+        for (p++; *p != '\0' && *p != quote; p++) {
+          if (*p == '\\' && p[1] != '\0') {
+            p++;
+          }
+        }
+        if (*p == '\0') {
+          break;
+        }
+        continue;
+      }
+      if (IsIdentifierChar(*p) && !isdigit((unsigned char)*p)) {
+        const char* start = p;
+        while (IsIdentifierChar(p[1])) {
+          p++;
+        }
+        size_t length = (size_t)(p - start + 1);
+        if ((!directive || in_define) && length < sizeof(word)) {
+          memcpy(word, start, length);
+          word[length] = 0;
+          int64_t uses = 0;
+          if (in_define) {
+            uses = kManyUses;
+          } else if (depth > 0 ||
+                     !(IsIdentifierChar(previous) || previous == '*')) {
+            uses = 1;
+          }
+          MapKeyType key = {.p = word};
+          MapValueType* found = MapSearch(counts, key);
+          if (found != NULL) {
+            found->w += uses;
+          } else {
+            MapKeyValue kv = {.key.p = strdup(word), .value.w = uses};
+            MapInsert(counts, kv);
+          }
+        }
+        previous = *p;
+        continue;
+      }
+      if (directive) {
+        continue;
+      }
+      if (*p == '{') {
+        depth++;
+      } else if (*p == '}' && depth > 0) {
+        depth--;
+      }
+      if (*p != ' ' && *p != '\t') {
+        previous = *p;
+      }
+    }
+    if (in_define) {
+      size_t length = strlen(line);
+      in_define = length > 0 && line[length - 1] == '\\';
+    }
+  }
+}
+
+// The number of references to a static function in the file defining it;
+// kManyUses when it cannot be counted.
+static int64_t StaticFunctionUseCount(FunctionInfo* func) {
+  static Map file_counts;  // File* -> Map* of name -> uses.
+  static bool file_counts_ready = false;
+  Symbol* symbol = func->symbol;
+  if (symbol == NULL || func->body == NULL || func->template_origin != NULL ||
+      !StorageIs(symbol->storage, STO(static)) || symbol->flags.is_local) {
+    return kManyUses;
+  }
+  int fileno = 0, lineno = 0, colno = 0;
+  SourceLocationNumbers(func->body->location, &fileno, &lineno, &colno);
+  if (lineno == 0 || (size_t)fileno >= SourceFileCount()) {
+    return kManyUses;
+  }
+  File* file = SourceFileAt((size_t)fileno);
+  if (file == NULL || file->is_system_header) {
+    return kManyUses;
+  }
+  if (!file_counts_ready) {
+    MapInitForPointerKeys(&file_counts);
+    file_counts_ready = true;
+  }
+  MapKeyType file_key = {.p = file};
+  Map* counts = MapFind(&file_counts, file_key);
+  if (counts == NULL) {
+    counts = NewMapForCharPointerKeys();
+    CountFileIdentifierUses(file, counts);
+    MapKeyValue kv = {.key.p = file, .value.p = counts};
+    MapInsert(&file_counts, kv);
+  }
+  MapKeyType name_key = {.p = symbol->name.value};
+  MapValueType* uses = MapSearch(counts, name_key);
+  return uses != NULL && uses->w > 0 ? uses->w : kManyUses;
+}
+
 // Contract: Read-only body inspection and size heuristic; false when goto/unresolved/NRVO
 // or node count exceeds limits (unless `force_inline` bypasses size only).
+// A static callee with few call sites gets a larger budget: most of its body
+// is not duplicated.
 static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
                                                  bool force_inline,
-                                                 bool unmarked_small) {
+                                                 bool unmarked_small,
+                                                 int64_t static_uses) {
   const int kMaxInlineNodeCount = OptLevel3() ? 250 : 100;
   const int kMaxUnmarkedInlineNodeCount = 40;
+  const int kMaxSingleUseInlineNodeCount = 300;
+  const int kMaxTwoUseInlineNodeCount = 200;
+  const int kMaxFewUseInlineNodeCount = 80;
   GotoFinder finder = {0, false};
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
@@ -1180,6 +1466,13 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
   }
   int max_nodes =
       unmarked_small ? kMaxUnmarkedInlineNodeCount : kMaxInlineNodeCount;
+  if (static_uses == 1) {
+    max_nodes = kMaxSingleUseInlineNodeCount;
+  } else if (static_uses == 2 && max_nodes < kMaxTwoUseInlineNodeCount) {
+    max_nodes = kMaxTwoUseInlineNodeCount;
+  } else if (static_uses <= 4 && max_nodes < kMaxFewUseInlineNodeCount) {
+    max_nodes = kMaxFewUseInlineNodeCount;
+  }
   return finder.node_count < max_nodes;
 }
 
@@ -1258,6 +1551,23 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
   if (InliningBlockedByUnsafeBody(func)) {
     return false;
   }
+  if (InliningBlockedByNoexceptBoundary(func)) {
+    return false;
+  }
+  // Unmarked inlines have no source-level bound.  A large caller (the
+  // coroutine suite's main) that absorbs every 40-node helper spends tens of
+  // seconds in the backend.  Marked `inline` functions are unaffected.
+  int64_t static_uses = StaticFunctionUseCount(func);
+  if (unmarked_small && static_uses != 1 &&
+      compiler->current_function->info.function.body != NULL) {
+    int already = 0;
+    ASTNodeVisit(compiler->current_function->info.function.body,
+                 CountInlineCalls, 0, &already);
+    const int kMaxUnmarkedInlinesPerCaller = 16;
+    if (already >= kMaxUnmarkedInlinesPerCaller) {
+      return false;
+    }
+  }
   return CalleeBodyEligibleByStructureAndSize(func, force_inline,
-                                                unmarked_small);
+                                              unmarked_small, static_uses);
 }

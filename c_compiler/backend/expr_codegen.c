@@ -5967,49 +5967,45 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // short-circuit path because that operand was never evaluated; nested chains
  // would then consume an uninitialized value and could execute a skipped
  // dereference.
- bool value_is_used = true;
- // Non-constant logical operation, generate comparison and branches.
+ // Non-constant logical operation, generate comparison and branches.  The
+ // result lives in a register-promotable temporary: both stores are VarDefs
+ // and the reload a VarUse on the variable itself, so SSA turns the merge
+ // into a phi instead of a stack slot.
  IRNode* label = NewIR(IR_OP(label));
- IRNode* tmp_addr = NULL;
  TypeRecord* bool_type =
      NewTypeRecordWithSize(kTypeBool, kQualPlain);
+ Symbol* result = SyntaxNewTemporary(gen->syntax, bool_type);
+ IRNode* result_var = GeneratorGetVariable(gen, result);
+ IROpcode store_op = GetStoreOpcodeForType(bool_type);
 
  // Evaluate left node.
  IRNode* left = GenerateExpression(gen, node->left);
- 
- if (value_is_used) {
-   IRNode* left_bool = GenerateBooleanValue(gen, left);
-   tmp_addr = GeneratorSpillValueToTemp(gen, left_bool, bool_type);
- }
-
+ IRNode* left_bool = GenerateBooleanValue(gen, left);
+ IRNode* store = GeneratorEmit(gen, NewIR2(store_op, result_var, left_bool));
+ IRSetType(store, bool_type);
+ IRSetVarDef(store, result);
 
  // Short circuit.
  GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
                                                            : IR_OP(btrue),
                            left, label));
 
- // Evaluate right node and place result in tmp.
- IRNode* right = GenerateExpression(gen, node->right);
- if (value_is_used) {
-   right = GenerateBooleanValue(gen, right);
-   IRNode* right_addr =
-       IRSetType(GeneratorEmit(
-                     gen, NewIR1(IR_OP(addressof),
-                                 tmp_addr->inputs.value.p[0])),
-                 tmp_addr->type);
-   GeneratorEmit(gen,
-                 NewIR2(GetStoreOpcodeForType(bool_type), right_addr, right));
- }
+ // Evaluate right node and place result in the temporary.
+ IRNode* right =
+     GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
+ store = GeneratorEmit(gen, NewIR2(store_op, result_var, right));
+ IRSetType(store, bool_type);
+ IRSetVarDef(store, result);
 
  GeneratorEmit(gen, label);
- IRNode* tmp = NULL;
- if (tmp_addr != NULL) {
-   tmp = GeneratorReloadSpilledValue(gen, tmp_addr, bool_type);
-   if (!TypeIsBool(node->base.type)) {
-     return GenerateZeroExtend(gen, (ASTNode*)node, tmp);
-   }
+ IRNode* value = IRSetType(
+     GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(bool_type), result_var)),
+     bool_type);
+ IRSetVarUse(value, result);
+ if (!TypeIsBool(node->base.type)) {
+   return GenerateZeroExtend(gen, (ASTNode*)node, value);
  }
- return value_is_used ? tmp : right;
+ return value;
 }
 
 static bool TypeIsTernaryMemoryAggregate(TypeRecord* type) {

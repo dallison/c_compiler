@@ -127,6 +127,7 @@ static struct {
   int start;            // Start of range.
   int end;              // End of range.
   bool temp;
+  bool arg;             // Argument registers.
 } register_ranges[] = {
   // General temporaries prefer non-argument registers.  Argument registers
   // (x0..x7 / d0..d7) are searched last so a long-lived temporary does not
@@ -135,13 +136,32 @@ static struct {
   // or vice versa).  x9 is intentionally excluded from the general pool: it is
   // the dedicated scratch used to stage indirect-call targets across argument
   // setup.
-  {kAARCH64RegTypeInt, AARCH64_INT_TEMP_START + 1, AARCH64_INT_TEMP_END, true},
-  {kAARCH64RegTypeInt, AARCH64_INT_SAVED_START, AARCH64_INT_SAVED_END, false},
-  {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true},
-    {kAARCH64RegTypeFloat, AARCH64_FP_TEMP_START, AARCH64_FP_TEMP_END, true},
-    {kAARCH64RegTypeFloat, AARCH64_FP_SAVED_START, AARCH64_FP_SAVED_END,false},
-    {kAARCH64RegTypeFloat, AARCH64_FP_ARG_START, AARCH64_FP_ARG_END, true},
+  {kAARCH64RegTypeInt, AARCH64_INT_TEMP_START + 1, AARCH64_INT_TEMP_END, true,
+   false},
+  {kAARCH64RegTypeInt, AARCH64_INT_SAVED_START, AARCH64_INT_SAVED_END, false,
+   false},
+  {kAARCH64RegTypeInt, AARCH64_INT_ARG_START, AARCH64_INT_ARG_END, true, true},
+    {kAARCH64RegTypeFloat, AARCH64_FP_TEMP_START, AARCH64_FP_TEMP_END, true,
+     false},
+    {kAARCH64RegTypeFloat, AARCH64_FP_SAVED_START, AARCH64_FP_SAVED_END, false,
+     false},
+    {kAARCH64RegTypeFloat, AARCH64_FP_ARG_START, AARCH64_FP_ARG_END, true,
+     true},
 };
+
+// Which registers a value may be given.  A value live across a call needs a
+// callee-saved register; a staged outgoing argument (AARCH64_INST_AVOID_ARG_REGS)
+// may use any register the argument moves will not overwrite.
+typedef enum {
+  kRegPoolSaved,
+  kRegPoolAny,
+  kRegPoolNoArgs,
+} AARCH64RegPool;
+
+static bool PoolExcludesRange(AARCH64RegPool pool, size_t range) {
+  return (pool == kRegPoolSaved && register_ranges[range].temp) ||
+         (pool == kRegPoolNoArgs && register_ranges[range].arg);
+}
 
 #define NUM_REG_RANGES (sizeof(register_ranges) / sizeof(register_ranges[0]))
 
@@ -175,14 +195,13 @@ static void AssignRegister(AARCH64Register* reg, TargetInstruction* inst) {
 }
 
 static AARCH64Register* FindFreeRegister(AARCH64RegisterAllocator* allocator,
-                                    AARCH64RegisterType type, bool can_use_temp) {
+                                    AARCH64RegisterType type,
+                                    AARCH64RegPool pool) {
   AARCH64Register* regs =
       type == kAARCH64RegTypeInt ? allocator->int_regs : allocator->float_regs;
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
-      // If we are told not to use a temp register, ignore any that are
-      // marked as temp.
-      if (!can_use_temp && register_ranges[i].temp) {
+      if (PoolExcludesRange(pool, i)) {
         continue;
       }
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
@@ -292,32 +311,24 @@ static bool IsSavedReg(AARCH64Register* reg) {
   return false;
 }
 
-// Calculate the cost of spilling the instruction.  This
-// takes the number of uses and the loop nesting level into
-// account.  The cost starts out as the number of
-// uses left for the instruction.  It is then multiplied
-// by the loop nesting level for all its users that have not yet
-// got a register (+1) all the way to the top of the dominator tree.
-//
-// Blocks outside loops will have no effect on the score but
-// blocks with a loop_nesting value of 1 will double the cost.  A
-// loop_nesting value of 2 will quadruple the cost, and so on.
+// Calculate the cost of spilling the instruction: the number of uses left
+// plus, for each user that has not yet got a register, a reload weighted by
+// 8 to the power of the loop nesting of the user's block.  Each user is
+// weighted by its own nesting only; compounding along the dominator chain
+// saturates every value in a large loop body and makes the choice arbitrary.
 static int SpillCost(TargetInstruction* inst) {
   int cost = inst->uses;
   for (size_t i = 0; i < inst->users.length; i++) {
     TargetInstruction* user = inst->users.value.p[i];
     if (user->reg == NULL) {
-      TargetBasicBlock* block = user->block;
-      while (block != NULL) {
-        cost *= block->loop_nesting + 1;
-        if (cost > INT_MAX / 4) {
-          return INT_MAX / 4;
-        }
-        block = block->idom;
+      int nesting = user->block != NULL ? user->block->loop_nesting : 0;
+      int shift = nesting < 8 ? 3 * nesting : 24;
+      cost += 1 << shift;
+      if (cost > INT_MAX / 4) {
+        return INT_MAX / 4;
       }
     }
   }
-
   return cost;
 }
 
@@ -442,7 +453,7 @@ static bool RegisterNamedByProcessedRead(TargetGenerator* gen,
 // taking a register from something.
 static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
                                           AARCH64RegisterType type,
-                                          bool can_use_temp,
+                                          AARCH64RegPool pool,
                                           TargetBasicBlock* block,
                                           TargetInstruction** unsafe) {
   AARCH64Register* regs =
@@ -461,7 +472,7 @@ static TargetInstruction* FindSpillVictim(AARCH64RegisterAllocator* allocator,
   // Find the instruction with the lowest spill cost.
   for (size_t i = 0; i < NUM_REG_RANGES; i++) {
     if (register_ranges[i].type == type) {
-      if (!can_use_temp && register_ranges[i].temp) {
+      if (PoolExcludesRange(pool, i)) {
         continue;
       }
       for (int j = register_ranges[i].start; j <= register_ranges[i].end; j++) {
@@ -803,20 +814,20 @@ static AARCH64Register* AllocateRegisterWithType(AARCH64RegisterAllocator* alloc
                                             TargetBasicBlock* block,
                                             TargetInstruction* inst,
                                             AARCH64RegisterType type,
-                                            bool can_use_temp,
+                                            AARCH64RegPool pool,
                                             bool may_spill_after_def) {
-  AARCH64Register* reg = FindFreeRegister(allocator, type, can_use_temp);
+  AARCH64Register* reg = FindFreeRegister(allocator, type, pool);
 
   if (reg == NULL) {
     AARCH64Register* scratch = ScratchRegister(allocator, type);
     TargetInstruction* unsafe = NULL;
     TargetInstruction* victim = FindSpillVictim(
-        allocator, type, can_use_temp, block,
+        allocator, type, pool, block,
         may_spill_after_def && scratch != NULL && CanSpillAfterDefinition(inst)
             ? &unsafe
             : NULL);
     // FindSpillVictim can release a stale/dead owner while scanning.
-    reg = FindFreeRegister(allocator, type, can_use_temp);
+    reg = FindFreeRegister(allocator, type, pool);
     if (reg == NULL && victim == NULL && unsafe != NULL) {
       allocator->spill_after_definition = true;
       return scratch;
@@ -923,11 +934,18 @@ bool AARCH64HasFloatResult(TargetInstruction* inst) {
 // Can we use a temp register?  If not we will have to use a saved one and
 // those are more expensive since they need to be saved on entry and reloaded
 // on exit.
-static bool CanUseTemp(AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
+static AARCH64RegPool RegisterPool(AARCH64RegisterAllocator* allocator,
+                                   TargetInstruction* inst) {
   if (IsShortLivedVarReg(allocator, inst)) {
-    return true;
+    return kRegPoolAny;
   }
-  return !BitSetContains(&allocator->preserved_instructions, inst->id);
+  if (BitSetContains(&allocator->preserved_instructions, inst->id)) {
+    return kRegPoolSaved;
+  }
+  if ((inst->flags & AARCH64_INST_AVOID_ARG_REGS) != 0) {
+    return kRegPoolNoArgs;
+  }
+  return kRegPoolAny;
 }
 
 static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
@@ -951,7 +969,7 @@ static void AllocateVariableRegister(AARCH64RegisterAllocator* allocator,
   }
   if (reg == NULL) {
     reg = AllocateRegisterWithType(allocator, inst->block, inst, reg_type,
-                                   CanUseTemp(allocator, inst), false);
+                                   RegisterPool(allocator, inst), false);
   }
   AssignRegister(reg, inst);
 }
@@ -1032,7 +1050,7 @@ static void ReloadSpills(AARCH64RegisterAllocator* allocator,
           RegisterTypeFromInstruction(op->operand[0]);
       AARCH64Register *reg = AllocateRegisterWithType(
           allocator, reload->block, reload, reg_type,
-          CanUseTemp(allocator, reload), false);
+          RegisterPool(allocator, reload), false);
       AssignRegister(reg, reload);
       // This reload is for a single instruction.
       reload->uses = 1;
@@ -1169,7 +1187,7 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
     // result has to have a register of its own.
     reg = AllocateRegisterWithType(allocator, inst->block, inst,
                                    kAARCH64RegTypeInt,
-                                   CanUseTemp(allocator, inst), false);
+                                   RegisterPool(allocator, inst), false);
     AssignRegister(reg, inst);
     FreeRegisters(allocator, inst);
     inst->flags |= TARGET_INST_PROCESSED;
@@ -1404,7 +1422,7 @@ static void AllocateRegisterOnce(AARCH64RegisterAllocator* allocator,
     default: {
       AARCH64RegisterType reg_type = RegisterTypeFromInstruction(inst);
       reg = AllocateRegisterWithType(allocator, inst->block, inst,
-                                     reg_type, CanUseTemp(allocator, inst),
+                                     reg_type, RegisterPool(allocator, inst),
                                      true);
     }
   }
@@ -1798,19 +1816,6 @@ static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
   return TargetNewInstruction1(opcode, call);
 }
 
-static void MarkAvoidArgRegInstructions(AARCH64RegisterAllocator* allocator) {
-  TargetGenerator* gen = &allocator->g->base;
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    for (TargetInstruction* inst = block->code; inst != NULL;
-         inst = inst == block->end_code ? NULL : TargetNext(inst)) {
-      if ((inst->flags & AARCH64_INST_AVOID_ARG_REGS) != 0) {
-        BitSetInsert(&allocator->preserved_instructions, inst->id);
-      }
-    }
-  }
-}
-
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   // The hidden aggregate-result pointer has an ABI-selected dedicated
   // register. Reserve that physical register before allocating ordinary
@@ -1825,7 +1830,6 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   }
   TargetMarkCallPreservedInstructions(&allocator->g->base,
                                       &allocator->preserved_instructions);
-  MarkAvoidArgRegInstructions(allocator);
   if (TargetMaterializePreservedCallResults(
           &allocator->g->base, &allocator->preserved_instructions,
           CreateCallResultCopy)) {
@@ -1833,7 +1837,6 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
     BitSetClear(&allocator->preserved_instructions);
     TargetMarkCallPreservedInstructions(&allocator->g->base,
                                         &allocator->preserved_instructions);
-    MarkAvoidArgRegInstructions(allocator);
   }
   BuildShortLivedVarRegSet(allocator);
 

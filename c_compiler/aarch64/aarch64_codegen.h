@@ -401,8 +401,7 @@ typedef enum {
 #define AARCH64_TPREL_LO_RELOC (1 << 26)
 // Value that must survive outgoing argument-register writes (x0..x7 / d0..d7).
 // Used for the indirect-call hold and for staged register arguments.  The
-// allocator treats it as call-preserved so it is kept in a callee-saved
-// register rather than an argument register.
+// allocator never gives it an argument register.
 #define AARCH64_INST_AVOID_ARG_REGS (1 << 27)
 
 #define AARCH64_MAX_ASM_OPERANDS 16
@@ -462,6 +461,12 @@ typedef struct AARCH64Generator {
   int struct_return_reg;
   int struct_return_spill_offset;
   bool not_leaf;          // Not a leaf procedure.
+  // sp may differ from the fixed frame bottom at a return (VLA, alloca or
+  // inline asm), so the epilogue must rebuild it from x29.
+  bool moves_sp;
+  // A call lowers sp for its stack arguments, so sp is not the fixed frame
+  // bottom everywhere in the body.
+  bool calls_move_sp;
   
   Vector saved_regs;
   Vector offsets;         // Pointers to Offset.
