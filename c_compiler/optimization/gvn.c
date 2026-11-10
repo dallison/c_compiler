@@ -602,6 +602,60 @@ static void DoGlobalValueNumbering(Generator* gen, BlockLayout* layout,
   }
 }
 
+// `mem[i + C]` arrives as `adda(mem, addi(zext(i), C))`, which lowers to
+// `ldrb [base, sxtw(i+C)]`.  Rewrite to `adda(adda(mem, zext(i)), C)` so the
+// constant folds into `[base, #C]` after the index add (clang's shape).
+static void ReassociateAddressIndexOffsets(Generator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* block = gen->basic_blocks.value.p[i];
+    if (block->end_code == NULL) {
+      continue;
+    }
+    for (IRNode* inst = block->code; inst != NULL;
+         inst = inst == block->end_code ? NULL : IRNext(inst)) {
+      if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2 ||
+          inst->dest != NULL) {
+        continue;
+      }
+      IRNode* base = inst->inputs.value.p[0];
+      IRNode* index = inst->inputs.value.p[1];
+      if (index == NULL || index->opcode != IR_OP(addi) ||
+          index->inputs.length != 2 || index->dest != NULL) {
+        continue;
+      }
+      IRNode* idx_lhs = index->inputs.value.p[0];
+      IRNode* idx_rhs = index->inputs.value.p[1];
+      IRNode* idx_base = NULL;
+      IRNode* idx_const = NULL;
+      if (IRIsIntConst(idx_rhs) && !IRIsIntConst(idx_lhs)) {
+        idx_base = idx_lhs;
+        idx_const = idx_rhs;
+      } else if (IRIsIntConst(idx_lhs) && !IRIsIntConst(idx_rhs)) {
+        idx_base = idx_rhs;
+        idx_const = idx_lhs;
+      } else {
+        continue;
+      }
+      int64_t value = ((IRConstant*)idx_const)->value.ivalue;
+      if (value <= 0 || value >= 4096) {
+        continue;
+      }
+      // Only rewrite when this addi exists to feed the address; other uses
+      // need the summed index value as-is.
+      if (index->outputs.length != 1) {
+        continue;
+      }
+      TypeRecord* addr_type =
+          base->type != NULL ? base->type
+                            : (inst->type != NULL ? inst->type : NULL);
+      IRNode* inner = IRSetType(NewIR2(IR_OP(adda), base, idx_base), addr_type);
+      BasicBlockEmitBefore(gen, block, inner, inst);
+      IRReplaceInput(inst, 0, inner);
+      IRReplaceInput(inst, 1, idx_const);
+    }
+  }
+}
+
 // AArch64 loads and stores take an unsigned 12-bit offset.  Rewrite
 // `base + C` with a larger C as `(base + (C & ~0xfff)) + (C & 0xfff)` so the
 // high part, a single `add ..., lsl #12`, is shared between the accesses to
@@ -636,6 +690,7 @@ static void SplitLargeAddressOffsets(Generator* gen) {
 
 void GlobalValueNumberingOptimization(Generator* gen) {
   if (StringEqual(compiler->target_name, "aarch64")) {
+    ReassociateAddressIndexOffsets(gen);
     SplitLargeAddressOffsets(gen);
   }
   BlockLayout layout;
