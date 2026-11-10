@@ -249,7 +249,69 @@ static bool EliminateLeafIncomingMove(AARCH64Generator* generator,
 
 // Fold only adjacent, single-use move chains.  The adjacency and width checks
 // avoid extending a value's live range or dropping a meaningful 32/64-bit
-// truncation.
+// truncation.  An unspecified size (0) is treated as compatible with either
+// width so a correctly-sized staging copy can still collapse into a later
+// move whose destination was left unsized (fixed arg-register pseudos).
+static bool MoveSizesCompatible(TargetInstruction* a, TargetInstruction* b) {
+  int size_a = InstructionSize(a);
+  int size_b = InstructionSize(b);
+  return size_a == 0 || size_b == 0 || size_a == size_b;
+}
+
+static void InheritMoveSize(TargetInstruction* dest_move,
+                            TargetInstruction* src_move) {
+  if (InstructionSize(dest_move) == 0 && InstructionSize(src_move) != 0) {
+    SetInstructionSize(dest_move, InstructionSize(src_move));
+  }
+}
+
+// Incoming and outgoing ABI register pseudos are distinct TargetInstructions
+// that share an opcode (separate r0() for the parameter vs. the call arg).
+// Treat equal fixed-register opcodes as the same physical register so
+// staging round-trips can collapse to a true identity and be deleted.
+static bool SameFixedRegister(TargetInstruction* a, TargetInstruction* b) {
+  if (a == b) {
+    return true;
+  }
+  return a != NULL && b != NULL && AARCH64IsFixedRegister(a) &&
+         AARCH64IsFixedRegister(b) && a->opcode == b->opcode;
+}
+
+// Debug locs and abandoned staging temps sit between a defining copy and its
+// single user after other folds; they do not change register dataflow.
+static bool IsTransparentMoveFoldGap(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  AARCH64Opcode opcode = (AARCH64Opcode)inst->opcode;
+  if (opcode == AARCH64_OP(loc)) {
+    return true;
+  }
+  return opcode == AARCH64_OP(tmp) && inst->users.length == 0;
+}
+
+static TargetInstruction* PreviousSignificantInstruction(
+    TargetBasicBlock* block, TargetInstruction* inst) {
+  for (TargetInstruction* prev = TargetPrev(inst);
+       prev != NULL && prev->block == block; prev = TargetPrev(prev)) {
+    if (!IsTransparentMoveFoldGap(prev)) {
+      return prev;
+    }
+  }
+  return NULL;
+}
+
+static void RemoveInstructionAndDeadTempDest(AARCH64Generator* generator,
+                                             TargetBasicBlock* block,
+                                             TargetInstruction* inst) {
+  TargetInstruction* dest = inst->dest;
+  TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+  if (dest != NULL && dest->opcode == (TargetOpcode)AARCH64_OP(tmp) &&
+      dest->users.length == 0 && dest->block == block) {
+    TargetBasicBlockRemoveInstruction(&generator->base, block, dest);
+  }
+}
+
 static bool EliminateMovesInBlock(AARCH64Generator* generator,
                                   TargetBasicBlock* block) {
   bool changed = false;
@@ -264,7 +326,7 @@ static bool EliminateMovesInBlock(AARCH64Generator* generator,
         continue;
       }
       if (IsUnusedVariableMove(inst)) {
-        TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+        RemoveInstructionAndDeadTempDest(generator, block, inst);
         local_change = true;
         changed = true;
         break;
@@ -274,36 +336,82 @@ static bool EliminateMovesInBlock(AARCH64Generator* generator,
         changed = true;
         break;
       }
-      TargetInstruction* prev = TargetPrev(inst);
-      if (prev == NULL || prev->block != block ||
-          InstructionSize(prev) != InstructionSize(inst)) {
-        continue;
-      }
-
       TargetInstruction* source = MoveSource(inst);
-      if (IsMove(prev) && prev->dest == source &&
-          source != NULL && source->users.length == 1) {
-        TargetReplaceOperand(inst, MoveSourceIndex(inst), MoveSource(prev));
-        TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
-        local_change = true;
-        changed = true;
-        break;
-      }
-
-      if (prev == source && prev->dest == NULL &&
-          prev->users.length == 1 && AARCH64IsExpression(prev) &&
-          !AARCH64HasImplicitEffect(prev) &&
-          !AARCH64IsFixedRegister(prev) && !AARCH64IsConst(prev) &&
-          !AARCH64IsSymbol(prev) && !AARCH64IsVarRegister(prev) &&
-          !AARCH64IsResult(prev) &&
-          prev->opcode != (TargetOpcode)AARCH64_OP(tmp) &&
-          prev->opcode != (TargetOpcode)AARCH64_OP(reload) &&
-          AARCH64IsVarRegister(inst->dest)) {
-        prev->dest = inst->dest;
+      // Identity copies left after forwarding a call-arg staging chain
+      // (mov rN, rN), including when the source and dest are distinct
+      // incoming/outgoing fixed-register pseudos for the same ABI register.
+      if (SameFixedRegister(source, inst->dest)) {
         TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
         local_change = true;
         changed = true;
         break;
+      }
+      TargetInstruction* prev =
+          PreviousSignificantInstruction(block, inst);
+      if (prev != NULL && MoveSizesCompatible(prev, inst)) {
+        if (IsMove(prev) && prev->dest == source &&
+            source != NULL && source->users.length == 1) {
+          TargetReplaceOperand(inst, MoveSourceIndex(inst), MoveSource(prev));
+          InheritMoveSize(inst, prev);
+          RemoveInstructionAndDeadTempDest(generator, block, prev);
+          local_change = true;
+          changed = true;
+          break;
+        }
+
+        if (prev == source && prev->dest == NULL &&
+            prev->users.length == 1 && AARCH64IsExpression(prev) &&
+            !AARCH64HasImplicitEffect(prev) &&
+            !AARCH64IsFixedRegister(prev) && !AARCH64IsConst(prev) &&
+            !AARCH64IsSymbol(prev) && !AARCH64IsVarRegister(prev) &&
+            !AARCH64IsResult(prev) &&
+            prev->opcode != (TargetOpcode)AARCH64_OP(tmp) &&
+            prev->opcode != (TargetOpcode)AARCH64_OP(reload) &&
+            AARCH64IsVarRegister(inst->dest)) {
+          prev->dest = inst->dest;
+          TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+          local_change = true;
+          changed = true;
+          break;
+        }
+      }
+
+      // Call-arg staging emits all temps first, then the ABI moves, so a
+      // temp's defining copy is often separated from its only user by an
+      // unrelated argument move.  Forward when the forwarded source is not
+      // written between the definition and this use.
+      if (source != NULL &&
+          source->opcode == (TargetOpcode)AARCH64_OP(tmp) &&
+          source->users.length == 1 && source->block == block) {
+        TargetInstruction* def = NULL;
+        for (TargetInstruction* p = TargetBasicBlockBegin(block);
+             p != NULL && p != inst; p = TargetNext(p)) {
+          if (IsMove(p) && p->dest == source) {
+            def = p;
+          }
+        }
+        if (def != NULL && MoveSizesCompatible(def, inst)) {
+          TargetInstruction* forwarded = MoveSource(def);
+          bool clobbered = false;
+          for (TargetInstruction* p = TargetNext(def); p != NULL && p != inst;
+               p = TargetNext(p)) {
+            if (WritesFixedValue(p, forwarded) ||
+                SameFixedRegister(p->dest, forwarded) ||
+                (WritesRegisterOperand(p) &&
+                 SameFixedRegister(p->operand[0], forwarded))) {
+              clobbered = true;
+              break;
+            }
+          }
+          if (!clobbered) {
+            TargetReplaceOperand(inst, MoveSourceIndex(inst), forwarded);
+            InheritMoveSize(inst, def);
+            RemoveInstructionAndDeadTempDest(generator, block, def);
+            local_change = true;
+            changed = true;
+            break;
+          }
+        }
       }
     }
   } while (local_change);

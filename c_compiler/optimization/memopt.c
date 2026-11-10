@@ -4,6 +4,8 @@
 
 #include "alias.h"
 #include "basic_block.h"
+#include "bitset.h"
+#include "codegen.h"
 #include "ir.h"
 #include "type_compare.h"
 #include "vector.h"
@@ -211,8 +213,233 @@ static void OptimizeBlockMemory(Generator* gen, BasicBlock* block) {
   VectorDestruct(&available);
 }
 
+static bool InstructionClobbersAvailability(const IRMemoryLocation* location,
+                                            IRNode* value, IRNode* inst) {
+  if (IRIsObservableCheckpoint(inst)) {
+    return true;
+  }
+  if (IRAliasInstMayClobber(location, inst)) {
+    return true;
+  }
+  // Match KillClobbered: a call drops values that cannot be rematerialized
+  // even when the call is known not to touch this location.
+  return IRIsCall(inst) && !ValueSurvivesCall(value);
+}
+
+// True when |earlier| precedes |later| in the same basic block.
+static bool ComesBeforeInBlock(IRNode* earlier, IRNode* later) {
+  if (earlier == NULL || later == NULL || earlier->block == NULL ||
+      earlier->block != later->block || earlier == later) {
+    return false;
+  }
+  for (IRNode* node = IRNext(earlier);
+       node != NULL && node->block == earlier->block; node = IRNext(node)) {
+    if (node == later) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void CollectForwardReachable(Generator* gen, BasicBlock* start,
+                                    BitSet* reachable) {
+  BitSetClear(reachable);
+  Vector work;
+  VectorInit(&work);
+  BitSetInsert(reachable, start->block_id);
+  VectorAppend(&work, start);
+  while (work.length > 0) {
+    BasicBlock* block = work.value.p[--work.length];
+    for (size_t i = 0; i < block->out_edges.length; i++) {
+      BlockId id = block->out_edges.value.w[i];
+      if (BitSetContains(reachable, id)) {
+        continue;
+      }
+      BitSetInsert(reachable, id);
+      VectorAppend(&work, gen->basic_blocks.value.p[id]);
+    }
+  }
+  VectorDestruct(&work);
+}
+
+static void CollectBackwardReachable(Generator* gen, BasicBlock* start,
+                                     BitSet* reachable) {
+  BitSetClear(reachable);
+  Vector work;
+  VectorInit(&work);
+  BitSetInsert(reachable, start->block_id);
+  VectorAppend(&work, start);
+  while (work.length > 0) {
+    BasicBlock* block = work.value.p[--work.length];
+    for (size_t i = 0; i < block->in_edges.length; i++) {
+      BlockId id = block->in_edges.value.w[i];
+      if (BitSetContains(reachable, id)) {
+        continue;
+      }
+      BitSetInsert(reachable, id);
+      VectorAppend(&work, gen->basic_blocks.value.p[id]);
+    }
+  }
+  VectorDestruct(&work);
+}
+
+// True when some path from after |from| to |to| may invalidate |value| as a
+// forwarding source for |location|.  |from| is required to dominate |to|.
+static bool PathMayClobber(Generator* gen, IRNode* from, IRNode* to,
+                           const IRMemoryLocation* location, IRNode* value) {
+  BasicBlock* from_bb = from->block;
+  BasicBlock* to_bb = to->block;
+  if (from_bb == to_bb) {
+    for (IRNode* node = IRNext(from);
+         node != NULL && node != to && node->block == from_bb;
+         node = IRNext(node)) {
+      if (InstructionClobbersAvailability(location, value, node)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  BitSet forward;
+  BitSet backward;
+  BitSet on_path;
+  BitSetInit(&forward);
+  BitSetInit(&backward);
+  BitSetInit(&on_path);
+  CollectForwardReachable(gen, from_bb, &forward);
+  CollectBackwardReachable(gen, to_bb, &backward);
+  BitSetIntersection(&forward, &backward, &on_path);
+
+  bool clobbered = false;
+  BitSetIterator it;
+  BitSetIteratorStart(&it, &on_path);
+  while (!BitSetIteratorDone(&it)) {
+    BasicBlock* block =
+        VectorGet(&gen->basic_blocks, BitSetIteratorValue(&it));
+    for (IRNode* node = BasicBlockBegin(block);
+         !BasicBlockIsEmpty(block) && node != BasicBlockEnd(block);
+         node = IRNext(node)) {
+      if (block == from_bb &&
+          (node == from || ComesBeforeInBlock(node, from))) {
+        continue;
+      }
+      if (block == to_bb &&
+          (node == to || !ComesBeforeInBlock(node, to))) {
+        break;
+      }
+      if (InstructionClobbersAvailability(location, value, node)) {
+        clobbered = true;
+        break;
+      }
+    }
+    if (clobbered) {
+      break;
+    }
+    BitSetIteratorNext(&it);
+  }
+
+  BitSetDestruct(&forward);
+  BitSetDestruct(&backward);
+  BitSetDestruct(&on_path);
+  return clobbered;
+}
+
+static bool LoadDominatesLoad(IRNode* earlier, IRNode* later) {
+  if (earlier == NULL || later == NULL || earlier->block == NULL ||
+      later->block == NULL) {
+    return false;
+  }
+  if (earlier->block == later->block) {
+    return ComesBeforeInBlock(earlier, later);
+  }
+  return BitSetContains(&later->block->dominators, earlier->block->block_id);
+}
+
+// Codegen lowers IR in linked-list order, so a forwarded value must already
+// appear earlier in that order (dominance alone is not enough when layout
+// disagrees with the dominator tree).
+static bool ComesBeforeLinearly(IRNode* earlier, IRNode* later) {
+  if (earlier == NULL || later == NULL || earlier == later) {
+    return false;
+  }
+  for (IRNode* node = IRNext(earlier); node != NULL; node = IRNext(node)) {
+    if (node == later) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Reuse a dominating load of the same MustAlias location when no path from
+// that load to here clobbers it.  Local memopt only sees one block; field
+// reloads after `if (p->x > 0)` / `p->x + n` therefore survived as duplicates
+// (ChargeCycles turbo_owed).
+static void CrossBlockLoadCSE(Generator* gen) {
+  bool changed;
+  do {
+    changed = false;
+    for (size_t bi = 0; bi < gen->basic_blocks.length; bi++) {
+      BasicBlock* block = gen->basic_blocks.value.p[bi];
+      IRNode* next = NULL;
+      for (IRNode* load = BasicBlockBegin(block);
+           !BasicBlockIsEmpty(block) && load != BasicBlockEnd(block);
+           load = next) {
+        next = IRNext(load);
+        IRMemoryLocation location;
+        if (!CanReplaceLoad(load) || !IRAliasDecode(load, &location) ||
+            location.volatile_access || location.atomic_access) {
+          continue;
+        }
+
+        IRNode* best = NULL;
+        for (size_t bj = 0; bj < gen->basic_blocks.length; bj++) {
+          BasicBlock* other = gen->basic_blocks.value.p[bj];
+          if (!BitSetContains(&block->dominators, other->block_id) &&
+              other != block) {
+            continue;
+          }
+          for (IRNode* candidate = BasicBlockBegin(other);
+               !BasicBlockIsEmpty(other) &&
+               candidate != BasicBlockEnd(other) && candidate != load;
+               candidate = IRNext(candidate)) {
+            IRMemoryLocation candidate_location;
+            if (!IRIsLoadOnly(candidate) ||
+                !IRAliasDecode(candidate, &candidate_location) ||
+                IRAliasClassify(&candidate_location, &location) !=
+                    kIRMustAlias ||
+                candidate_location.size != location.size ||
+                !TypesMatchForForward(load, candidate) ||
+                !LoadDominatesLoad(candidate, load) ||
+                !ComesBeforeLinearly(candidate, load) ||
+                PathMayClobber(gen, candidate, load, &location, candidate)) {
+              continue;
+            }
+            // Prefer the earliest dominating load (longest reuse).
+            if (best == NULL || LoadDominatesLoad(candidate, best) ||
+                (candidate->block == best->block &&
+                 ComesBeforeInBlock(candidate, best))) {
+              best = candidate;
+            }
+          }
+        }
+
+        if (best != NULL) {
+          GeneratorReplaceInstruction(gen, load, best);
+          BasicBlockRemoveInstruction(gen, block, load);
+          changed = true;
+          break;
+        }
+      }
+      if (changed) {
+        break;
+      }
+    }
+  } while (changed);
+}
+
 void MemoryOptimization(Generator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     OptimizeBlockMemory(gen, gen->basic_blocks.value.p[i]);
   }
+  CrossBlockLoadCSE(gen);
 }

@@ -96,6 +96,22 @@ __attribute__((noinline)) int dead_store_global(int value) {
   return memopt_global;
 }
 
+typedef struct {
+  int owed;
+  int pad;
+} MemoptField;
+
+// Reloads of the same field across dominated successors must collapse to one
+// load when nothing in between can clobber it.
+__attribute__((noinline)) int load_cse_field(MemoptField* object, int step) {
+  if (object->owed > step) {
+    if (object->owed + step < 1024) {
+      return object->owed + step;
+    }
+  }
+  return object->owed;
+}
+
 static int unroll_values[4] = {1, 2, 3, 4};
 static int vectorize_left[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 static int vectorize_right[8] = {0, 2, 4, 6, 8, 10, 12, 14};
@@ -364,8 +380,10 @@ int main(void) {
     result |= 16;
   }
   memopt_global = 9;
+  MemoptField field = {20, 0};
   if (store_forward_global() != 11 || load_cse_global() != 22 ||
       dead_store_global(13) != 13 || memopt_global != 13 ||
+      load_cse_field(&field, 5) != 25 || load_cse_field(&field, 30) != 20 ||
       combine_nested_add(5) != 12 || combine_and_zero(7) != 7 ||
       udiv_const10(100u) != 10u || udiv_const10(9u) != 0u ||
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||

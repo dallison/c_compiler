@@ -34,3 +34,13 @@ __attribute__((noinline)) void store_zero32(unsigned int* pointer) {
 __attribute__((noinline)) void store_zero64(unsigned long* pointer) {
   *pointer = 0;
 }
+
+__attribute__((noinline)) int call_forward_callee(int a, int b);
+
+__attribute__((noinline)) int call_forward(int a, int b) {
+  return call_forward_callee(a, b);
+}
+
+__attribute__((noinline)) int call_swap(int a, int b) {
+  return call_forward_callee(b, a);
+}

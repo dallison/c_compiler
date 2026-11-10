@@ -360,6 +360,21 @@ if [[ "$load_cse_count" -ne 1 ]]; then
   echo "load CSE did not collapse the two global loads (found $load_cse_count)" >&2
   exit 1
 fi
+# Dominated successors reload the same struct field; cross-block memopt must
+# collapse those loads (ChargeCycles turbo_owed pattern).
+load_cse_field_body=$(
+  awk '/IR for function load_cse_field/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+load_cse_field_count=$(
+  grep -Ec 'load32\(.*REF object' <<<"$load_cse_field_body" || true
+)
+if [[ "$load_cse_field_count" -ne 1 ]]; then
+  echo "cross-block load CSE retained $load_cse_field_count field loads" >&2
+  exit 1
+fi
 combine_add_body=$(
   awk '/IR for function combine_nested_add/{inside=1; after_ssa=0; next} \
        /IR for function /{if (inside) exit} \
@@ -832,6 +847,19 @@ if ! grep -Eq '[[:space:]]str[[:space:]]+wzr,' <<<"$zero32_body" ||
    grep -Eq '(^|[^[:alnum:]_])(x31|w31)([^[:alnum:]_]|$)' \
       "$AARCH64_PEEPHOLE_ASM"; then
   echo "AArch64 emitter did not use architectural zero-register names" >&2
+  exit 1
+fi
+
+# Identity call-arg staging must collapse; a swapped pair needs one temp.
+forward_body=$(function_body call_forward "$AARCH64_PEEPHOLE_ASM")
+if grep -Eq '[[:space:]](mov|orr)[[:space:]]' <<<"$forward_body"; then
+  echo "AArch64 identity call still stages argument moves" >&2
+  exit 1
+fi
+swap_body=$(function_body call_swap "$AARCH64_PEEPHOLE_ASM")
+swap_moves=$(grep -Ec '[[:space:]](mov|orr)[[:space:]]' <<<"$swap_body" || true)
+if [ "$swap_moves" -ne 3 ]; then
+  echo "AArch64 swapped call args were not reduced to a 3-move parallel copy" >&2
   exit 1
 fi
 

@@ -1232,7 +1232,13 @@ static TargetInstruction* SetDestOrMove(AARCH64Generator* g,
   if (mov_opcode == AARCH64_OP(mov) && AARCH64HasFloatResult(from)) {
     mov_opcode = AARCH64_OP(fmov);
   }
-  TargetInstruction* move = Emit(g, NewInstruction1(mov_opcode, from));
+  // Preserve the source's width: an unsized mov is printed/encoded as 64-bit
+  // and turns a 32-bit value into an extra w→x copy when written to a varreg.
+  TargetInstruction* move = Emit(
+      g, CopyInstructionSize(NewInstruction1(mov_opcode, from), 0));
+  if (GetRegisterSize(to) == 0 && GetRegisterSize(move) != 0) {
+    SetInstructionSize(to, GetRegisterSize(move));
+  }
   move->dest = to;
   return to;
 }
@@ -1336,8 +1342,9 @@ static TargetInstruction* SetDestOrMoveToArgReg(AARCH64Generator* g,
   // `string::operator[](this, i)` got the string pointer in both x0 and x1
   // (`__pattern_[current]` in regex __validate of `{n,m}`, and `$N` in
   // __format).
-  TargetInstruction* move =
-      Emit(g, CopyInstructionSize(NewInstruction1(rmov_opcode, from), 0));
+  TargetInstruction* move = Emit(
+      g, CopyOrSetInstructionSize(from_node,
+                                  NewInstruction1(rmov_opcode, from)));
   move->dest = to;
   return to;
 }
@@ -2991,11 +2998,20 @@ static TargetInstruction* Store(AARCH64Generator* g, IRNode* addr_node, TargetIn
     // when nothing between that instruction and here reads the variable, and
     // nothing later reads the value after the variable has changed.
     if (src != addr && (src_shared || !NothingEmittedAfter(g, src))) {
-      TargetInstruction* move = Emit(g, NewInstruction1(opcode, src));
+      TargetInstruction* move = Emit(
+          g, SetInstructionSize(NewInstruction1(opcode, src), size));
+      // Keep the variable's register at the stored width so later copies
+      // from it are not emitted as unsized (64-bit) moves.
+      if (GetRegisterSize(addr) == 0) {
+        SetInstructionSize(addr, size);
+      }
       move->dest = addr;
       return addr;
     }
     TargetInstruction* result = SetDestOrMove(g, src, addr, opcode);
+    if (result != NULL && GetRegisterSize(result) == 0) {
+      SetInstructionSize(result, size);
+    }
     return result;
   }
 
@@ -4630,8 +4646,14 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     // into the ABI registers would otherwise clobber a value still needed
     // for another argument (regex_match) or for an indirect-call hold.
     staged->flags |= AARCH64_INST_AVOID_ARG_REGS;
-    TargetInstruction* move =
-        Emit(g, CopyInstructionSize(NewInstruction1(move_opcode, arg), 0));
+    // Size both the temp and the copy from the argument's IR type.  Copying
+    // size from the unsized tmp leaves a 0-width move, which the printer and
+    // encoder treat as 64-bit — turning `mov wT, wN` + `mov x1, xT` into an
+    // extra zero-extend that blocks the adjacent move-chain peephole.
+    CopyOrSetInstructionSize(arg_node, staged);
+    TargetInstruction* move = Emit(
+        g, CopyOrSetInstructionSize(arg_node,
+                                    NewInstruction1(move_opcode, arg)));
     move->dest = staged;
     VectorSet(&staged_register_args, i - 1, staged);
   }
@@ -4751,8 +4773,12 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
           SetDestOrMoveToArgReg(g, arg_node, arg, arg_location->location.reg,
                                 mov_opcode);
         } else {
+          // Size from the argument type, not from the (possibly unsized)
+          // staging temp: a 32-bit int must become `mov wN, ...` so the ABI
+          // zero-extends in one instruction rather than via a w→x copy pair.
           TargetInstruction* move = Emit(
-              g, CopyInstructionSize(NewInstruction1(mov_opcode, arg), 0));
+              g, CopyOrSetInstructionSize(
+                     arg_node, NewInstruction1(mov_opcode, arg)));
           move->dest = arg_location->location.reg;
         }
         break;
@@ -5897,7 +5923,13 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* 
       // Mark this as an incoming argument register so the allocator reserves
       // its physical register from function entry (it is live until this copy).
       arg_reg->flags |= TARGET_INST_INCOMING_ARG;
-      TargetInstruction* mv = Emit(g, NewInstruction1(AARCH64_OP(mov), arg_reg));
+      // Size from the parameter type so a 32-bit `int` becomes `mov wN, wM`
+      // rather than an unsized (64-bit) copy that forces a later w←x truncate
+      // when the value is used at its natural width.
+      TargetInstruction* mv = Emit(
+          g, CopyOrSetInstructionSize(symbol,
+                                      NewInstruction1(AARCH64_OP(mov), arg_reg)));
+      CopyOrSetInstructionSize(symbol, var);
       mv->dest = var;
       return var;
     }
@@ -5909,6 +5941,7 @@ static TargetInstruction* LoadIntArgumentIntoRegisterVariable(AARCH64Generator* 
       IRVariable* sym = (IRVariable*)symbol;
       TargetInstruction* var = IntVariableRegister(g, reg_var, sym->symbol);
       TargetInstruction* load = PopArg(g, symbol, arg_loc.location.offset);
+      CopyOrSetInstructionSize(symbol, var);
       load->dest = var;
       return var;
     }
