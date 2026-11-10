@@ -2053,6 +2053,15 @@ static void GenerateConditionBranch(Generator* gen, ASTNode* cond,
   }
   if (branch_form &&
       (cond->op == AST_OP(logand) || cond->op == AST_OP(logor))) {
+    // When `&&` collapses to an unsigned range compare (`x >= lo && x <= hi`,
+    // optionally with other conjuncts), evaluate it as a value so the fold in
+    // expr_codegen runs.  Otherwise keep the short-circuit branch form.
+    if (cond->op == AST_OP(logand) && ASTLogAndHasFoldableRange(cond)) {
+      IRNode* value = GenerateExpression(gen, cond);
+      GeneratorEmit(gen, NewIR2(when_true ? IR_OP(btrue) : IR_OP(bfalse), value,
+                                target));
+      return;
+    }
     BinaryASTNode* logical = (BinaryASTNode*)cond;
     IRSetLocation(cond->location);
     // The left operand settles the result when it is false for && or true

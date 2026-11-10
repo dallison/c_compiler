@@ -1246,6 +1246,20 @@ static bool InliningBlockedByVirtualBaseMemberOwner(FunctionInfo* func) {
          func->cxx_member_owner->virtual_bases.length != 0;
 }
 
+// 6502/65c02 pay dearly for code growth (16 KiB sideways banks).  Auto-inlining
+// unmarked helpers at -O2 roughly doubles libm bodies like sincos and pushes
+// the paged image past 0xC000.  -Os also uses opt_level 2, so exclude it too.
+static bool TargetAvoidsUnmarkedAutoInline(void) {
+  if (compiler->optimize_for_size) {
+    return true;
+  }
+  if (compiler->target_name == NULL) {
+    return false;
+  }
+  return StringEqual(compiler->target_name, "6502") ||
+         StringEqual(compiler->target_name, "65c02");
+}
+
 // Contract: Read-only except for output flags; true when symbol/linkage/inline keyword
 // rules reject inlining. Sets `*force_inline_out` and `*unmarked_small_out` when false
 // would not be returned solely due to those checks (always set before returning true).
@@ -1254,7 +1268,7 @@ static bool InliningBlockedByDefinitionAndLinkage(
   bool force_inline =
       func->symbol != NULL && func->symbol->flags.always_inline;
   bool unmarked_small = (OptLevel2() || compiler->lto) && !func->is_inline &&
-                        !force_inline;
+                        !force_inline && !TargetAvoidsUnmarkedAutoInline();
   *force_inline_out = force_inline;
   *unmarked_small_out = unmarked_small;
   if (func->symbol == NULL ||

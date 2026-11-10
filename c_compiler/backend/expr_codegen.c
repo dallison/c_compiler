@@ -5893,7 +5893,322 @@ static IRNode* GenerateBooleanValue(Generator* gen, IRNode* value) {
   return IRSetType(GeneratorEmit(gen, NewIR2(opcode, value, zero)), bool_type);
 }
 
+// Strip casts, i2b, and integer promotions (s2i/…) so range folding can match
+// `addr >= lo && addr <= hi` after the usual conversions have been inserted.
+static ASTNode* ASTStripCasts(ASTNode* node) {
+  while (node != NULL) {
+    if (node->op == AST_OP(cast)) {
+      node = ((CastASTNode*)node)->expr;
+      continue;
+    }
+    if (node->op == AST_OP(i2b) || node->op == AST_OP(s2i) ||
+        node->op == AST_OP(c2i) || node->op == AST_OP(i2s) ||
+        node->op == AST_OP(s2c) || node->op == AST_OP(l2i) ||
+        node->op == AST_OP(i2l) || node->op == AST_OP(ll2i) ||
+        node->op == AST_OP(i2ll)) {
+      node = ((UnaryASTNode*)node)->sub;
+      continue;
+    }
+    break;
+  }
+  return node;
+}
+
+static bool ASTSameComparedValue(ASTNode* a, ASTNode* b) {
+  a = ASTStripCasts(a);
+  b = ASTStripCasts(b);
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  if (a->op == AST_OP(identifier) && b->op == AST_OP(identifier)) {
+    return ((IdentifierASTNode*)a)->symbol == ((IdentifierASTNode*)b)->symbol;
+  }
+  return false;
+}
+
+static bool ASTIsRelationalOp(ASTOpcode op) {
+  return op == AST_OP(less) || op == AST_OP(lesseq) || op == AST_OP(greater) ||
+         op == AST_OP(greatereq);
+}
+
+static ASTOpcode ASTFlipRelationalOp(ASTOpcode op) {
+  switch (op) {
+    case AST_OP(less):
+      return AST_OP(greater);
+    case AST_OP(lesseq):
+      return AST_OP(greatereq);
+    case AST_OP(greater):
+      return AST_OP(less);
+    case AST_OP(greatereq):
+      return AST_OP(lesseq);
+    default:
+      return op;
+  }
+}
+
+// Integer promotions wrap literals in cast nodes; peel those so a relational
+// against `0xfc00` still looks like a constant compare.
+static bool ASTIsIntConstantExpr(ASTNode* node, int64_t* constant) {
+  node = ASTStripCasts(node);
+  if (node == NULL || !ASTNodeIsIntConstant(node)) {
+    return false;
+  }
+  if (constant != NULL) {
+    *constant = ASTNodeConstantValue(node);
+  }
+  return true;
+}
+
+// Match `value RELOP const` or `const RELOP value`, normalizing the constant
+// onto the right-hand side.
+static bool MatchRelationalAgainstConstant(ASTNode* node, ASTNode** value,
+                                           ASTOpcode* op, int64_t* constant) {
+  node = ASTStripCasts(node);
+  if (node == NULL || !ASTIsRelationalOp(node->op)) {
+    return false;
+  }
+  BinaryASTNode* bin = (BinaryASTNode*)node;
+  int64_t cst = 0;
+  if (ASTIsIntConstantExpr(bin->right, &cst) &&
+      !ASTIsIntConstantExpr(bin->left, NULL)) {
+    *value = bin->left;
+    *op = node->op;
+    *constant = cst;
+    return true;
+  }
+  if (ASTIsIntConstantExpr(bin->left, &cst) &&
+      !ASTIsIntConstantExpr(bin->right, NULL)) {
+    *value = bin->right;
+    *op = ASTFlipRelationalOp(node->op);
+    *constant = cst;
+    return true;
+  }
+  return false;
+}
+
+// Flatten a tree of `&&` into leaf operands (order preserved).
+static void CollectLogAndLeaves(ASTNode* node, ASTNode** leaves, int* count,
+                                int max_leaves) {
+  node = ASTStripCasts(node);
+  if (node == NULL || *count >= max_leaves) {
+    return;
+  }
+  if (node->op == AST_OP(logand)) {
+    BinaryASTNode* bin = (BinaryASTNode*)node;
+    CollectLogAndLeaves(bin->left, leaves, count, max_leaves);
+    CollectLogAndLeaves(bin->right, leaves, count, max_leaves);
+    return;
+  }
+  leaves[(*count)++] = node;
+}
+
+static bool ApplyRelationalBound(ASTOpcode op, int64_t cst, bool* has_lo,
+                                  bool* has_hi, int64_t* lo, int64_t* hi) {
+  switch (op) {
+    case AST_OP(greatereq):
+      if (*has_lo) {
+        return false;
+      }
+      *has_lo = true;
+      *lo = cst;
+      return true;
+    case AST_OP(greater):
+      if (*has_lo || cst == INT64_MAX) {
+        return false;
+      }
+      *has_lo = true;
+      *lo = cst + 1;
+      return true;
+    case AST_OP(lesseq):
+      if (*has_hi) {
+        return false;
+      }
+      *has_hi = true;
+      *hi = cst;
+      return true;
+    case AST_OP(less):
+      if (*has_hi || cst == INT64_MIN) {
+        return false;
+      }
+      *has_hi = true;
+      *hi = cst - 1;
+      return true;
+    default:
+      return false;
+  }
+}
+
+static IRNode* EmitUnsignedRangeCompare(Generator* gen, ASTNode* value_ast,
+                                        ASTNode* result_ast, int64_t lo,
+                                        uint64_t span) {
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  TypeRecord* cmp_type =
+      NewTypeRecordWithSize(kTypeInt | kTypeUnsigned, kQualPlain);
+  IRNode* value = GenerateExpression(gen, value_ast);
+  if (value->type != NULL && value->type->size < cmp_type->size) {
+    value = GenerateZeroExtend(gen, value_ast, value);
+  }
+  value = IRSetType(value, cmp_type);
+  IRNode* lo_node = GeneratorGetIntConstant(gen, cmp_type, lo);
+  IRNode* span_node = GeneratorGetIntConstant(gen, cmp_type, (int64_t)span);
+  IRNode* diff =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(subi), value, lo_node)),
+                cmp_type);
+  IRNode* cmp =
+      IRSetType(GeneratorEmit(gen, NewIR2(IR_OP(cmplei), diff, span_node)),
+                bool_type);
+  if (result_ast != NULL && !TypeIsBool(result_ast->type)) {
+    return GenerateZeroExtend(gen, result_ast, cmp);
+  }
+  return cmp;
+}
+
+// Analyze an `&&` chain for a foldable unsigned range.  On success fills the
+// out-params; returns false when the pattern does not apply.
+static bool AnalyzeUnsignedRangeConjunction(ASTNode* node, ASTNode** range_value,
+                                            int64_t* lo, uint64_t* span,
+                                            ASTNode** other_leaves,
+                                            int* other_count) {
+  ASTNode* leaves[8];
+  int leaf_count = 0;
+  CollectLogAndLeaves(node, leaves, &leaf_count, 8);
+  if (leaf_count < 2) {
+    return false;
+  }
+
+  ASTNode* value_seen = NULL;
+  bool has_lo = false;
+  bool has_hi = false;
+  int64_t lo_val = 0;
+  int64_t hi_val = 0;
+  int range_leaves = 0;
+  int others = 0;
+
+  for (int i = 0; i < leaf_count; i++) {
+    ASTNode* value = NULL;
+    ASTOpcode op = AST_OP(less);
+    int64_t cst = 0;
+    if (MatchRelationalAgainstConstant(leaves[i], &value, &op, &cst) &&
+        value != NULL && value->type != NULL && TypeIsIntegral(value->type) &&
+        (value_seen == NULL || ASTSameComparedValue(value_seen, value)) &&
+        ApplyRelationalBound(op, cst, &has_lo, &has_hi, &lo_val, &hi_val)) {
+      if (value_seen == NULL) {
+        value_seen = value;
+      }
+      range_leaves++;
+      continue;
+    }
+    if (other_leaves != NULL && others < 8) {
+      other_leaves[others] = leaves[i];
+    }
+    others++;
+  }
+
+  if (range_leaves < 2 || !has_lo || !has_hi || lo_val > hi_val ||
+      value_seen == NULL) {
+    return false;
+  }
+  uint64_t span_val = (uint64_t)hi_val - (uint64_t)lo_val;
+  if (span_val > UINT32_MAX) {
+    return false;
+  }
+  if (range_leaves + others != leaf_count) {
+    return false;
+  }
+  if (range_value != NULL) {
+    *range_value = value_seen;
+  }
+  if (lo != NULL) {
+    *lo = lo_val;
+  }
+  if (span != NULL) {
+    *span = span_val;
+  }
+  if (other_count != NULL) {
+    *other_count = others;
+  }
+  return true;
+}
+
+bool ASTLogAndHasFoldableRange(ASTNode* cond) {
+  if (!OptLevel1() || cond == NULL) {
+    return false;
+  }
+  cond = ASTStripCasts(cond);
+  if (cond->op != AST_OP(logand)) {
+    return false;
+  }
+  return AnalyzeUnsignedRangeConjunction(cond, NULL, NULL, NULL, NULL, NULL);
+}
+
+// Fold `x >= lo && x <= hi` (and open/closed variants, possibly mixed with
+// other `&&` conjuncts) into the unsigned range form `(x - lo) <= (hi - lo)`.
+// This is the dominant check in BBC memory-mapped I/O paths.
+static IRNode* TryFoldUnsignedRangeConjunction(Generator* gen,
+                                               BinaryASTNode* node) {
+  if (!OptLevel1() || node->base.op != AST_OP(logand)) {
+    return NULL;
+  }
+
+  ASTNode* range_value = NULL;
+  int64_t lo = 0;
+  uint64_t span = 0;
+  ASTNode* other_leaves[8];
+  int other_count = 0;
+  if (!AnalyzeUnsignedRangeConjunction((ASTNode*)node, &range_value, &lo, &span,
+                                       other_leaves, &other_count)) {
+    return NULL;
+  }
+
+  // Pure range, or `other && … && range` with short-circuit on the others.
+  if (other_count == 0) {
+    return EmitUnsignedRangeCompare(gen, range_value, (ASTNode*)node, lo, span);
+  }
+
+  // Emit: other1 && other2 && … && range_compare, using short-circuit for
+  // the non-range conjuncts so side effects stay ordered.
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  Symbol* result = SyntaxNewTemporary(gen->syntax, bool_type);
+  IRNode* result_var = GeneratorGetVariable(gen, result);
+  IROpcode store_op = GetStoreOpcodeForType(bool_type);
+  IRNode* end_label = NewIR(IR_OP(label));
+
+  for (int i = 0; i < other_count; i++) {
+    IRNode* cond = GenerateExpression(gen, other_leaves[i]);
+    IRNode* cond_bool = GenerateBooleanValue(gen, cond);
+    IRNode* store =
+        GeneratorEmit(gen, NewIR2(store_op, result_var, cond_bool));
+    IRSetType(store, bool_type);
+    IRSetVarDef(store, result);
+    GeneratorEmit(gen, NewIR2(IR_OP(bfalse), cond, end_label));
+  }
+
+  IRNode* range_cmp =
+      EmitUnsignedRangeCompare(gen, range_value, NULL, lo, span);
+  IRNode* store =
+      GeneratorEmit(gen, NewIR2(store_op, result_var, range_cmp));
+  IRSetType(store, bool_type);
+  IRSetVarDef(store, result);
+
+  GeneratorEmit(gen, end_label);
+  IRNode* value = IRSetType(
+      GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(bool_type), result_var)),
+      bool_type);
+  IRSetVarUse(value, result);
+  if (!TypeIsBool(node->base.type)) {
+    return GenerateZeroExtend(gen, (ASTNode*)node, value);
+  }
+  return value;
+}
+
 static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
+ IRNode* folded_range = TryFoldUnsignedRangeConjunction(gen, node);
+ if (folded_range != NULL) {
+   return folded_range;
+ }
  // If the left node is constant we can omit the comparison and branches.
  if (OptLevel1() && ASTNodeIsIntConstant(node->left)) {
    ConstantASTNode* c = (ConstantASTNode*)node->left;
@@ -7903,4 +8218,6 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
   assert(result->type != NULL);
   return result;
 }
+
+
 

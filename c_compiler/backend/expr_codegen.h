@@ -15,6 +15,10 @@
 IRNode* GenerateExpression(Generator* gen, ASTNode* node);
 IROpcode GetLoadOpcodeForType(TypeRecord* type);
 IROpcode GetStoreOpcodeForType(TypeRecord* type);
+// True when `cond` is an `&&` chain that expr_codegen can collapse into a
+// single unsigned range compare (`x >= lo && x <= hi`, optionally with other
+// conjuncts).  Used by statement condition branching to opt into value form.
+bool ASTLogAndHasFoldableRange(ASTNode* cond);
 // Constant evaluation: the local's bytes are indeterminate (erroneous in
 // C++26) until written.
 void GenerateConstexprUninitializedObjectMarker(Generator* gen,

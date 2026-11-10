@@ -3858,48 +3858,114 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
   return SetLoweredNode(node, inc);
 }
 
-// TODO: AARCH64 has bitfield instructions,
 static TargetInstruction* LowerGetBitField(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[1]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[2]);
+  int size = (node->type != NULL && node->type->size > 4) || bit_pos + bit_size > 32
+                 ? kSize64Bit
+                 : kSize32Bit;
   if (TypeIsUnsigned(node->type)) {
-    // Shift right by bit_pos
-    // Mask with bit_size
-    TargetInstruction* lsr = Emit(g, NewInstruction2(AARCH64_OP(asr), value, GetIntConstant(g, NULL, kTargetType32Bit, bit_pos)));
-    uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
-    TargetInstruction* m = Emit(g, NewInstruction2(AARCH64_OP(and), lsr, GetIntConstant(g, NULL, kTargetType32Bit, mask)));
-    SetLoweredNode(node, m);
-    return m;
+    // UBFX extracts an unsigned bitfield in one instruction.  A plain AND is
+    // enough when the field already sits at bit 0.
+    TargetInstruction* result;
+    if (bit_pos == 0) {
+      uint64_t mask = bit_size == 64 ? UINT64_C(~0) : (UINT64_C(1) << bit_size) - 1;
+      result = Emit(g, SetInstructionSize(
+                           NewInstruction2(AARCH64_OP(and), value,
+                                           GetIntConstant(g, NULL, kTargetType32Bit, mask)),
+                           size));
+    } else {
+      result = Emit(g, SetInstructionSize(
+                           NewInstruction3(AARCH64_OP(ubfx), value,
+                                           GetIntConstant(g, NULL, kTargetType32Bit, bit_pos),
+                                           GetIntConstant(g, NULL, kTargetType32Bit, bit_size)),
+                           size));
+    }
+    SetLoweredNode(node, result);
+    return result;
   }
-  // Shift left by 64 - (bit_pos + bit_size).  Top bit in bit 63.
-  // Shift right by 64 - bit_size.
-  TargetInstruction* lsl = Emit(g, NewInstruction2(AARCH64_OP(lsl), value, GetIntConstant(g, NULL, kTargetType32Bit, 64 - (bit_pos + bit_size))));
-  TargetInstruction* asr = Emit(g, NewInstruction2(AARCH64_OP(asr), lsl, GetIntConstant(g, NULL, kTargetType32Bit, 64 - bit_size)));
-
-  SetLoweredNode(node, asr);
-  return asr;
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(
+             NewInstruction3(AARCH64_OP(sbfx), value,
+                             GetIntConstant(g, NULL, kTargetType32Bit, bit_pos),
+                             GetIntConstant(g, NULL, kTargetType32Bit, bit_size)),
+             size));
+  SetLoweredNode(node, result);
+  return result;
 }
 
-// Shift input left by bit_pos
-// Mask input to bit_size bits (in correct position)
-// Mask output by ~mask
-// Or input into output.
+// Insert |input|'s low |bit_size| bits into |output| at |bit_pos|.
+// Constant 0/all-ones collapse to a single AND/ORR; the general case uses
+// UBFIZ+AND+ORR (three ops) instead of the old LSL+AND+AND+ORR sequence.
 static TargetInstruction* LowerSetBitField(AARCH64Generator* g, IRNode* node) {
   IRNode* output_node = node->inputs.value.p[0];
   IRNode* input_node = node->inputs.value.p[1];
   int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
-  uint64_t mask = bit_size == 64 ? -1LL : (UINT64_C(1) << bit_size) - 1;
-  mask <<= bit_pos;
-  
-  TargetInstruction* input = Materialize(g, input_node);
-  TargetInstruction* output = Materialize(g, output_node);
-  TargetInstruction* lsl = Emit(g, NewInstruction2(AARCH64_OP(lsl), input, GetIntConstant(g, NULL, kTargetType32Bit, bit_pos)));
-  TargetInstruction* m1 = Emit(g, NewInstruction2(AARCH64_OP(and), lsl, GetIntConstant(g, NULL, kTargetType32Bit, mask)));
+  uint64_t field_mask = bit_size == 64 ? UINT64_C(~0) : (UINT64_C(1) << bit_size) - 1;
+  uint64_t mask = field_mask << bit_pos;
+  int size = (bit_pos + bit_size > 32) ? kSize64Bit : kSize32Bit;
 
-  TargetInstruction* m2 = Emit(g, NewInstruction2(AARCH64_OP(and), output, GetIntConstant(g, NULL, kTargetType32Bit, ~mask)));
-  TargetInstruction* result = Emit(g, NewInstruction2(AARCH64_OP(orr), m1, m2));
+  TargetInstruction* output = Materialize(g, output_node);
+  TargetInstruction* clear_mask =
+      GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)~mask);
+
+  if (IRIsIntConst(input_node)) {
+    uint64_t v = ((uint64_t)IRIntConstValue(input_node)) & field_mask;
+    if (v == 0) {
+      TargetInstruction* result = Emit(
+          g, SetInstructionSize(NewInstruction2(AARCH64_OP(and), output, clear_mask),
+                                size));
+      SetLoweredNode(node, result);
+      return result;
+    }
+    if (v == field_mask) {
+      TargetInstruction* result = Emit(
+          g, SetInstructionSize(
+                 NewInstruction2(AARCH64_OP(orr), output,
+                                 GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)mask)),
+                 size));
+      SetLoweredNode(node, result);
+      return result;
+    }
+    TargetInstruction* cleared = Emit(
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(and), output, clear_mask),
+                              size));
+    TargetInstruction* result = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(AARCH64_OP(orr), cleared,
+                               GetIntConstant(g, NULL, kTargetType32Bit,
+                                              (int64_t)(v << bit_pos))),
+               size));
+    SetLoweredNode(node, result);
+    return result;
+  }
+
+  TargetInstruction* input = Materialize(g, input_node);
+  TargetInstruction* placed;
+  if (bit_pos == 0) {
+    placed = Emit(g, SetInstructionSize(
+                         NewInstruction2(AARCH64_OP(and), input,
+                                         GetIntConstant(g, NULL, kTargetType32Bit,
+                                                        (int64_t)field_mask)),
+                         size));
+  } else {
+    // UBFIZ zeroes the destination and inserts the low |bit_size| bits of
+    // |input| at |bit_pos|, so a following AND/ORR merges with |output|.
+    placed = Emit(g, SetInstructionSize(
+                         NewInstruction3(AARCH64_OP(ubfiz), input,
+                                         GetIntConstant(g, NULL, kTargetType32Bit,
+                                                        bit_pos),
+                                         GetIntConstant(g, NULL, kTargetType32Bit,
+                                                        bit_size)),
+                         size));
+  }
+  TargetInstruction* cleared = Emit(
+      g, SetInstructionSize(NewInstruction2(AARCH64_OP(and), output, clear_mask),
+                            size));
+  TargetInstruction* result = Emit(
+      g, SetInstructionSize(NewInstruction2(AARCH64_OP(orr), placed, cleared), size));
   SetLoweredNode(node, result);
   return result;
 }
