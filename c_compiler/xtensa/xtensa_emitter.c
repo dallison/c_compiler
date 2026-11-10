@@ -504,8 +504,9 @@ static const char* GetRegisterName(TargetInstruction* inst, char* buf,
     case XTENSA_OP(resultd):
     case XTENSA_OP(callf):
     case XTENSA_OP(rcallf):
-      return XTENSARegisterNameFromNum(XTENSA_FLOAT_RETURN_REG,
-                                       kXTENSARegTypeFloat, buf, size);
+      // Soft-float: float results share the integer return register.
+      return XTENSARegisterNameFromNum(XTENSA_INT_RETURN_REG, kXTENSARegTypeInt,
+                                       buf, size);
     default:
       return "";
   }

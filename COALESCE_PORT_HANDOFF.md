@@ -1,12 +1,11 @@
 # Register-copy coalescing port — handoff
 
-Status as of the commit that adds this file. The work ports the AArch64
-copy-coalescing optimization (originally `cd84f334`) to every other
-backend that shares the same register-allocator template, plus a
-correctness hardening of the original AArch64 implementation. All of it
-is committed together; validation is complete for some targets and
-partial for others (see per-target status). Read the "Remaining work"
-section before touching the unfinished parts.
+Status as of the follow-up validation pass (after `8e08f010`). The work
+ports the AArch64 copy-coalescing optimization (originally `cd84f334`) to
+every other backend that shares the same register-allocator template,
+plus a correctness hardening of the original AArch64 implementation.
+**Validation is now complete for all six ported targets** — see
+per-target status. Optional bazel-harness / i386 spot checks remain.
 
 ## What the optimization does
 
@@ -109,21 +108,21 @@ meaningful comparison. The C++ exec corpus is
 - **AArch64**: BBC emulator bit-identical to clang (`ram same screen
   same`), ~26.4G retired instructions (coalescing win preserved after
   the hardening scan). Spot tests pass (`0492`, `0515`, `0516`, `1052`,
-  `0470`, `coalstress.c`). NOT rerun after the hardening scan: full O2
-  and O0 exec suites (they passed at `cd84f334` without the scan; the
-  scan only rejects more coalesces).
+  `0470`, `coalstress.c`). **Rerun after hardening (done):** full O2
+  pass=1019 fail=13 (`0111 0114 0115 0118 0119 0120 0124 0128 0403
+  0474 0475 1044 1045` — the environmental set; `exec_aarch64_O2.txt`
+  is comment-only in this tree so they show as `fail` not
+  `known-fail`); full O0 pass=1028 fail=4 (`0065 0111 1044 1045`) as
+  expected. Done.
 - **RISC-V**: full direct O2 corpus — failure set identical to baseline
   (12 environmental failures: `0111 0114 0115 0118 0119 0120 0124 0128
   0275 0403 0474 0475`). Regex `0515`/`0516` pass (they were the `ra`
   regression). Done.
-- **ARM**: full direct O2 corpus — failure set identical to baseline
-  after the live-holder fix (`0492_standard_codecvt` and
-  `0518_standard_locale_facets` were real regressions, now pass; the
-  rest is the environmental cluster plus `0340`, `1044`, `1045`). The
-  mini-suite of the 16 direct-run failures matches baseline exactly.
-  NOT rerun after the final `InstructionHoldsRegister` quad-pair
-  hardening: ARM mini-suite / full suite (spots `0492` + `coalstress.c`
-  pass; the pair change only adds rejections).
+- **ARM**: full direct O2 after quad-pair hardening — pass=1016
+  fail=14 (`0111 0114 0115 0118 0119 0120 0124 0128 0340 0403 0474
+  0475 1044 1045`). Mini-suite of those 14 on pre-port
+  `arm_reg_alloc.c` (`8e08f010^`): pass=0 fail=14 — identical, **0
+  regressions**. Done.
 - **x86-64**: full direct O2 corpus pass=1022 fail=11, and all 11
   (`0111 0114 0115 0118 0119 0120 0124 0128 0403 0474 0475`) verified
   failing identically on baseline. Done. i386 profile shares the code
@@ -131,38 +130,21 @@ meaningful comparison. The C++ exec corpus is
 - **risc_v32**: full exec corpus via `bazel-bin/riscv` interpreter,
   pass=973 fail=57; all 57 verified failing identically on baseline.
   Done (no dedicated suite exists for this target).
-- **Xtensa**: full exec corpus via `bazel-bin/esp32` interpreter
-  (link recipe: `-nostdlib`, `bazel-bin/libc/esp32_start.o`,
-  `-e _start`, `libcxtensa.a`), pass=667 fail=363. The baseline
-  comparison of those 363 failures was **not finished** — this is the
-  main remaining validation item. The backend is immature: float
-  `printf`, float spill codegen (`s32i f0, ...` assembler error), and
-  double support are broken *on baseline* too (verified individually
-  for `coalstress.c` variants), so many failures are expected to be
-  baseline noise. Spot tests `co.c`, `vfwd.c`, exec `0001` pass with
-  the port; `1052`/`0473` fail and `0492` fails to compile with the
-  port — baseline status unknown (covered by the unfinished
-  comparison).
+- **Xtensa**: coalesce port itself: pass=667 fail=363 with 0
+  regressions vs pre-port. Follow-up backend hardening (complete EH
+  stubs, soft-float int-reg discipline, larger IRAM, more libc math)
+  raised the suite to **pass=704 fail=326** — eliminated the 233
+  `__cxa_*` link failures and invalid `fN`-in-integer-insn assemble
+  errors. Remaining failures are mostly runtime (no real unwinder /
+  soft-float arithmetic still nop'd) plus TLS `tprel` and a few
+  missing symbols. Done for coalesce validation; further EH/FPU
+  work is separate.
 
 ## Remaining work (priority order)
 
-1. **Xtensa baseline comparison.** A mini-suite of exactly the 363
-   ported-run failures is staged outside git at
-   `/tmp/cg/xtsuite/tests/exec` (may not survive; regenerate from a
-   ported full run if gone). Stash only
-   `c_compiler/xtensa/xtensa_reg_alloc.c`, rebuild `//:davecc`, run
-   the mini-suite with the xtensa command below, and confirm the
-   baseline failure set is identical (every test fails on baseline
-   too). Any test that *passes* on baseline is a real xtensa
-   regression to debug. Note a previous attempt at this run aborted
-   mid-way and left the port in `git stash` — it was restored with
-   `git stash pop stash@{0}`; check `git stash list` before/after.
-2. **ARM rerun after quad-pair hardening**: rerun the ARM mini-suite
-   (`/tmp/cg/armsuite`, 16 tests) or the full ARM direct O2 suite and
-   confirm the failure set still matches baseline.
-3. **AArch64 suite rerun after the hardening scan**: full O2 and O0
-   exec suites (commands below). Expected: O2 fail set = the 13-entry
-   `exec_aarch64_O2.txt` baseline, O0 = `0065 0111 1044 1045`.
+1. ~~Xtensa baseline comparison~~ — done (0 regressions).
+2. ~~ARM rerun after quad-pair hardening~~ — done (0 regressions).
+3. ~~AArch64 O2/O0 after hardening scan~~ — done (expected fail sets).
 4. Optional: `bazel test //cxx_testsuite:exec_aarch64_O2
    //cxx_testsuite:exec_arm_O2 //cxx_testsuite:exec_riscv_O2
    //cxx_testsuite:exec_x86_64_O2` as an end-to-end confirmation

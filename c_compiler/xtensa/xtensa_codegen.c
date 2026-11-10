@@ -1472,11 +1472,9 @@ static int MaxIntRegisterVariables(XTENSAGenerator* rv) {
 }
 
 static int MaxFpRegisterVariables(XTENSAGenerator* rv) {
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
-  if (is_leaf) {
-    return XTENSA_LAST_LEAF_FP_REG_VAR - XTENSA_FIRST_LEAF_FP_REG_VAR + 1;
-  }
-  return XTENSA_LAST_FP_REG_VAR - XTENSA_FIRST_FP_REG_VAR + 1;
+  // Soft-float: never home variables in the (unused) FP register file.
+  (void)rv;
+  return 0;
 }
 
 static bool UseRegisterForVariable(XTENSAGenerator* rv, IRNode* var_node) {

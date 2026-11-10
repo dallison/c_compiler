@@ -707,43 +707,14 @@ static XTENSARegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
   switch ((XTENSAOpcode)inst->opcode) {
     case XTENSA_OP(constf):
     case XTENSA_OP(constd):
-    case XTENSA_OP(fmv_s):
-    case XTENSA_OP(fmv_d):
-    case XTENSA_OP(fa0):
-    case XTENSA_OP(fa1):
-    case XTENSA_OP(fa2):
-    case XTENSA_OP(fa3):
-    case XTENSA_OP(fa4):
-    case XTENSA_OP(fa5):
-    case XTENSA_OP(fa6):
-    case XTENSA_OP(fa7):
-    case XTENSA_OP(fvarreg):
-    case XTENSA_OP(fmv_w_x):
-    case XTENSA_OP(fneg_d):
-    case XTENSA_OP(fneg_s):
-    case XTENSA_OP(fcvt_s_l):
-    case XTENSA_OP(fcvt_d_l):
-      return kXTENSARegTypeFloat;
-
-    case XTENSA_OP(fcvt_w_d):
-    case XTENSA_OP(fcvt_wu_d):
-    case XTENSA_OP(fcvt_l_s):
-    case XTENSA_OP(fcvt_lu_s):
-    case XTENSA_OP(fcvt_l_d):
-    case XTENSA_OP(fcvt_lu_d):
-    case XTENSA_OP(fmv_x_d):
+    // ESP32 soft-float: the assembler has no FP register file / FP opcodes
+    // (codegen still names RISC-V f* ops which the emitter nops).  Keep every
+    // value — including float bit patterns — in the integer register file so
+    // integer instructions never see an fN operand.
+    case XTENSA_OP(tmp):
       return kXTENSARegTypeInt;
 
-    case XTENSA_OP(tmp):
-      // A tmp placeholder is integer unless tagged as holding a float value.
-      return (inst->flags & XTENSA_INST_FLOAT_TMP) ? kXTENSARegTypeFloat
-                                                   : kXTENSARegTypeInt;
-
     default:
-      if ((XTENSAOpcode)inst->opcode >= XTENSA_OP(flw) &&
-          (XTENSAOpcode)inst->opcode <= XTENSA_OP(fmv_d_x)) {
-        return kXTENSARegTypeFloat;
-      }
       return kXTENSARegTypeInt;
   }
 }
@@ -1313,7 +1284,8 @@ static bool AllocateUsingDest(XTENSARegisterAllocator* allocator,
     case XTENSA_OP(fa7):
     case XTENSA_OP(resultf):
     case XTENSA_OP(resultd):
-      fixed_dest_type = kXTENSARegTypeFloat;
+      // Soft-float: float args/results share the integer arg/return regs.
+      fixed_dest_type = kXTENSARegTypeInt;
       break;
     default:
       fixed_dest = false;
@@ -1553,8 +1525,9 @@ static void AllocateRegisterOnce(XTENSARegisterAllocator* allocator,
     case XTENSA_OP(fa5):
     case XTENSA_OP(fa6):
     case XTENSA_OP(fa7):
-      reg = &allocator->float_regs[(int)inst->opcode - XTENSA_OP(fa0) +
-                                   XTENSA_FP_ARG_START];
+      // Soft-float: map faN onto the matching integer argument register.
+      reg = &allocator->int_regs[(int)inst->opcode - XTENSA_OP(fa0) +
+                                 XTENSA_INT_ARG_START];
       break;
 
     case XTENSA_OP(structreturn):
@@ -1572,25 +1545,23 @@ static void AllocateRegisterOnce(XTENSARegisterAllocator* allocator,
 
     case XTENSA_OP(resultf):
     case XTENSA_OP(resultd):
-      reg = &allocator->float_regs[XTENSA_FLOAT_RETURN_REG];
+      // Soft-float ABI: float results come back in the integer return reg.
+      reg = &allocator->int_regs[XTENSA_INT_RETURN_REG];
       break;
 
     case XTENSA_OP(call):
     case XTENSA_OP(rcall):
+    case XTENSA_OP(callf):
+    case XTENSA_OP(rcallf):
       // CALL8 preserves a2-a7, but the emitter then copies the windowed
       // return (a10/a11) back into a2/a3.  A value still live in either
       // register does not survive that copy, so spill it before the result
-      // takes the register.  Arguments consumed by this call were already
-      // freed above.
+      // takes the register.  Soft-float: float calls use the same int return.
       EvictPhysicalRegister(allocator, kXTENSARegTypeInt,
                             XTENSA_INT_RETURN_VALUE_0, inst);
       EvictPhysicalRegister(allocator, kXTENSARegTypeInt,
                             XTENSA_INT_RETURN_VALUE_1, inst);
       reg = &allocator->int_regs[XTENSA_INT_RETURN_REG];
-      break;
-    case XTENSA_OP(callf):
-    case XTENSA_OP(rcallf):
-      reg = &allocator->float_regs[XTENSA_FLOAT_RETURN_REG];
       break;
 
     case XTENSA_OP(feq_s):
