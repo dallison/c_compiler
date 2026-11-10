@@ -12,6 +12,7 @@
 
 #include "checked_math.h"
 #include "loop_info.h"
+#include "type_compare.h"
 
 static bool TypeContainsVolatile(TypeRecord* type) {
   for (; type != NULL; type = type->next) {
@@ -148,7 +149,7 @@ static uint32_t AccessSize(IRNode* inst) {
   return 0;
 }
 
-static bool DecodeAddress(IRNode* address, Symbol** base,
+static bool DecodeAddress(IRNode* address, Symbol** base, IRNode** pointer,
                           IRMemoryRootKind* kind, int64_t* offset) {
   while (address != NULL) {
     if (address->opcode == IR_OP(adda) && address->inputs.length == 2) {
@@ -178,12 +179,24 @@ static bool DecodeAddress(IRNode* address, Symbol** base,
       continue;
     }
     Symbol* symbol = VariableSymbol(address);
-    if (symbol == NULL) {
-      return false;
+    if (symbol != NULL) {
+      *base = symbol;
+      *pointer = NULL;
+      *kind = RootKind(address);
+      return *kind != kIRMemoryUnknown;
     }
-    *base = symbol;
-    *kind = RootKind(address);
-    return *kind != kIRMemoryUnknown;
+    // Pointer value from a load (e.g. `loada` of a pointer parameter): treat
+    // the node identity as the object root so consecutive field stores through
+    // the same pointer MustAlias.
+    if (address->opcode == IR_OP(loada) || address->opcode == IR_OP(load64) ||
+        address->opcode == IR_OP(mova) ||
+        (address->type != NULL && TypeIsPointerOrArray(address->type))) {
+      *base = NULL;
+      *pointer = address;
+      *kind = kIRMemoryIndirect;
+      return true;
+    }
+    return false;
   }
   return false;
 }
@@ -217,8 +230,9 @@ bool IRAliasDecode(IRNode* inst, IRMemoryLocation* location) {
   }
 
   location->offset = 0;
+  location->pointer = NULL;
   if (!DecodeAddress(inst->inputs.value.p[0], &location->base,
-                     &location->kind, &location->offset)) {
+                     &location->pointer, &location->kind, &location->offset)) {
     location->offset = IR_MEMORY_OFFSET_UNKNOWN;
     return false;
   }
@@ -242,18 +256,44 @@ bool IRAliasDecode(IRNode* inst, IRMemoryLocation* location) {
   location->volatile_access =
       TypeContainsVolatile(inst->type) ||
       (address != NULL && TypeContainsVolatile(address->type));
-  location->escaped =
-      location->base->flags.address_taken ||
-      TypeIsArray(location->base->type);
+  if (location->base != NULL) {
+    location->escaped =
+        location->base->flags.address_taken ||
+        TypeIsArray(location->base->type);
+  } else {
+    // Indirect pointer roots escape by definition.
+    location->escaped = true;
+  }
   return true;
+}
+
+static bool SameObjectRoot(const IRMemoryLocation* lhs,
+                           const IRMemoryLocation* rhs) {
+  if (lhs->kind == kIRMemoryIndirect || rhs->kind == kIRMemoryIndirect) {
+    return lhs->kind == kIRMemoryIndirect && rhs->kind == kIRMemoryIndirect &&
+           lhs->pointer != NULL && lhs->pointer == rhs->pointer;
+  }
+  return lhs->base != NULL && lhs->base == rhs->base;
 }
 
 IRAliasResult IRAliasClassify(const IRMemoryLocation* lhs,
                               const IRMemoryLocation* rhs) {
-  if (lhs->base == NULL || rhs->base == NULL) {
-    return kIRMayAlias;
-  }
-  if (lhs->base != rhs->base) {
+  if (!SameObjectRoot(lhs, rhs)) {
+    // An indirect pointer may touch globals/escaped objects, but it does not
+    // alias a distinct non-escaping local, temporary, or argument slot.
+    if (lhs->kind == kIRMemoryIndirect || rhs->kind == kIRMemoryIndirect) {
+      const IRMemoryLocation* named =
+          lhs->kind == kIRMemoryIndirect ? rhs : lhs;
+      if ((named->kind == kIRMemoryLocal || named->kind == kIRMemoryTemporary ||
+           named->kind == kIRMemoryArgument) &&
+          !named->escaped) {
+        return kIRNoAlias;
+      }
+      return kIRMayAlias;
+    }
+    if (lhs->base == NULL || rhs->base == NULL) {
+      return kIRMayAlias;
+    }
     return kIRNoAlias;
   }
   if (lhs->offset == IR_MEMORY_OFFSET_UNKNOWN ||
@@ -277,7 +317,8 @@ IRAliasResult IRAliasClassify(const IRMemoryLocation* lhs,
 }
 
 static bool UnknownEffectMayClobber(const IRMemoryLocation* location) {
-  if (location->base == NULL || location->escaped) {
+  if (location->kind == kIRMemoryIndirect || location->base == NULL ||
+      location->escaped) {
     return true;
   }
   return location->kind == kIRMemoryStatic ||

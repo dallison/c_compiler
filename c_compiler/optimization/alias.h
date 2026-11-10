@@ -21,10 +21,14 @@ typedef enum {
   kIRMemoryTemporary,
   kIRMemoryStatic,
   kIRMemoryExtern,
+  // Rooted at an SSA pointer value (e.g. `loada` of a pointer parameter)
+  // rather than a named object.  `pointer` identifies the root; `base` is NULL.
+  kIRMemoryIndirect,
 } IRMemoryRootKind;
 
 typedef struct {
   Symbol* base;
+  IRNode* pointer;
   IRMemoryRootKind kind;
   int64_t offset;
   uint32_t size;

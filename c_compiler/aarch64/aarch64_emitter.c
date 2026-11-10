@@ -1484,7 +1484,13 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                 GetRegisterName(inst->operand[0], reg_size,buf2,
                                sizeof(buf2)));
       } else {
-        assert(false);
+        char buf3[8];
+        fprintf(fp, "%s, [%s, %s]\n",
+                GetRegisterName(inst, reg_size, buf1, sizeof(buf1)),
+                GetRegisterName(inst->operand[0], kSize64Bit, buf2,
+                               sizeof(buf2)),
+                GetRegisterName(inst->operand[1], kSize64Bit, buf3,
+                               sizeof(buf3)));
       }
       break;
 
@@ -1534,7 +1540,14 @@ static void PrintInstruction(AARCH64Emitter* emitter, TargetInstruction* inst,
                                sizeof(buf2)));
 
       } else {
-        assert(false);
+        char buf3[8];
+        fprintf(fp, "%s, [%s, %s]\n",
+                GetRegisterName(inst->operand[0], reg_size, buf1,
+                               sizeof(buf1)),
+                GetRegisterName(inst->operand[1], kSize64Bit, buf2,
+                               sizeof(buf2)),
+                GetRegisterName(inst->operand[2], kSize64Bit, buf3,
+                               sizeof(buf3)));
       }
       break;
       
@@ -2025,6 +2038,18 @@ static void ProgramLoadStore(AsmModule* module, bool load, bool fp, int size,
         module, AARCH64EncodeLoadStoreUnscaled(size, fp, opc, value_reg,
                                                base_reg, offset, 0));
   }
+}
+
+// [Xn, Xm] with option=LSL (3) and S=0.  Integer only (V=0); the encode
+// helper does not set the SIMD V bit.
+static void ProgramLoadStoreRegisterOffset(AsmModule* module, bool load,
+                                           int size, bool sign, int value_reg,
+                                           int base_reg, int index_reg) {
+  int opc = sign && load ? (size == 3 ? 2 : 3) : load;
+  AARCH64ProgramEmitWord(
+      module, AARCH64EncodeLoadStoreRegister(size, opc, value_reg, base_reg,
+                                             index_reg, /*option=*/3,
+                                             /*scaled=*/false));
 }
 
 static void ProgramLabelName(String* result, const char* function,
@@ -3279,6 +3304,14 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
       bool sign = op == AARCH64_OP(ldrsb) || op == AARCH64_OP(ldrsh) ||
                   op == AARCH64_OP(ldursb) || op == AARCH64_OP(ldursh) ||
                   op == AARCH64_OP(ldursw);
+      if (!TargetIsConst(inst->operand[1]) &&
+          (AARCH64Opcode)inst->operand[1]->opcode != AARCH64_OP(zr) &&
+          op != AARCH64_OP(fldr) && size != 4) {
+        ProgramLoadStoreRegisterOffset(
+            module, true, size, sign, dest, ProgramRegNum(inst->operand[0]),
+            ProgramRegNum(inst->operand[1]));
+        return;
+      }
       int offset = TargetIsConst(inst->operand[1])
                        ? (int)TargetIntValue(inst->operand[1])
                        : 0;
@@ -3300,6 +3333,14 @@ static void ProgramEmitInstruction(AARCH64Emitter* emitter,
                            ? 1
                            : GetRegisterSize(inst) == kSize128Bit ? 4
                            : ProgramIs64(inst) ? 3 : 2;
+      if (!TargetIsConst(inst->operand[2]) &&
+          (AARCH64Opcode)inst->operand[2]->opcode != AARCH64_OP(zr) &&
+          op != AARCH64_OP(fstr) && size != 4) {
+        ProgramLoadStoreRegisterOffset(
+            module, false, size, false, ProgramRegNum(inst->operand[0]),
+            ProgramRegNum(inst->operand[1]), ProgramRegNum(inst->operand[2]));
+        return;
+      }
       int offset = TargetIsConst(inst->operand[2])
                        ? (int)TargetIntValue(inst->operand[2])
                        : 0;

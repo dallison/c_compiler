@@ -185,9 +185,11 @@ static bool LoadsSSAValue(IRNode* load) {
   return true;
 }
 
-// A small constant offset folds into the addressing mode of each load or store
-// that uses it.  Sharing one adda across blocks instead keeps the address live
-// in a register for nothing.
+// A small non-zero constant offset folds into the addressing mode of each load
+// or store that uses it.  Sharing one adda across uses would keep the address
+// live in a register for nothing once the offset has been folded.  Offset 0 is
+// excluded so identical `adda(p, 0)` nodes still CSE: memopt needs a common
+// address node to forward consecutive bitfield stores through a pointer.
 static bool IsFoldableAddressOffset(IRNode* inst) {
   if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2) {
     return false;
@@ -197,7 +199,7 @@ static bool IsFoldableAddressOffset(IRNode* inst) {
     return false;
   }
   int64_t value = ((IRConstant*)offset)->value.ivalue;
-  return value >= 0 && value < 4096;
+  return value > 0 && value < 4096;
 }
 
 // `ssa_loads` enables LoadsSSAValue.  Exception edges are not in the CFG, so in

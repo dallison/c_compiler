@@ -2288,7 +2288,11 @@ static IRNode* InsertBitfieldValue(Generator* gen, IRNode* word, IRNode* value,
                                           bitfield->bit_offset),
                   GeneratorGetIntConstant(gen, bitfield->symbol->type,
                                           bitfield->bit_size)));
-  return IRSetType(bitstore, bitfield->symbol->type);
+  // The result is the updated storage word, not the field itself: keep the
+  // word's type so store-to-load forwarding can match a later load of that word.
+  TypeRecord* word_type =
+      word->type != NULL ? word->type : bitfield->symbol->type;
+  return IRSetType(bitstore, word_type);
 }
 
 static IRNode* LoadBitfield(Generator* gen, IRNode* load, BinaryASTNode* node) {

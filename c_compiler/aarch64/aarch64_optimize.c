@@ -355,12 +355,15 @@ static void RemoveUnusedExpressions(AARCH64Generator* generator) {
 }
 
 static bool IsAddressAdd(TargetInstruction* inst) {
+  // Do not require a single user: RMW (`s->x += n`) shares one address add
+  // between a load and a store.  Folding each memory op independently still
+  // leaves a correct [base, #imm] form, and the add is removed once its last
+  // user is rewritten.
   return inst != NULL &&
          inst->opcode == (TargetOpcode)AARCH64_OP(add) &&
          inst->dest == NULL && inst->operand[0] != NULL &&
          inst->operand[1] != NULL &&
-         AARCH64IsIntConst(inst->operand[1]) &&
-         inst->users.length == 1;
+         AARCH64IsIntConst(inst->operand[1]);
 }
 
 static bool IsFoldableLoad(TargetInstruction* inst) {
@@ -480,7 +483,71 @@ static bool FoldAddressAdd(AARCH64Generator* generator,
   TargetReplaceOperand(
       memory, offset_index,
       TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, combined));
-  TargetBasicBlockRemoveInstruction(&generator->base, base->block, base);
+  if (base->users.length == 0) {
+    TargetBasicBlockRemoveInstruction(&generator->base, base->block, base);
+  }
+  return true;
+}
+
+// add base, index [, lsl #n] used only to form [tmp, #0].  Fold into the
+// register-offset form [base, index] (or scaled when n matches the access
+// size).  Unscaled (ldur*) opcodes have no register-offset encoding.
+static bool IsRegisterAddressAdd(TargetInstruction* inst) {
+  return inst != NULL &&
+         inst->opcode == (TargetOpcode)AARCH64_OP(add) &&
+         inst->dest == NULL &&
+         inst->operand[0] != NULL && !AARCH64IsIntConst(inst->operand[0]) &&
+         inst->operand[1] != NULL && !AARCH64IsIntConst(inst->operand[1]);
+}
+
+static int RegisterAddressAddShift(TargetInstruction* add) {
+  if (add->operand[2] == NULL && add->operand[3] == NULL) {
+    return 0;
+  }
+  if (add->operand[2] != NULL &&
+      add->operand[2]->opcode == (TargetOpcode)AARCH64_OP(oplsl) &&
+      add->operand[3] != NULL && AARCH64IsIntConst(add->operand[3])) {
+    return (int)AARCH64IntValue(add->operand[3]);
+  }
+  return -1;
+}
+
+static int AccessSizeLog2(TargetInstruction* memory) {
+  int bytes = AccessBytes(memory);
+  int log2 = 0;
+  while ((1 << log2) < bytes) {
+    log2++;
+  }
+  return (1 << log2) == bytes ? log2 : -1;
+}
+
+static bool FoldAddressIndex(AARCH64Generator* generator,
+                             TargetInstruction* memory,
+                             int base_index, int offset_index) {
+  TargetInstruction* base = memory->operand[base_index];
+  TargetInstruction* offset = memory->operand[offset_index];
+  if (!IsRegisterAddressAdd(base) || offset == NULL ||
+      !AARCH64IsIntConst(offset) || AARCH64IntValue(offset) != 0 ||
+      IsUnscaledOnly(memory)) {
+    return false;
+  }
+  int shift = RegisterAddressAddShift(base);
+  int access_log2 = AccessSizeLog2(memory);
+  if (shift < 0 || access_log2 < 0 ||
+      (shift != 0 && shift != access_log2)) {
+    return false;
+  }
+  // Keep only the unshifted form for now: scaled register offsets need an
+  // extra shift marker on the load/store, and stores already use operand[2]
+  // for the index.  shift==0 covers mem[i] / Rd-style byte accesses.
+  if (shift != 0) {
+    return false;
+  }
+  TargetReplaceOperand(memory, base_index, base->operand[0]);
+  TargetReplaceOperand(memory, offset_index, base->operand[1]);
+  if (base->users.length == 0) {
+    TargetBasicBlockRemoveInstruction(&generator->base, base->block, base);
+  }
   return true;
 }
 
@@ -493,10 +560,12 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
        inst = prev) {
     prev = TargetPrev(inst);
     if (IsFoldableLoad(inst)) {
-      while (FoldAddressAdd(generator, inst, 0, 1)) {
+      while (FoldAddressAdd(generator, inst, 0, 1) ||
+             FoldAddressIndex(generator, inst, 0, 1)) {
       }
     } else if (IsFoldableStore(inst)) {
-      while (FoldAddressAdd(generator, inst, 1, 2)) {
+      while (FoldAddressAdd(generator, inst, 1, 2) ||
+             FoldAddressIndex(generator, inst, 1, 2)) {
       }
     }
   }

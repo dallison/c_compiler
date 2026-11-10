@@ -2704,8 +2704,14 @@ static void GenerateSwitchStatement(Generator* gen,
   // lower cbra to a computed jump table.
   bool target_has_jump_table =
       !StringEqual(&compiler->target->name, "wasm32");
+  // Prefer a jump table when density is high, or when there are enough cases
+  // that a binary search would be deep while the table span stays modest
+  // (interpreter opcode switches are the usual example: ~60 cases over 0..255).
+  int64_t span = node->max_case_value - node->min_case_value + 1;
+  bool modest_sparse_table = node->cases.length >= 16 && span > 0 &&
+                             span <= 512 && node->density > 0.15f;
   if (target_has_jump_table && node->cases.length > min_dense_cases &&
-      node->density > 0.5) {
+      (node->density > 0.5f || modest_sparse_table)) {
     GenerateDenseSwitch(gen, node);
   } else {
     GenerateSparseSwitch(gen, node);

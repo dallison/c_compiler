@@ -2360,10 +2360,12 @@ static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {
   
   
   // Get an idea of the case density.
-  // Density is mass/volume.  Let's say that the number of cases is the
-  // masss and the distance between the min and max values is the volume.
+  // Density is mass/volume.  The number of cases is the mass and the
+  // inclusive span between min and max is the volume.
   float mass = (node->cases.length + (node->default_node != NULL ? 1 : 0));
-  float volume = node->max_case_value - node->min_case_value;
+  float volume =
+      (float)((uint64_t)node->max_case_value - (uint64_t)node->min_case_value) +
+      1.0f;
   if (volume != 0) {
     node->density = mass / volume;
   }

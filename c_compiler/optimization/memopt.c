@@ -40,9 +40,17 @@ static void AvailableRemoveAt(Vector* available, size_t index) {
 }
 
 static bool TypesMatchForForward(IRNode* load, IRNode* value) {
-  return load != NULL && value != NULL && load->type != NULL &&
-         value->type != NULL && TypeEqual(load->type, value->type) &&
-         !TypeIsVolatile(load->type) && !TypeIsVolatile(value->type);
+  if (load == NULL || value == NULL || load->type == NULL || value->type == NULL ||
+      TypeIsVolatile(load->type) || TypeIsVolatile(value->type)) {
+    return false;
+  }
+  if (TypeEqual(load->type, value->type)) {
+    return true;
+  }
+  // setbit used to be typed as the field; accept same-sized integrals so a
+  // corrected word-typed setbit still forwards when types are not pointer-equal.
+  return TypeIsIntegral(load->type) && TypeIsIntegral(value->type) &&
+         load->type->size == value->type->size;
 }
 
 static bool CanReplaceLoad(IRNode* load) {
@@ -73,7 +81,10 @@ static void KillClobbered(Vector* available, IRNode* inst) {
 static void MarkObserved(Vector* available, const IRMemoryLocation* location) {
   for (size_t i = 0; i < available->length; i++) {
     AvailableAccess* access = available->value.p[i];
-    if (IRAliasClassify(&access->location, location) != kIRNoAlias) {
+    // Only MustAlias proves this load reads that store.  MayAlias would
+    // conservatively block dead-store elimination of consecutive bitfield
+    // writes through a pointer.
+    if (IRAliasClassify(&access->location, location) == kIRMustAlias) {
       access->observed = true;
     }
   }
