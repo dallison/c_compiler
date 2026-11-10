@@ -405,6 +405,13 @@ bool IRAliasInstMayClobber(const IRMemoryLocation* location, IRNode* inst) {
   if (IsAtomic(inst)) {
     return true;
   }
+  // Register bitfield ops never touch memory.  Keep this explicit so a future
+  // reclassification of setbit as IRIsStore cannot revive the unknown-clobber
+  // path through IRAliasDecode on the word operand.
+  if (inst != NULL &&
+      (inst->opcode == IR_OP(setbit) || inst->opcode == IR_OP(getbit))) {
+    return false;
+  }
   if (!IRIsStore(inst) || inst->opcode == IR_OP(addressof) ||
       inst->opcode == IR_OP(cast)) {
     return false;

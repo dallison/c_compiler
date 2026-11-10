@@ -97,6 +97,31 @@ __attribute__((noinline)) int dead_store_global(int value) {
 }
 
 typedef struct {
+  union {
+    struct {
+      unsigned int c : 1;
+      unsigned int z : 1;
+      unsigned int i : 1;
+      unsigned int d : 1;
+      unsigned int b : 1;
+      unsigned int x : 1;
+      unsigned int v : 1;
+      unsigned int s : 1;
+    } bits;
+    int value;
+  } flags;
+} MemoptFlags;
+
+// Consecutive bitfield stores to the same word must DSE to one store.  setbit
+// is a register op; treating it as a memory clobber used to keep both stores.
+__attribute__((noinline)) int dead_store_bitfields(MemoptFlags* cpu,
+                                                   unsigned char v) {
+  cpu->flags.bits.z = (v == 0);
+  cpu->flags.bits.s = (v & 0x80) != 0;
+  return cpu->flags.value;
+}
+
+typedef struct {
   int owed;
   int pad;
 } MemoptField;
@@ -401,8 +426,11 @@ int main(void) {
   memopt_global = 9;
   MemoptField field = {20, 0};
   MemoptParent parent = {3, &field};
+  MemoptFlags flags = {{0}};
   if (store_forward_global() != 11 || load_cse_global() != 22 ||
       dead_store_global(13) != 13 || memopt_global != 13 ||
+      dead_store_bitfields(&flags, 0) != 2 ||
+      dead_store_bitfields(&flags, 0x80) != 0x80 ||
       load_cse_field(&field, 5) != 25 || load_cse_field(&field, 30) != 20 ||
       load_survive_child_call(&parent) != 6 ||
       combine_nested_add(5) != 12 || combine_and_zero(7) != 7 ||

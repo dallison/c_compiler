@@ -347,6 +347,21 @@ if grep -Eq 'store32\(.* 1 ' <<<"$dead_store_body"; then
   echo "dead-store elimination retained the overwritten store of 1" >&2
   exit 1
 fi
+# Two bitfield writes to the same word: setbit must not clobber availability,
+# so the first store32 is dead and only one remains.
+dead_store_bits_body=$(
+  awk '/IR for function dead_store_bitfields/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+dead_store_bits_count=$(
+  grep -Ec 'store32\(' <<<"$dead_store_bits_body" || true
+)
+if [[ "$dead_store_bits_count" -ne 1 ]]; then
+  echo "bitfield dead-store kept $dead_store_bits_count store32s (want 1)" >&2
+  exit 1
+fi
 load_cse_body=$(
   awk '/IR for function load_cse_global/{inside=1; after_ssa=0; next} \
        /IR for function /{if (inside) exit} \

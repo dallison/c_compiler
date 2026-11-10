@@ -1376,7 +1376,10 @@ bool IRIsStore(IRNode* node) {
     case IR_OP(deca):
     case IR_OP(decf):
     case IR_OP(decd):
-    case IR_OP(setbit):
+    // setbit is a pure register insert (word, value, pos, size).  It is not a
+    // memory store; treating it as one makes alias analysis report an unknown
+    // clobber (decode fails on the word operand) and kills prior field stores
+    // before dead-store elimination can coalesce consecutive bitfield writes.
     case IR_OP(capturev):
     case IR_OP(vadd):
     case IR_OP(vsub):
