@@ -60,21 +60,13 @@ static bool CanReplaceLoad(IRNode* load) {
          !TypeIsVolatile(load->type);
 }
 
-// Constants and addresses can be rematerialized after a call.  Call results
-// and other computed values live in caller-saved registers, so forwarding a
-// later load to them reuses a clobbered register instead of the stack slot
-// the store was keeping live.
-static bool ValueSurvivesCall(IRNode* value) {
-  return value != NULL &&
-         (IRIsConst(value) || value->opcode == IR_OP(addressof));
-}
-
 static void KillClobbered(Vector* available, IRNode* inst) {
-  bool call = IRIsCall(inst);
   for (size_t i = available->length; i > 0; i--) {
     AvailableAccess* access = available->value.p[i - 1];
-    if (IRAliasInstMayClobber(&access->location, inst) ||
-        (call && !ValueSurvivesCall(access->value))) {
+    // Rely on alias mod/ref alone.  SSA values are allowed to remain live
+    // across calls that do not clobber the location; the register allocator
+    // keeps them in callee-saved registers when needed.
+    if (IRAliasInstMayClobber(&access->location, inst)) {
       AvailableRemoveAt(available, i - 1);
     }
   }
@@ -109,21 +101,6 @@ static AvailableAccess* FindMustAlias(Vector* available,
   return found;
 }
 
-static bool CallBetween(IRNode* earlier, IRNode* later) {
-  if (earlier == NULL || later == NULL || earlier->block == NULL ||
-      earlier->block != later->block) {
-    return false;
-  }
-  for (IRNode* node = IRNext(earlier);
-       node != NULL && node->block == earlier->block && node != later;
-       node = IRNext(node)) {
-    if (IRIsCall(node)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static bool ForwardLoad(Generator* gen, BasicBlock* block, Vector* available,
                         IRNode* load, const IRMemoryLocation* location) {
   if (!CanReplaceLoad(load) || location->volatile_access ||
@@ -133,10 +110,18 @@ static bool ForwardLoad(Generator* gen, BasicBlock* block, Vector* available,
   AvailableAccess* access = FindMustAlias(available, location, false);
   if (access == NULL || access->value == NULL ||
       !TypesMatchForForward(load, access->value) ||
-      IRCheckpointBetween(access->producer, load) ||
-      (CallBetween(access->producer, load) &&
-       !ValueSurvivesCall(access->value))) {
+      IRCheckpointBetween(access->producer, load)) {
     return false;
+  }
+  // Refuse to forward when a call that may clobber this location sits between
+  // the producer and the load.  KillClobbered normally drops those entries,
+  // but a producer added earlier in this same scan can still be present.
+  for (IRNode* node = IRNext(access->producer);
+       node != NULL && node->block == access->producer->block && node != load;
+       node = IRNext(node)) {
+    if (IRAliasInstMayClobber(location, node)) {
+      return false;
+    }
   }
   GeneratorReplaceInstruction(gen, load, access->value);
   BasicBlockRemoveInstruction(gen, block, load);
@@ -215,15 +200,11 @@ static void OptimizeBlockMemory(Generator* gen, BasicBlock* block) {
 
 static bool InstructionClobbersAvailability(const IRMemoryLocation* location,
                                             IRNode* value, IRNode* inst) {
+  (void)value;
   if (IRIsObservableCheckpoint(inst)) {
     return true;
   }
-  if (IRAliasInstMayClobber(location, inst)) {
-    return true;
-  }
-  // Match KillClobbered: a call drops values that cannot be rematerialized
-  // even when the call is known not to touch this location.
-  return IRIsCall(inst) && !ValueSurvivesCall(value);
+  return IRAliasInstMayClobber(location, inst);
 }
 
 // True when |earlier| precedes |later| in the same basic block.

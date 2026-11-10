@@ -112,6 +112,25 @@ __attribute__((noinline)) int load_cse_field(MemoptField* object, int step) {
   return object->owed;
 }
 
+typedef struct {
+  int flag;
+  MemoptField* child;
+} MemoptParent;
+
+__attribute__((noinline)) int peek_child_flag(const MemoptField* child) {
+  return child != NULL ? child->owed : 0;
+}
+
+// A call that only receives a child pointer must not force a reload of the
+// parent's fields.
+__attribute__((noinline)) int load_survive_child_call(MemoptParent* parent) {
+  int before = parent->flag;
+  if (peek_child_flag(parent->child) > 0) {
+    return parent->flag + before;
+  }
+  return parent->flag;
+}
+
 static int unroll_values[4] = {1, 2, 3, 4};
 static int vectorize_left[8] = {1, 2, 3, 4, 5, 6, 7, 8};
 static int vectorize_right[8] = {0, 2, 4, 6, 8, 10, 12, 14};
@@ -381,9 +400,11 @@ int main(void) {
   }
   memopt_global = 9;
   MemoptField field = {20, 0};
+  MemoptParent parent = {3, &field};
   if (store_forward_global() != 11 || load_cse_global() != 22 ||
       dead_store_global(13) != 13 || memopt_global != 13 ||
       load_cse_field(&field, 5) != 25 || load_cse_field(&field, 30) != 20 ||
+      load_survive_child_call(&parent) != 6 ||
       combine_nested_add(5) != 12 || combine_and_zero(7) != 7 ||
       udiv_const10(100u) != 10u || udiv_const10(9u) != 0u ||
       udiv_const7(0xffffffffu) != (0xffffffffu / 7u) ||

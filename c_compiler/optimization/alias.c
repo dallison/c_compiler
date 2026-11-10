@@ -325,8 +325,81 @@ static bool UnknownEffectMayClobber(const IRMemoryLocation* location) {
          location->kind == kIRMemoryExtern;
 }
 
+// True when |arg| is a pointer into the same object as |location| (the callee
+ // can therefore write that object).  A pointer *value* loaded from a field of
+ // the object (e.g. `Sounding(interpreter->bbc)`) roots a different object and
+ // does not give the callee access to |location|.
+static bool CallArgProvidesAccessTo(const IRMemoryLocation* location,
+                                    IRNode* arg) {
+  while (arg != NULL && arg->opcode == IR_OP(cast) && arg->inputs.length == 1) {
+    arg = arg->inputs.value.p[0];
+  }
+  if (arg == NULL) {
+    return false;
+  }
+  if (location->kind == kIRMemoryIndirect && arg == location->pointer) {
+    return true;
+  }
+  if (location->base != NULL && VariableSymbol(arg) == location->base) {
+    return true;
+  }
+
+  Symbol* base = NULL;
+  IRNode* pointer = NULL;
+  IRMemoryRootKind kind = kIRMemoryUnknown;
+  int64_t offset = 0;
+  if (!DecodeAddress(arg, &base, &pointer, &kind, &offset)) {
+    // Opaque pointer-typed value: conservatively assume it may reach an
+    // escaped / indirect object.
+    return location->kind == kIRMemoryIndirect || location->escaped ||
+           location->kind == kIRMemoryStatic ||
+           location->kind == kIRMemoryExtern || location->base == NULL;
+  }
+  if (location->kind == kIRMemoryIndirect) {
+    return kind == kIRMemoryIndirect && pointer == location->pointer;
+  }
+  return base != NULL && base == location->base;
+}
+
+static bool CallMayClobberLocation(const IRMemoryLocation* location,
+                                   IRNode* call) {
+  // Named escaped objects and globals may have leaked; keep the conservative
+  // call clobber.  Refine only SSA-pointer (indirect) locations, which is the
+  // ChargeCycles pattern: `Sounding(interp->bbc)` must not kill `interp->x`.
+  if (location->kind != kIRMemoryIndirect) {
+    return UnknownEffectMayClobber(location);
+  }
+  if (call->inputs.length == 0 || call->inputs.value.p[0] == NULL) {
+    return true;
+  }
+  // Indirect calls have an unknown callee; assume they can reach anything.
+  IRNode* target = call->inputs.value.p[0];
+  if (target->opcode != IR_OP(staticvar) &&
+      target->opcode != IR_OP(externvar)) {
+    return true;
+  }
+
+  for (size_t i = 1; i < call->inputs.length; i++) {
+    IRNode* arg = call->inputs.value.p[i];
+    if (arg != NULL && arg->opcode == IR_OP(pusharg) &&
+        arg->inputs.length > 0) {
+      arg = arg->inputs.value.p[0];
+    }
+    if (arg == NULL) {
+      continue;
+    }
+    if (CallArgProvidesAccessTo(location, arg)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 bool IRAliasInstMayClobber(const IRMemoryLocation* location, IRNode* inst) {
-  if (IRIsCall(inst) || IRAsmClobbersMemory(inst)) {
+  if (IRIsCall(inst)) {
+    return CallMayClobberLocation(location, inst);
+  }
+  if (IRAsmClobbersMemory(inst)) {
     return UnknownEffectMayClobber(location);
   }
   if (IsAtomic(inst)) {

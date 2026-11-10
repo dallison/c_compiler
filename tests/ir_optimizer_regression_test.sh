@@ -375,6 +375,20 @@ if [[ "$load_cse_field_count" -ne 1 ]]; then
   echo "cross-block load CSE retained $load_cse_field_count field loads" >&2
   exit 1
 fi
+# Calls that only receive a child pointer must not invalidate parent fields.
+survive_call_body=$(
+  awk '/IR for function load_survive_child_call/{inside=1; after_ssa=0; next} \
+       /IR for function /{if (inside) exit} \
+       inside && /After SSA has been removed/{after_ssa=1; next} \
+       inside && after_ssa' "$IR_FILE"
+)
+survive_call_loads=$(
+  grep -Ec 'load32\(.*REF parent' <<<"$survive_call_body" || true
+)
+if [[ "$survive_call_loads" -ne 1 ]]; then
+  echo "parent field was reloaded across child-pointer call ($survive_call_loads loads)" >&2
+  exit 1
+fi
 combine_add_body=$(
   awk '/IR for function combine_nested_add/{inside=1; after_ssa=0; next} \
        /IR for function /{if (inside) exit} \
