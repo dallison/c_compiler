@@ -3911,6 +3911,51 @@ static TargetInstruction* LowerGetBitField(AARCH64Generator* g, IRNode* node) {
   return result;
 }
 
+// Peel zeroextend wrappers from a setbit value.
+static IRNode* PeelZeroExtends(IRNode* node) {
+  while (node != NULL && node->opcode == IR_OP(zeroextendi) &&
+         node->inputs.length >= 1) {
+    node = node->inputs.value.p[0];
+  }
+  return node;
+}
+
+// `flags.bit = (x & (1<<pos)) != 0` already has the field in place as
+// `x & (1<<pos)`.  Return that andi so we can ORR it directly and skip
+// cmp/cset/ubfiz (BBC N/sign flag).
+static IRNode* MatchAlignedBitTest(IRNode* input, int bit_pos, int bit_size) {
+  if (bit_size != 1 || bit_pos < 0 || bit_pos >= 63) {
+    return NULL;
+  }
+  IRNode* node = PeelZeroExtends(input);
+  if (node == NULL || node->opcode != IR_OP(cmpnei) || node->inputs.length < 2) {
+    return NULL;
+  }
+  IRNode* lhs = node->inputs.value.p[0];
+  IRNode* rhs = node->inputs.value.p[1];
+  if (!IRIsIntConst(rhs) || IRIntConstValue(rhs) != 0) {
+    return NULL;
+  }
+  lhs = PeelZeroExtends(lhs);
+  if (lhs == NULL || lhs->opcode != IR_OP(andi) || lhs->inputs.length < 2) {
+    return NULL;
+  }
+  IRNode* and_lhs = lhs->inputs.value.p[0];
+  IRNode* and_rhs = lhs->inputs.value.p[1];
+  IRNode* mask_node = NULL;
+  if (IRIsIntConst(and_rhs) && !IRIsIntConst(and_lhs)) {
+    mask_node = and_rhs;
+  } else if (IRIsIntConst(and_lhs) && !IRIsIntConst(and_rhs)) {
+    mask_node = and_lhs;
+  } else {
+    return NULL;
+  }
+  if (IRIntConstValue(mask_node) != (int64_t)(UINT64_C(1) << bit_pos)) {
+    return NULL;
+  }
+  return lhs;
+}
+
 // Insert |input|'s low |bit_size| bits into |output| at |bit_pos|.
 // Constant 0/all-ones collapse to a single AND/ORR; the general case uses
 // UBFIZ+AND+ORR (three ops) instead of the old LSL+AND+AND+ORR sequence.
@@ -3958,24 +4003,30 @@ static TargetInstruction* LowerSetBitField(AARCH64Generator* g, IRNode* node) {
     return result;
   }
 
-  TargetInstruction* input = Materialize(g, input_node);
+  IRNode* aligned_bits = MatchAlignedBitTest(input_node, bit_pos, bit_size);
   TargetInstruction* placed;
-  if (bit_pos == 0) {
-    placed = Emit(g, SetInstructionSize(
-                         NewInstruction2(AARCH64_OP(and), input,
-                                         GetIntConstant(g, NULL, kTargetType32Bit,
-                                                        (int64_t)field_mask)),
-                         size));
+  if (aligned_bits != NULL) {
+    // `(x & (1<<pos)) != 0` into bit |pos|: the and already isolates the field.
+    placed = Materialize(g, aligned_bits);
   } else {
-    // UBFIZ zeroes the destination and inserts the low |bit_size| bits of
-    // |input| at |bit_pos|, so a following AND/ORR merges with |output|.
-    placed = Emit(g, SetInstructionSize(
-                         NewInstruction3(AARCH64_OP(ubfiz), input,
-                                         GetIntConstant(g, NULL, kTargetType32Bit,
-                                                        bit_pos),
-                                         GetIntConstant(g, NULL, kTargetType32Bit,
-                                                        bit_size)),
-                         size));
+    TargetInstruction* input = Materialize(g, input_node);
+    if (bit_pos == 0) {
+      placed = Emit(g, SetInstructionSize(
+                           NewInstruction2(AARCH64_OP(and), input,
+                                           GetIntConstant(g, NULL, kTargetType32Bit,
+                                                          (int64_t)field_mask)),
+                           size));
+    } else {
+      // UBFIZ zeroes the destination and inserts the low |bit_size| bits of
+      // |input| at |bit_pos|, so a following AND/ORR merges with |output|.
+      placed = Emit(g, SetInstructionSize(
+                           NewInstruction3(AARCH64_OP(ubfiz), input,
+                                           GetIntConstant(g, NULL, kTargetType32Bit,
+                                                          bit_pos),
+                                           GetIntConstant(g, NULL, kTargetType32Bit,
+                                                          bit_size)),
+                           size));
+    }
   }
   TargetInstruction* cleared = Emit(
       g, SetInstructionSize(NewInstruction2(AARCH64_OP(and), output, clear_mask),

@@ -527,6 +527,68 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       }
       break;
 
+    case IR_OP(setbit): {
+      // `flags.s = (v & 0x80) != 0` is setbit(w, zext(cmpne(andi(v,0x80),0)),
+      // 7, 1).  The and already isolates bit 7, so rewrite to
+      // ori(andi(w, ~0x80), andi(v, 0x80)) and let DCE drop the cmp/cset.
+      if (node->inputs.length < 4 || !IRIsIntConst(node->inputs.value.p[2]) ||
+          !IRIsIntConst(node->inputs.value.p[3])) {
+        break;
+      }
+      int bit_pos = (int)IRIntConstValue(node->inputs.value.p[2]);
+      int bit_size = (int)IRIntConstValue(node->inputs.value.p[3]);
+      if (bit_size != 1 || bit_pos < 0 || bit_pos >= 63) {
+        break;
+      }
+      IRNode* value = node->inputs.value.p[1];
+      while (value != NULL && value->opcode == IR_OP(zeroextendi) &&
+             value->inputs.length >= 1) {
+        value = value->inputs.value.p[0];
+      }
+      if (value == NULL || value->opcode != IR_OP(cmpnei) ||
+          value->inputs.length < 2 || !IRIsIntConst(value->inputs.value.p[1]) ||
+          IRIntConstValue(value->inputs.value.p[1]) != 0) {
+        break;
+      }
+      IRNode* masked = value->inputs.value.p[0];
+      while (masked != NULL && masked->opcode == IR_OP(zeroextendi) &&
+             masked->inputs.length >= 1) {
+        masked = masked->inputs.value.p[0];
+      }
+      if (masked == NULL || masked->opcode != IR_OP(andi) ||
+          masked->inputs.length < 2) {
+        break;
+      }
+      IRNode* mask_node = NULL;
+      if (IRIsIntConst(masked->inputs.value.p[1])) {
+        mask_node = masked->inputs.value.p[1];
+      } else if (IRIsIntConst(masked->inputs.value.p[0])) {
+        mask_node = masked->inputs.value.p[0];
+      }
+      uint64_t field = UINT64_C(1) << bit_pos;
+      if (mask_node == NULL ||
+          (uint64_t)IRIntConstValue(mask_node) != field) {
+        break;
+      }
+      IRNode* word = node->inputs.value.p[0];
+      TypeRecord* ty = node->type != NULL ? node->type : word->type;
+      // Bitfield storage units are sometimes typed as the containing
+      // aggregate's word without TypeIsIntegral; size is enough here.
+      if (ty == NULL || ty->size <= 0 || ty->size > 8) {
+        break;
+      }
+      int64_t clear_imm =
+          ty->size <= 4 ? (int64_t)(uint32_t)(~(uint32_t)field)
+                        : (int64_t)(~field);
+      IRNode* clear = GeneratorGetIntConstant(gen, ty, clear_imm);
+      IRNode* cleared =
+          EmitBinBefore(gen, block, node, IR_OP(andi), word, clear, ty);
+      IRNode* result =
+          EmitBinBefore(gen, block, node, IR_OP(ori), cleared, masked, ty);
+      BasicBlockReplaceInstruction(gen, block, node, result);
+      break;
+    }
+
     default:
       break;
   }
