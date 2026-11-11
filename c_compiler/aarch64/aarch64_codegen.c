@@ -3521,7 +3521,9 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
   }
 
   // Check if the branch comes from a comparison.  If not, we compare with
-  // zero.
+  // zero.  If the compare was already lowered to a cset for a value use,
+  // branch on that 0/1 (peephole may still turn cset+cbz into b.cc when
+  // NZCV is intact); do not re-emit a second cmp.
   bool compare_with_zero = !IRIsComparison(input);
   if (!compare_with_zero && HasLoweredNode(input)) {
     TargetInstruction* comp = GetLoweredNode(input);

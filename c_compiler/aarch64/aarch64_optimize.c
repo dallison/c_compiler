@@ -826,6 +826,66 @@ static TargetInstruction* PeelMovSource(TargetInstruction* value,
   return value;
 }
 
+// Resolve a cbz/cbnz operand to the cset that produced it (expression-style
+// cset, or cset that wrote a tmp the branch reads).
+static TargetInstruction* FindCsetProducer(TargetInstruction* value,
+                                           TargetBasicBlock* block) {
+  value = PeelMovSource(value, block);
+  if (value == NULL || value->block != block) {
+    return NULL;
+  }
+  if (value->opcode == (TargetOpcode)AARCH64_OP(cset)) {
+    return value;
+  }
+  // ubfx (objdump: uxtb/uxth) of a cset — peel one layer.
+  if (value->opcode == (TargetOpcode)AARCH64_OP(ubfx) &&
+      value->operand[0] != NULL) {
+    TargetInstruction* inner = PeelMovSource(value->operand[0], block);
+    if (inner != NULL && inner->opcode == (TargetOpcode)AARCH64_OP(cset) &&
+        inner->block == block) {
+      return inner;
+    }
+  }
+  // Branch operand is a tmp defined by cset in this block.
+  if (value->opcode == (TargetOpcode)AARCH64_OP(tmp)) {
+    for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+         inst != NULL && inst->block == block; inst = TargetNext(inst)) {
+      if (inst->opcode == (TargetOpcode)AARCH64_OP(cset) &&
+          inst->dest == value) {
+        return inst;
+      }
+    }
+  }
+  return NULL;
+}
+
+// cbz(ubfx(x,0,8/16)) → cbz(x): zero-extend does not change "is zero".
+static bool FoldRedundantZextBeforeCompareZeroBranch(
+    AARCH64Generator* generator, TargetBasicBlock* block,
+    TargetInstruction* branch) {
+  if (branch->opcode != (TargetOpcode)AARCH64_OP(cbz) &&
+      branch->opcode != (TargetOpcode)AARCH64_OP(cbnz)) {
+    return false;
+  }
+  TargetInstruction* value = PeelMovSource(branch->operand[0], block);
+  if (value == NULL || value->opcode != (TargetOpcode)AARCH64_OP(ubfx) ||
+      value->operand[0] == NULL || value->operand[1] == NULL ||
+      value->operand[2] == NULL || !AARCH64IsIntConst(value->operand[1]) ||
+      !AARCH64IsIntConst(value->operand[2]) ||
+      AARCH64IntValue(value->operand[1]) != 0) {
+    return false;
+  }
+  int64_t width = AARCH64IntValue(value->operand[2]);
+  if (width != 8 && width != 16 && width != 32) {
+    return false;
+  }
+  TargetReplaceOperand(branch, 0, value->operand[0]);
+  if (value->users.length == 0) {
+    RemoveInstructionAndDeadTempDest(generator, block, value);
+  }
+  return true;
+}
+
 static bool FoldCsetCompareZeroBranch(AARCH64Generator* generator,
                                       TargetBasicBlock* block,
                                       TargetInstruction* branch) {
@@ -834,10 +894,10 @@ static bool FoldCsetCompareZeroBranch(AARCH64Generator* generator,
   if (!is_cbz && !is_cbnz) {
     return false;
   }
-  TargetInstruction* value = PeelMovSource(branch->operand[0], block);
-  if (value == NULL ||
-      value->opcode != (TargetOpcode)AARCH64_OP(cset) ||
-      value->block != block || value->operand[0] == NULL) {
+  // Drop a dead zext on the predicate before looking for a cset producer.
+  FoldRedundantZextBeforeCompareZeroBranch(generator, block, branch);
+  TargetInstruction* value = FindCsetProducer(branch->operand[0], block);
+  if (value == NULL || value->operand[0] == NULL) {
     return false;
   }
   AARCH64Opcode cond = (AARCH64Opcode)value->operand[0]->opcode;
