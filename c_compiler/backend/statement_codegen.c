@@ -2475,38 +2475,26 @@ static void GenerateDenseSwitch(Generator* gen, SwitchStatementASTNode* node) {
 
   IRNode* min =
       GeneratorGetIntConstant(gen, node->expr->type, node->min_case_value);
-  IRNode* max =
-      GeneratorGetIntConstant(gen, node->expr->type, node->max_case_value);
 
-  if (!node->all_cases_covered) {
-    // If all cases are positive we can generate a negative comparison and
-    // branch to default if true.  We can then use an unsigned comparison
-    // for the values, which is faster on some processors.
-    if (TypeIsSigned(node->expr->type) && node->all_cases_positive) {
-      IRNode* cmp0 = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr,
-                                               GeneratorGetIntConstant(gen, node->expr->type, 0)));
-      GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmp0, default_label));
-      
-      // Use an unsigned comparison by resetting the node's type.
-      TypeRecord* unsigned_type = TypeRecordCopy(expr->type);
-      unsigned_type->type |= kTypeUnsigned;
-      IRSetType(expr, unsigned_type);
-      expr->flags |= kIRFakeUnsigned;     // This isn't really unsigned.
-    }
-    // Compare expr to min and branch to default if less.
-    IRNode* cmplo = GeneratorEmit(gen, NewIR2(IR_OP(cmplti), expr, min));
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmplo, default_label));
-
-    // Compare expr to max and branch to default if greater.
-    IRNode* cmphi = GeneratorEmit(gen, NewIR2(IR_OP(cmpgti), expr, max));
-    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmphi, default_label));
-  }
-  
-  // Subtract min from expr to get branch offset, unless min is zero (no
-  // point in subtracting zero).
+  // Subtract min first so a single unsigned compare can reject both ends of
+  // the span (`idx = expr - min; if (idx > max - min) default`), matching
+  // clang/LLVM.  Out-of-range signed values wrap to a large unsigned idx.
   IRNode* zeroed = expr;
   if (node->min_case_value != 0) {
     zeroed = GeneratorEmit(gen, NewIR2(IR_OP(subi), expr, min));
+  }
+
+  if (!node->all_cases_covered) {
+    TypeRecord* unsigned_type = TypeRecordCopy(
+        zeroed->type != NULL ? zeroed->type : node->expr->type);
+    unsigned_type->type |= kTypeUnsigned;
+    IRSetType(zeroed, unsigned_type);
+    zeroed->flags |= kIRFakeUnsigned;
+    IRNode* span = GeneratorGetIntConstant(
+        gen, unsigned_type,
+        node->max_case_value - node->min_case_value);
+    IRNode* cmphi = GeneratorEmit(gen, NewIR2(IR_OP(cmpgti), zeroed, span));
+    GeneratorEmit(gen, NewIR2(IR_OP(btrue), cmphi, default_label));
   }
 
   // Computed branch via jump table.

@@ -437,6 +437,21 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
     case AARCH64_OP(ldrh):
     case AARCH64_OP(ldurh):
       return 2;
+    case AARCH64_OP(ivarreg): {
+      // Narrow integral formals arrive caller-extended to 32 bits (Apple
+      // ARM64 ABI; matches clang on Linux AArch64 too).  Skipping the
+      // redundant uxtb after loadu8 of such an arg is a BBC hot-path win.
+      TargetSymbol* sym = (TargetSymbol*)inst;
+      if (sym->symbol != NULL && sym->symbol->flags.is_argument &&
+          sym->symbol->type != NULL && TypeIsIntegral(sym->symbol->type) &&
+          !TypeIsSigned(sym->symbol->type)) {
+        int size = sym->symbol->type->size;
+        if (size > 0 && size <= 4) {
+          return size;
+        }
+      }
+      return 8;
+    }
     case AARCH64_OP(ubfx): {
       TargetInstruction* lsb = inst->operand[1];
       TargetInstruction* width = inst->operand[2];
