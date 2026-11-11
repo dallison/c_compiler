@@ -2678,16 +2678,42 @@ static TargetInstruction* LowerComparison(AARCH64Generator* g, IRNode* node) {
     result_size = kSize64Bit;
   }
   TargetInstruction* result = NULL;
+  bool is_fp = TypeUsesHardwareFloatRegister(op1->type);
+  TargetInstruction* cmp_lhs;
+  TargetInstruction* cmp_rhs;
+  bool invert_cond = false;
+  // Prefer cmp #imm for integer compares that produce a cset (range checks
+  // in WriteByte), matching CompareAndBranch.
+  if (!is_fp && IRIsConstant(rhs) &&
+      AARCH64IsPossibleImmediate(IRIntConstValue(rhs))) {
+    cmp_lhs = Materialize(g, lhs);
+    cmp_rhs = GetIntConstant(g, NULL,
+                             compare_size == kSize64Bit ? kTargetType64Bit
+                                                        : kTargetType32Bit,
+                             IRIntConstValue(rhs));
+  } else if (!is_fp && IRIsConstant(lhs) &&
+             AARCH64IsPossibleImmediate(IRIntConstValue(lhs))) {
+    cmp_lhs = Materialize(g, rhs);
+    cmp_rhs = GetIntConstant(g, NULL,
+                             compare_size == kSize64Bit ? kTargetType64Bit
+                                                        : kTargetType32Bit,
+                             IRIntConstValue(lhs));
+    invert_cond = true;
+  } else {
+    cmp_lhs = Materialize(g, lhs);
+    cmp_rhs = Materialize(g, rhs);
+  }
 #define CMP_SET(cond)                                                       \
   do {                                                                      \
+    AARCH64Opcode use_cond =                                                \
+        invert_cond ? InverseCondition(cond) : (cond);                      \
     Emit(g, SetInstructionSize(                                             \
-                NewInstruction2(TypeUsesHardwareFloatRegister(op1->type)              \
-                                    ? AARCH64_OP(fcmp)                      \
-                                    : AARCH64_OP(cmp),                      \
-                                Materialize(g, lhs), Materialize(g, rhs)),  \
+                NewInstruction2(is_fp ? AARCH64_OP(fcmp) : AARCH64_OP(cmp), \
+                                cmp_lhs, cmp_rhs),                          \
                 compare_size));                                             \
     result = SetInstructionSize(                                            \
-        NewInstruction1(AARCH64_OP(cset), Condition(g, cond, result_size)),  \
+        NewInstruction1(AARCH64_OP(cset),                                   \
+                        Condition(g, use_cond, result_size)),               \
         result_size);                                                       \
   } while (0)
   switch (node->opcode) {
