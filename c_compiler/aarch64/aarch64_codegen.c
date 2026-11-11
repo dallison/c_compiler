@@ -2554,7 +2554,10 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       node->inputs.length == 2 && !IRIsConst(node->inputs.value.p[1])) {
     IRNode* offset = node->inputs.value.p[1];
     if (offset->type != NULL && offset->type->size == 4 &&
-        !TypeIsUnsigned(offset->type)) {
+        !TypeIsUnsigned(offset->type) &&
+        // uint16_t indices promote to signed int but are still non-negative;
+        // ldrh/zero-extend already clear bit 31, so sxtw is redundant.
+        KnownZeroExtendedBytes(inst->operand[1]) > 4) {
       inst->operand[1] =
           Emit(g, SetInstructionSize(
                       NewInstruction1(AARCH64_OP(sxtw), inst->operand[1]),

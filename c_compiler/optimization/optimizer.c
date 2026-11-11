@@ -528,9 +528,10 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       break;
 
     case IR_OP(setbit): {
-      // `flags.s = (v & 0x80) != 0` is setbit(w, zext(cmpne(andi(v,0x80),0)),
-      // 7, 1).  The and already isolates bit 7, so rewrite to
-      // ori(andi(w, ~0x80), andi(v, 0x80)) and let DCE drop the cmp/cset.
+      // Single-bit flag updates → and/or (+lsl).  Rewriting Z (cmpeqi) as
+      // well as N (aligned bit-test) lets memopt coalesce the two stores
+      // into one RMW.  Keep a separate lsli for Z; folding it into orr's
+      // oplsl marker is unsafe until RA preserves that shift.
       if (node->inputs.length < 4 || !IRIsIntConst(node->inputs.value.p[2]) ||
           !IRIsIntConst(node->inputs.value.p[3])) {
         break;
@@ -540,36 +541,6 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       if (bit_size != 1 || bit_pos < 0 || bit_pos >= 63) {
         break;
       }
-      IRNode* value = node->inputs.value.p[1];
-      while (value != NULL && value->opcode == IR_OP(zeroextendi) &&
-             value->inputs.length >= 1) {
-        value = value->inputs.value.p[0];
-      }
-      if (value == NULL || value->opcode != IR_OP(cmpnei) ||
-          value->inputs.length < 2 || !IRIsIntConst(value->inputs.value.p[1]) ||
-          IRIntConstValue(value->inputs.value.p[1]) != 0) {
-        break;
-      }
-      IRNode* masked = value->inputs.value.p[0];
-      while (masked != NULL && masked->opcode == IR_OP(zeroextendi) &&
-             masked->inputs.length >= 1) {
-        masked = masked->inputs.value.p[0];
-      }
-      if (masked == NULL || masked->opcode != IR_OP(andi) ||
-          masked->inputs.length < 2) {
-        break;
-      }
-      IRNode* mask_node = NULL;
-      if (IRIsIntConst(masked->inputs.value.p[1])) {
-        mask_node = masked->inputs.value.p[1];
-      } else if (IRIsIntConst(masked->inputs.value.p[0])) {
-        mask_node = masked->inputs.value.p[0];
-      }
-      uint64_t field = UINT64_C(1) << bit_pos;
-      if (mask_node == NULL ||
-          (uint64_t)IRIntConstValue(mask_node) != field) {
-        break;
-      }
       IRNode* word = node->inputs.value.p[0];
       TypeRecord* ty = node->type != NULL ? node->type : word->type;
       // Bitfield storage units are sometimes typed as the containing
@@ -577,15 +548,75 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       if (ty == NULL || ty->size <= 0 || ty->size > 8) {
         break;
       }
+      // Integral immediates only (struct-typed setbit would yield consta).
+      // Results stay typed like |word| so memopt can forward the load.
+      TypeRecord* imm_ty = NewTypeRecordWithSize(
+          ty->size <= 4 ? kTypeInt : (kTypeLong | kTypeLongLong), kQualPlain);
+      TypeRecord* result_ty = word->type != NULL ? word->type : ty;
+      uint64_t field = UINT64_C(1) << bit_pos;
       int64_t clear_imm =
           ty->size <= 4 ? (int64_t)(uint32_t)(~(uint32_t)field)
                         : (int64_t)(~field);
-      IRNode* clear = GeneratorGetIntConstant(gen, ty, clear_imm);
-      IRNode* cleared =
-          EmitBinBefore(gen, block, node, IR_OP(andi), word, clear, ty);
-      IRNode* result =
-          EmitBinBefore(gen, block, node, IR_OP(ori), cleared, masked, ty);
-      BasicBlockReplaceInstruction(gen, block, node, result);
+      IRNode* bit_value = node->inputs.value.p[1];
+      IRNode* value = bit_value;
+      while (value != NULL && value->opcode == IR_OP(zeroextendi) &&
+             value->inputs.length >= 1) {
+        value = value->inputs.value.p[0];
+      }
+      if (value == NULL) {
+        break;
+      }
+
+      // `flags.s = (v & 0x80) != 0`: and already isolates bit 7.
+      if (value->opcode == IR_OP(cmpnei) && value->inputs.length >= 2 &&
+          IRIsIntConst(value->inputs.value.p[1]) &&
+          IRIntConstValue(value->inputs.value.p[1]) == 0) {
+        IRNode* masked = value->inputs.value.p[0];
+        while (masked != NULL && masked->opcode == IR_OP(zeroextendi) &&
+               masked->inputs.length >= 1) {
+          masked = masked->inputs.value.p[0];
+        }
+        if (masked == NULL || masked->opcode != IR_OP(andi) ||
+            masked->inputs.length < 2) {
+          break;
+        }
+        IRNode* mask_node = NULL;
+        if (IRIsIntConst(masked->inputs.value.p[1])) {
+          mask_node = masked->inputs.value.p[1];
+        } else if (IRIsIntConst(masked->inputs.value.p[0])) {
+          mask_node = masked->inputs.value.p[0];
+        }
+        if (mask_node == NULL ||
+            (uint64_t)IRIntConstValue(mask_node) != field) {
+          break;
+        }
+        IRNode* clear = GeneratorGetIntConstant(gen, imm_ty, clear_imm);
+        IRNode* cleared = EmitBinBefore(gen, block, node, IR_OP(andi), word,
+                                        clear, result_ty);
+        IRNode* result = EmitBinBefore(gen, block, node, IR_OP(ori), cleared,
+                                       masked, result_ty);
+        BasicBlockReplaceInstruction(gen, block, node, result);
+        break;
+      }
+
+      // `flags.z = (v == 0)`: ori(andi(w, ~bit), lsli(zext(cmpeqi), pos)).
+      if (value->opcode == IR_OP(cmpeqi) && value->inputs.length >= 2 &&
+          IRIsIntConst(value->inputs.value.p[1]) &&
+          IRIntConstValue(value->inputs.value.p[1]) == 0) {
+        IRNode* placed = bit_value;
+        if (bit_pos != 0) {
+          IRNode* shift = GeneratorGetIntConstant(gen, imm_ty, bit_pos);
+          placed = EmitBinBefore(gen, block, node, IR_OP(lsli), bit_value,
+                                 shift, result_ty);
+        }
+        IRNode* clear = GeneratorGetIntConstant(gen, imm_ty, clear_imm);
+        IRNode* cleared = EmitBinBefore(gen, block, node, IR_OP(andi), word,
+                                        clear, result_ty);
+        IRNode* result = EmitBinBefore(gen, block, node, IR_OP(ori), cleared,
+                                       placed, result_ty);
+        BasicBlockReplaceInstruction(gen, block, node, result);
+        break;
+      }
       break;
     }
 
