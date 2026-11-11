@@ -2317,6 +2317,9 @@ void OptimizeFunctionIR(Generator* gen) {
     // arguments forwarded into `value += by * scale`).  Fold the
     // resulting `addi`/`cmp*` so later lowering does not emit a
     // compare-and-branch whose operands were never materialized.
+    // Also re-run strength reduction so `suba(adda(p,x),p)` exposed by
+    // load CSE (MemIsIo) folds before codegen.
+    StrengthReductionOptimization(gen);
     if (compiler->ir_optimizations.const_prop) {
       ConstantPropagationOptimization(gen);
     }
@@ -2338,6 +2341,7 @@ void OptimizeFunctionIR(Generator* gen) {
   if (OptLevel3() && !compiler->keep_ssa) {
     LoopUnrollOptimization(gen);
     MemoryOptimization(gen);
+    StrengthReductionOptimization(gen);
     AutoVectorizeOptimization(gen);
   }
 
@@ -2450,3 +2454,4 @@ void* GenerateFunction(Generator* gen) {
   ListingEmitFunction(gen, code);
   return code;
 }
+

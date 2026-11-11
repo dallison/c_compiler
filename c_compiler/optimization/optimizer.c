@@ -511,6 +511,27 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       }
       break;
 
+    case IR_OP(suba): {
+      // `(p + x) - p` → `x`.  MemIsIo-style `(uintptr_t)(memory+addr - memory)`
+      // becomes the index, so `off > 0xffff` folds away for uint16 addresses.
+      if (node->inputs.length != 2) {
+        break;
+      }
+      IRNode* left = node->inputs.value.p[0];
+      IRNode* right = node->inputs.value.p[1];
+      if (left != NULL && left->opcode == IR_OP(adda) &&
+          left->inputs.length == 2) {
+        if (left->inputs.value.p[0] == right) {
+          BasicBlockReplaceInstruction(gen, block, node,
+                                       left->inputs.value.p[1]);
+        } else if (left->inputs.value.p[1] == right) {
+          BasicBlockReplaceInstruction(gen, block, node,
+                                       left->inputs.value.p[0]);
+        }
+      }
+      break;
+    }
+
     case IR_OP(cmpeqi):
       if (node->inputs.length == 2 &&
           node->inputs.value.p[0] == node->inputs.value.p[1]) {
@@ -541,6 +562,45 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
         }
       }
       break;
+
+    case IR_OP(cmpgti):
+    case IR_OP(cmpgei): {
+      // `zext16(loadu16) > 0xffff` is always false.  Only trust narrow loads,
+      // not arbitrary unsigned temps (those can hold wider values).
+      if (node->inputs.length != 2 || !IRIsIntConst(node->inputs.value.p[1])) {
+        break;
+      }
+      IRNode* lhs = node->inputs.value.p[0];
+      while (lhs != NULL &&
+             (lhs->opcode == IR_OP(cast) || lhs->opcode == IR_OP(zeroextendi) ||
+              lhs->opcode == IR_OP(mova) || lhs->opcode == IR_OP(movi)) &&
+             lhs->inputs.length >= 1) {
+        lhs = lhs->inputs.value.p[0];
+      }
+      if (lhs == NULL) {
+        break;
+      }
+      int bits = 0;
+      if (lhs->opcode == IR_OP(loadu8) || lhs->opcode == IR_OP(load8)) {
+        bits = 8;
+      } else if (lhs->opcode == IR_OP(loadu16) || lhs->opcode == IR_OP(load16)) {
+        bits = 16;
+      }
+      if (bits == 0) {
+        break;
+      }
+      uint64_t max_val = (UINT64_C(1) << bits) - 1;
+      int64_t lim = IRIntConstValue(node->inputs.value.p[1]);
+      bool always_false =
+          node->opcode == IR_OP(cmpgti)
+              ? (lim >= 0 && (uint64_t)lim >= max_val)
+              : (lim > 0 && (uint64_t)lim > max_val);
+      if (always_false) {
+        BasicBlockReplaceInstruction(
+            gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
+      }
+      break;
+    }
 
     case IR_OP(setbit): {
       // Single-bit flag updates → and/or (+lsl).  Rewriting Z (cmpeqi) as
