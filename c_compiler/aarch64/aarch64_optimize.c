@@ -755,10 +755,147 @@ static void CombineShiftedAdds(AARCH64Generator* generator) {
                               kTraversePreOrder, generator);
 }
 
+// cset does not clobber NZCV, so `cmp; cset; cbz` can become `cmp; cset; b.cc`
+// when nothing between the cset and the cbz updates flags (or calls).
+static bool ClobbersConditionFlags(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return true;
+  }
+  if (AARCH64HasImplicitEffect(inst)) {
+    return true;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(bl):
+    case AARCH64_OP(blr):
+    case AARCH64_OP(b):
+    case AARCH64_OP(br):
+    case AARCH64_OP(ret):
+    case AARCH64_OP(cbz):
+    case AARCH64_OP(cbnz):
+    case AARCH64_OP(tbz):
+    case AARCH64_OP(tbnz):
+    case AARCH64_OP(asm):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static AARCH64Opcode InvertCond(AARCH64Opcode cond) {
+  switch (cond) {
+    case AARCH64_OP(eq):
+      return AARCH64_OP(ne);
+    case AARCH64_OP(ne):
+      return AARCH64_OP(eq);
+    case AARCH64_OP(cs):
+    case AARCH64_OP(hs):
+      return AARCH64_OP(cc);
+    case AARCH64_OP(cc):
+    case AARCH64_OP(lo):
+      return AARCH64_OP(cs);
+    case AARCH64_OP(mi):
+      return AARCH64_OP(pl);
+    case AARCH64_OP(pl):
+      return AARCH64_OP(mi);
+    case AARCH64_OP(vs):
+      return AARCH64_OP(vc);
+    case AARCH64_OP(vc):
+      return AARCH64_OP(vs);
+    case AARCH64_OP(hi):
+      return AARCH64_OP(ls);
+    case AARCH64_OP(ls):
+      return AARCH64_OP(hi);
+    case AARCH64_OP(ge):
+      return AARCH64_OP(lt);
+    case AARCH64_OP(lt):
+      return AARCH64_OP(ge);
+    case AARCH64_OP(gt):
+      return AARCH64_OP(le);
+    case AARCH64_OP(le):
+      return AARCH64_OP(gt);
+    default:
+      return AARCH64_OP(al);
+  }
+}
+
+static TargetInstruction* PeelMovSource(TargetInstruction* value,
+                                        TargetBasicBlock* block) {
+  while (value != NULL && IsMove(value) && value->block == block) {
+    value = MoveSource(value);
+  }
+  return value;
+}
+
+static bool FoldCsetCompareZeroBranch(AARCH64Generator* generator,
+                                      TargetBasicBlock* block,
+                                      TargetInstruction* branch) {
+  bool is_cbz = branch->opcode == (TargetOpcode)AARCH64_OP(cbz);
+  bool is_cbnz = branch->opcode == (TargetOpcode)AARCH64_OP(cbnz);
+  if (!is_cbz && !is_cbnz) {
+    return false;
+  }
+  TargetInstruction* value = PeelMovSource(branch->operand[0], block);
+  if (value == NULL ||
+      value->opcode != (TargetOpcode)AARCH64_OP(cset) ||
+      value->block != block || value->operand[0] == NULL) {
+    return false;
+  }
+  AARCH64Opcode cond = (AARCH64Opcode)value->operand[0]->opcode;
+  if (InvertCond(cond) == AARCH64_OP(al) && cond != AARCH64_OP(al)) {
+    return false;
+  }
+  // Flags must still match those consumed by the cset.
+  for (TargetInstruction* inst = TargetNext(value);
+       inst != NULL && inst != branch && inst->block == block;
+       inst = TargetNext(inst)) {
+    if (ClobbersConditionFlags(inst)) {
+      return false;
+    }
+  }
+  AARCH64Opcode branch_cond = is_cbz ? InvertCond(cond) : cond;
+  if (branch_cond == AARCH64_OP(al)) {
+    return false;
+  }
+  // Rebuild as a conditional b; keep the existing target operand.
+  TargetInstruction* target = branch->operand[1];
+  TargetInstruction* cond_inst =
+      TargetNewInstruction((TargetOpcode)branch_cond);
+  TargetBasicBlockEmitBefore(&generator->base, block, cond_inst, branch);
+  branch->opcode = (TargetOpcode)AARCH64_OP(b);
+  TargetReplaceOperand(branch, 0, cond_inst);
+  if (target != NULL) {
+    TargetReplaceOperand(branch, 1, target);
+  }
+  // Drop the cset when this branch (via moves) was its only consumer.
+  if (value->users.length == 0) {
+    RemoveInstructionAndDeadTempDest(generator, block, value);
+  }
+  return true;
+}
+
+static void FoldCsetCompareZeroBranchesInBlock(TargetBasicBlock* block,
+                                               void* data) {
+  AARCH64Generator* generator = data;
+  for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+       !TargetBasicBlockIsEmpty(block) &&
+       inst != TargetBasicBlockEnd(block);
+       inst = TargetNext(inst)) {
+    FoldCsetCompareZeroBranch(generator, block, inst);
+  }
+}
+
+static void FoldCsetCompareZeroBranches(AARCH64Generator* generator) {
+  TargetTraverseDominatorTree(&generator->base,
+                              FoldCsetCompareZeroBranchesInBlock,
+                              kTraversePreOrder, generator);
+}
+
 void AARCH64Optimize(AARCH64Generator* generator) {
   EliminateMoves(generator);
   RemoveUnusedExpressions(generator);
   CombineLoadOrStores(generator);
   CombineShiftedAdds(generator);
+  FoldCsetCompareZeroBranches(generator);
+  RemoveUnusedExpressions(generator);
   TargetBuildBasicBlockInputsAndOutputs(&generator->base);
 }
