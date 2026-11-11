@@ -772,6 +772,12 @@ ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
 typedef struct {
   int node_count;
   bool found_goto;
+  // When true, charge nested inline_call expansions to node_count.  Marked
+  // `inline` keeps the cheap "call-sized" accounting so a helper is not
+  // rejected merely because its own callees were inlined into it.  Unmarked
+  // auto-inline must see the real duplicated size (BBC WriteByte absorbed
+  // into TestAndChangeBits then re-inlined into every TRB/TSB was the case).
+  bool count_expanded;
 } GotoFinder;
 
 // Contract: Visitor; counts nodes and detects goto/inline_call/stmt_expr for inline eligibility.
@@ -791,10 +797,7 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
     return;
   }
   GotoFinder* finder = data;
-  // A nested inlined call costs about as much as the call it replaced, not as
-  // much as its whole expanded body; counting the expansion would reject
-  // inlining a function merely because its own callees were inlined into it.
-  if (!InlineCallNodeIsInside(node)) {
+  if (finder->count_expanded || !InlineCallNodeIsInside(node)) {
     finder->node_count++;
   }
   // Gotos produced by an inlined call are re-resolved when the inline_call is
@@ -1460,7 +1463,7 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
   const int kMaxSingleUseInlineNodeCount = 300;
   const int kMaxTwoUseInlineNodeCount = 200;
   const int kMaxFewUseInlineNodeCount = 80;
-  GotoFinder finder = {0, false};
+  GotoFinder finder = {0, false, false};
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
     return false;
@@ -1487,7 +1490,20 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
   } else if (static_uses <= 4 && max_nodes < kMaxFewUseInlineNodeCount) {
     max_nodes = kMaxFewUseInlineNodeCount;
   }
-  return finder.node_count < max_nodes;
+  int node_count = finder.node_count;
+  // Unmarked multi-use auto-inline: if the body already absorbed a large
+  // inlined callee, charge the expanded size so we do not re-duplicate it
+  // into every caller (TestAndChangeBits+WriteByte).  Leave single-use and
+  // marked `inline` on the cheap call-sized count.
+  if (unmarked_small && static_uses > 1) {
+    GotoFinder expanded = {0, false, true};
+    ASTNodeVisit(func->body, ExamineBody, 0, &expanded);
+    if (expanded.node_count > node_count * 2 &&
+        expanded.node_count >= kMaxUnmarkedInlineNodeCount) {
+      node_count = expanded.node_count;
+    }
+  }
+  return node_count < max_nodes;
 }
 
 // We can only inline a function if:
