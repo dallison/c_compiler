@@ -426,13 +426,28 @@ bool AARCH64IsLoad(TargetInstruction* inst) {
 // when nothing is known.  A result routed into a destination register can be
 // overwritten through it, so only plain values qualify.
 static int KnownZeroExtendedBytes(TargetInstruction* inst) {
-  if (inst == NULL || inst->dest != NULL) {
+  if (inst == NULL) {
+    return 8;
+  }
+  // cset/csetm always write 0/1; the dest-tmp check below would otherwise
+  // forget that and emit a redundant uxtb on bool→int widenings.
+  if ((AARCH64Opcode)inst->opcode == AARCH64_OP(cset) ||
+      (AARCH64Opcode)inst->opcode == AARCH64_OP(csetm)) {
+    return 1;
+  }
+  // A plain move preserves the source's known zero-extension (cset→mov→uxtb
+  // was the remaining BBC bool widening waste).
+  if (((AARCH64Opcode)inst->opcode == AARCH64_OP(mov) ||
+       (AARCH64Opcode)inst->opcode == AARCH64_OP(mv)) &&
+      inst->operand[0] != NULL && !TargetIsConst(inst->operand[0])) {
+    return KnownZeroExtendedBytes(inst->operand[0]);
+  }
+  if (inst->dest != NULL) {
     return 8;
   }
   switch ((AARCH64Opcode)inst->opcode) {
     case AARCH64_OP(ldrb):
     case AARCH64_OP(ldurb):
-    case AARCH64_OP(cset):
       return 1;
     case AARCH64_OP(ldrh):
     case AARCH64_OP(ldurh):
@@ -3858,7 +3873,11 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
     SetLoweredNode(node, value);
     return value;
   }
-  if (KnownZeroExtendedBytes(value) <= keep_bytes && node->dest == NULL) {
+  TargetInstruction* dest = GetDestInstruction(g, node);
+  if (KnownZeroExtendedBytes(value) <= keep_bytes) {
+    if (dest != NULL) {
+      value = SetDestOrMove(g, value, dest, AARCH64_OP(mov));
+    }
     SetLoweredNode(node, value);
     return value;
   }
@@ -3872,7 +3891,6 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
                           GetIntConstant(g, NULL, kTargetType32Bit,
                                          keep_bytes * 8)),
                       size));
-  TargetInstruction* dest = GetDestInstruction(g, node);
   if (dest != NULL) {
     value = SetDestOrMove(g, value, dest, AARCH64_OP(mov));
   }
