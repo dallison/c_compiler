@@ -519,14 +519,50 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       }
       IRNode* left = node->inputs.value.p[0];
       IRNode* right = node->inputs.value.p[1];
-      if (left != NULL && left->opcode == IR_OP(adda) &&
-          left->inputs.length == 2) {
+      if (left == NULL || right == NULL) {
+        break;
+      }
+      if (left->opcode == IR_OP(adda) && left->inputs.length == 2) {
         if (left->inputs.value.p[0] == right) {
           BasicBlockReplaceInstruction(gen, block, node,
                                        left->inputs.value.p[1]);
-        } else if (left->inputs.value.p[1] == right) {
+          break;
+        }
+        if (left->inputs.value.p[1] == right) {
           BasicBlockReplaceInstruction(gen, block, node,
                                        left->inputs.value.p[0]);
+          break;
+        }
+      }
+      // After inlining MemIsIo the pointer lives in a local:
+      //   p = memory + addr;  off = p - memory;
+      // Look through loada(p) to the storea's adda without needing memopt CSE
+      // of the two memory loads (they often remain distinct loada nodes).
+      if (left->opcode == IR_OP(loada) && left->inputs.length >= 1) {
+        IRNode* local = left->inputs.value.p[0];
+        for (IRNode* prev = IRPrev(node);
+             prev != NULL && prev->block == block; prev = IRPrev(prev)) {
+          if (!IRIsStoreOnly(prev) || prev->inputs.length < 2 ||
+              prev->inputs.value.p[0] != local) {
+            continue;
+          }
+          IRNode* stored = prev->inputs.value.p[1];
+          if (stored != NULL && stored->opcode == IR_OP(adda) &&
+              stored->inputs.length == 2) {
+            IRNode* base = stored->inputs.value.p[0];
+            IRNode* idx = stored->inputs.value.p[1];
+            bool same_base = base == right;
+            if (!same_base && base != NULL && right->opcode == IR_OP(loada) &&
+                base->opcode == IR_OP(loada) && base->inputs.length >= 1 &&
+                right->inputs.length >= 1 &&
+                base->inputs.value.p[0] == right->inputs.value.p[0]) {
+              same_base = true;
+            }
+            if (same_base && idx != NULL) {
+              BasicBlockReplaceInstruction(gen, block, node, idx);
+            }
+          }
+          break;
         }
       }
       break;
