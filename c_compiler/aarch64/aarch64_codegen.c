@@ -442,6 +442,17 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
       inst->operand[0] != NULL && !TargetIsConst(inst->operand[0])) {
     return KnownZeroExtendedBytes(inst->operand[0]);
   }
+  // and with 0xff / 0xffff clears the upper bytes.
+  if ((AARCH64Opcode)inst->opcode == AARCH64_OP(and) &&
+      inst->operand[1] != NULL && TargetIsConst(inst->operand[1])) {
+    int64_t mask = TargetIntValue(inst->operand[1]);
+    if (mask == 0xff) {
+      return 1;
+    }
+    if (mask == 0xffff) {
+      return 2;
+    }
+  }
   if (inst->dest != NULL) {
     return 8;
   }
