@@ -2532,6 +2532,32 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
           inst->operand[0] = Materialize(g, op1);
           inst->operand[1] = GetLoweredNode(op2);
         }
+        break;
+      }
+      // `ori(x, lsli(y, n))` → `orr x, y, lsl #n` using the shared oplsl
+      // marker (same form as scaled address adds).  Avoids a separate lsl
+      // for Z-flag merges without inventing mid-block oplsl markers.
+      IRNode* shift_op = NULL;
+      IRNode* base_op = NULL;
+      if (op2->opcode == IR_OP(lsli) && op2->dest == NULL &&
+          op2->inputs.length >= 2 && IRIsIntConst(op2->inputs.value.p[1])) {
+        shift_op = op2;
+        base_op = op1;
+      } else if (op1->opcode == IR_OP(lsli) && op1->dest == NULL &&
+                 op1->inputs.length >= 2 && IRIsIntConst(op1->inputs.value.p[1])) {
+        shift_op = op1;
+        base_op = op2;
+      }
+      if (shift_op != NULL && !IRIsConst(base_op)) {
+        int64_t amount = IRIntConstValue(shift_op->inputs.value.p[1]);
+        int width = (node->type != NULL && node->type->size > 4) ? 64 : 32;
+        if (amount > 0 && amount < width && shift_op->outputs.length == 1) {
+          inst = (TargetInstruction*)NewInstruction4(
+              AARCH64_OP(orr), Materialize(g, base_op),
+              Materialize(g, shift_op->inputs.value.p[0]), lsl(g),
+              GetIntConstant(g, NULL, kTargetType32Bit, amount));
+          ref_counts_ok = true;
+        }
       }
       break;
     }
