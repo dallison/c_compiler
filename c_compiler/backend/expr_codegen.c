@@ -418,6 +418,57 @@ static IROpcode GetStoreOpcode(ASTNode* node) {
   return GetStoreOpcodeForType(ObjectTypeForExpression(node));
 }
 
+// Narrow bitfield RMWs to the smallest low-aligned 1/2/4/8-byte chunk of the
+// allocation unit that covers the field (clang's ldrb/strb for an 8-bit flag
+// pack declared as `unsigned` bitfields).  Fields that start past the first
+// chunk still use the full unit so we do not need an address adjust here.
+static int BitfieldAccessSize(StructMember* bf) {
+  if (bf == NULL || bf->symbol == NULL || bf->symbol->type == NULL) {
+    return 4;
+  }
+  int unit = bf->symbol->type->size;
+  if (unit <= 0) {
+    return 4;
+  }
+  if (bf->bit_size <= 0 || bf->bit_offset < 0) {
+    return unit;
+  }
+  int end = bf->bit_offset + bf->bit_size;
+  if (end <= 8) {
+    return 1;
+  }
+  if (end <= 16 && unit >= 2) {
+    return 2;
+  }
+  if (end <= 32 && unit >= 4) {
+    return 4;
+  }
+  return unit;
+}
+
+static TypeRecord* BitfieldWordType(StructMember* bf) {
+  int size = BitfieldAccessSize(bf);
+  Type type = kTypeUnsigned;
+  if (size <= 1) {
+    type |= kTypeChar;
+  } else if (size == 2) {
+    type |= kTypeShort;
+  } else if (size <= 4) {
+    type |= kTypeInt;
+  } else {
+    type |= kTypeLongLong;
+  }
+  return NewTypeRecordWithSize(type, kQualPlain);
+}
+
+static IROpcode BitfieldLoadOpcode(StructMember* bf) {
+  return GetLoadOpcodeForType(BitfieldWordType(bf));
+}
+
+static IROpcode BitfieldStoreOpcode(StructMember* bf) {
+  return GetStoreOpcodeForType(BitfieldWordType(bf));
+}
+
 static IRNode* RemoveUnnecesaryShortening(Generator* gen, IRNode* value,
                                            IROpcode store);
 static IRNode* NormalizeBitIntValue(Generator* gen, IRNode* value,
@@ -2453,14 +2504,19 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
   }
 
    
-  IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-  IRNode* load = GeneratorEmit(gen, NewIR1(load_op, addr));
+  StructMember* inc_bitfield = BitfieldReferenceMember(node->sub);
+  IROpcode load_op = inc_bitfield != NULL ? BitfieldLoadOpcode(inc_bitfield)
+                                         : GetLoadOpcode((ASTNode*)node);
+  TypeRecord* load_ty =
+      inc_bitfield != NULL ? BitfieldWordType(inc_bitfield) : type;
+  IRNode* load =
+      IRSetType(GeneratorEmit(gen, NewIR1(load_op, addr)), load_ty);
 
   // If his is a bitfield, the 'load' contains the value of the whole
   // word containing the bitfield.  We extract the bits of the field into
   // 'value'.
   IRNode* value = load;
-  if (IsBitfieldReference(node->sub)) {
+  if (inc_bitfield != NULL) {
     // LoadBitfield records the variable use on this load.
     value = LoadBitfield(gen, load, (BinaryASTNode*)node->sub);
   } else {
@@ -2487,14 +2543,15 @@ static IRNode* IncDecComplex(Generator* gen, UnaryASTNode* node, bool is_post,
 
   // If we are operating on a bitfield, we need to set the value back into the
    // word we are storing.
-   if (IsBitfieldReference(node->sub)) {
+   if (inc_bitfield != NULL) {
      new_value = CalculateNewBitfieldValue(gen, load, new_value,
                                            (BinaryASTNode*)node->sub);
    } else if (TypeIsBitInt(node->base.type)) {
      new_value = NormalizeBitIntValue(gen, new_value, node->base.type);
    }
 
-  IROpcode store = GetStoreOpcode((ASTNode*)node);
+  IROpcode store = inc_bitfield != NULL ? BitfieldStoreOpcode(inc_bitfield)
+                                       : GetStoreOpcode((ASTNode*)node);
   IRNode* write = GeneratorEmit(gen, NewIR2(store, addr,
                                             RemoveUnnecesaryShortening(gen, new_value, store)));
 
@@ -3325,8 +3382,10 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
       // Assigning to a bitfield.  The dest will be the address of the word
       // containing the bitfield.  We need to mask out the bitfield (set the
       // bits to zero) then OR in the new value, masked appropriately.
-      IROpcode load_op = GetLoadOpcode(node->left);
-      IRNode* load = GeneratorEmit(gen, NewIR1(load_op, dest));
+      TypeRecord* word_ty = BitfieldWordType(bitfield);
+      IROpcode load_op = BitfieldLoadOpcode(bitfield);
+      IRNode* load =
+          IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), word_ty);
 
       CheckForVarUse(load, node->left);
 
@@ -3341,10 +3400,14 @@ static IRNode* GenerateAssignment(Generator* gen, BinaryASTNode* node) {
     bool binds_reference_member =
         (node->base.flags & kASTCXXMemberInitializer) != 0 &&
         TypeIsReference(node->left->type);
-    assignment =
-        binds_reference_member
-            ? GeneratorEmit(gen, NewIR2(IR_OP(storea), dest, value))
-            : EmitObjectStore(gen, node->left, dest, value);
+    if (binds_reference_member) {
+      assignment = GeneratorEmit(gen, NewIR2(IR_OP(storea), dest, value));
+    } else if (bitfield != NULL) {
+      assignment = GeneratorEmit(
+          gen, NewIR2(BitfieldStoreOpcode(bitfield), dest, value));
+    } else {
+      assignment = EmitObjectStore(gen, node->left, dest, value);
+    }
     // A store to a variable names the variable, not its address.
     if (!IRIsVariable(dest)) {
       GenerateConstexprLifetimeMarker(
@@ -3637,14 +3700,19 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
     return result_address_needed ? dest : value;
   }
 
-  // Load the value (always at the left operand's storage type).
-  IROpcode load_op = GetLoadOpcode(node->left);
-  IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), store_type);
+  // Load the value (always at the left operand's storage type).  Bitfields
+  // may use a narrowed chunk of the allocation unit.
+  StructMember* bitfield = BitfieldReferenceMember(node->left);
+  TypeRecord* word_ty =
+      bitfield != NULL ? BitfieldWordType(bitfield) : store_type;
+  IROpcode load_op = bitfield != NULL ? BitfieldLoadOpcode(bitfield)
+                                     : GetLoadOpcode(node->left);
+  IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, dest)), word_ty);
   IRNode* bitfield_word = load;
 
   // For a bitfield we need to load the bits from the word loaded.
   // LoadBitfield records the variable use; a plain load records it here.
-  if (IsBitfieldReference(node->left)) {
+  if (bitfield != NULL) {
     load = LoadBitfield(gen, load, (BinaryASTNode*)node->left);
   } else {
     CheckForVarUse(load, node->left);
@@ -3667,7 +3735,6 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   }
 
   // Bitfield? Mask in the value.
-  StructMember* bitfield = BitfieldReferenceMember(node->left);
   if (bitfield != NULL) {
     value = CalculateNewBitfieldValue(gen, bitfield_word, value,
                                       (BinaryASTNode*)node->left);
@@ -3676,7 +3743,8 @@ static IRNode* GenerateCompoundAssignment(Generator* gen,
   }
 
   // Store back to the destination.
-  IROpcode store_op = GetStoreOpcode(node->left);
+  IROpcode store_op = bitfield != NULL ? BitfieldStoreOpcode(bitfield)
+                                      : GetStoreOpcode(node->left);
 
   IRNode* result = GeneratorEmit(gen, NewIR2(store_op, dest,
                                              RemoveUnnecesaryShortening(gen, value, store_op)));
@@ -5830,8 +5898,10 @@ static IRNode* GenerateMemberReference(Generator* gen, BinaryASTNode* node) {
   // For a bitfield we need to load the word, shift it right to the LSB and then
   // either sign extend or mask it.
   if (StructMemberIsBitField(member->member)) {
-    IROpcode load_op = GetLoadOpcode((ASTNode*)node);
-    IRNode* load = IRSetType(GeneratorEmit(gen, NewIR1(load_op, addr)), node->base.type);
+    TypeRecord* word_ty = BitfieldWordType(member->member);
+    IROpcode load_op = BitfieldLoadOpcode(member->member);
+    IRNode* load =
+        IRSetType(GeneratorEmit(gen, NewIR1(load_op, addr)), word_ty);
     return LoadBitfield(gen, load, node);
   } else {
     // Need value, load it.
