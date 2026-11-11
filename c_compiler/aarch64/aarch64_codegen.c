@@ -3312,13 +3312,15 @@ static TargetInstruction* CompareAndBranch(AARCH64Generator* g,
   }
   
   if (constant_compare) {
-    if (inverted_comparison) {
-      rhs = Materialize(g, lhs_node);
-      lhs = Materialize(g, rhs_node);
-    } else {
-      lhs = Materialize(g, lhs_node);
-      rhs = Materialize(g, rhs_node);
-    }
+    // Keep the immediate as a const operand so cmp encodes `#imm` instead of
+    // materializing a mov+cmp-reg pair (BBC switch range checks, flag tests).
+    IRNode* reg_node = inverted_comparison ? rhs_node : lhs_node;
+    IRNode* imm_node = inverted_comparison ? lhs_node : rhs_node;
+    lhs = Materialize(g, reg_node);
+    rhs = GetIntConstant(g, NULL,
+                         size == kSize64Bit ? kTargetType64Bit
+                                            : kTargetType32Bit,
+                         IRIntConstValue(imm_node));
     CompareImmediate(g, lhs, rhs, size);
   } else {
     lhs = Materialize(g, lhs_node);
