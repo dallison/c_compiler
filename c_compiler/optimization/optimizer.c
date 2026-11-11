@@ -524,6 +524,21 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
           node->inputs.value.p[0] == node->inputs.value.p[1]) {
         BasicBlockReplaceInstruction(
             gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
+        break;
+      }
+      // `(cmp != 0)` is identity when |cmp| is already a 0/1 comparison.
+      // SET_CARRY_VALUE(result < 256) is the BBC hot case.  Use IRIsIntConst
+      // (not IsIntConstantWithValue) so untyped/odd-sized 0 immediates match.
+      if (node->inputs.length == 2) {
+        IRNode* lhs = node->inputs.value.p[0];
+        IRNode* rhs = node->inputs.value.p[1];
+        if (IRIsIntConst(rhs) && IRIntConstValue(rhs) == 0 &&
+            IRIsComparison(lhs)) {
+          BasicBlockReplaceInstruction(gen, block, node, lhs);
+        } else if (IRIsIntConst(lhs) && IRIntConstValue(lhs) == 0 &&
+                   IRIsComparison(rhs)) {
+          BasicBlockReplaceInstruction(gen, block, node, rhs);
+        }
       }
       break;
 
@@ -576,33 +591,36 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
                masked->inputs.length >= 1) {
           masked = masked->inputs.value.p[0];
         }
-        if (masked == NULL || masked->opcode != IR_OP(andi) ||
-            masked->inputs.length < 2) {
-          break;
+        if (masked != NULL && masked->opcode == IR_OP(andi) &&
+            masked->inputs.length >= 2) {
+          IRNode* mask_node = NULL;
+          if (IRIsIntConst(masked->inputs.value.p[1])) {
+            mask_node = masked->inputs.value.p[1];
+          } else if (IRIsIntConst(masked->inputs.value.p[0])) {
+            mask_node = masked->inputs.value.p[0];
+          }
+          if (mask_node != NULL &&
+              (uint64_t)IRIntConstValue(mask_node) == field) {
+            IRNode* clear = GeneratorGetIntConstant(gen, imm_ty, clear_imm);
+            IRNode* cleared = EmitBinBefore(gen, block, node, IR_OP(andi), word,
+                                            clear, result_ty);
+            IRNode* result = EmitBinBefore(gen, block, node, IR_OP(ori), cleared,
+                                           masked, result_ty);
+            BasicBlockReplaceInstruction(gen, block, node, result);
+            break;
+          }
         }
-        IRNode* mask_node = NULL;
-        if (IRIsIntConst(masked->inputs.value.p[1])) {
-          mask_node = masked->inputs.value.p[1];
-        } else if (IRIsIntConst(masked->inputs.value.p[0])) {
-          mask_node = masked->inputs.value.p[0];
+        // `(cmp != 0)` around another compare → use the inner compare.
+        if (masked != NULL && IRIsComparison(masked)) {
+          value = masked;
+          bit_value = masked;
         }
-        if (mask_node == NULL ||
-            (uint64_t)IRIntConstValue(mask_node) != field) {
-          break;
-        }
-        IRNode* clear = GeneratorGetIntConstant(gen, imm_ty, clear_imm);
-        IRNode* cleared = EmitBinBefore(gen, block, node, IR_OP(andi), word,
-                                        clear, result_ty);
-        IRNode* result = EmitBinBefore(gen, block, node, IR_OP(ori), cleared,
-                                       masked, result_ty);
-        BasicBlockReplaceInstruction(gen, block, node, result);
-        break;
       }
 
-      // `flags.z = (v == 0)`: ori(andi(w, ~bit), lsli(zext(cmpeqi), pos)).
-      if (value->opcode == IR_OP(cmpeqi) && value->inputs.length >= 2 &&
-          IRIsIntConst(value->inputs.value.p[1]) &&
-          IRIntConstValue(value->inputs.value.p[1]) == 0) {
+      // Any 0/1 comparison into a bit: clear the field then OR the (shifted)
+      // compare.  Covers Z (`== 0`) and C (`result < 256`) after peeling
+      // cmpnei(cmp, 0) above.
+      if (IRIsComparison(value)) {
         IRNode* placed = bit_value;
         if (bit_pos != 0) {
           IRNode* shift = GeneratorGetIntConstant(gen, imm_ty, bit_pos);

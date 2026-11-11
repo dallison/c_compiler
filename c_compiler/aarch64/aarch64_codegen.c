@@ -3070,6 +3070,76 @@ static TargetInstruction* EmitCompareZeroBranch(
   return branch;
 }
 
+// Match getbit(word, pos, 1) used as a 0/1 bit test.  |branch_if_set| is true
+// when the branch should fire if that bit is 1.  The getbit/cmp nodes may
+// already be lowered (ubfx/cset); we still read the IR shape and branch on
+// the underlying word so the earlier ubfx/cmp become dead.
+//
+// Prefer tst + b.eq/ne over tbz/tbnz: Mach-O has no BRANCH14 reloc, and
+// local test-branch fixups were binding the wrong label.
+static bool MatchBitTestBranch(IRNode* input, bool reverse, IRNode** word_out,
+                               int* bit_out, bool* branch_if_set_out) {
+  if (input == NULL) {
+    return false;
+  }
+  IRNode* getbit = NULL;
+  bool want_set = true;
+  if (input->opcode == IR_OP(getbit)) {
+    getbit = input;
+    want_set = true;
+  } else if ((input->opcode == IR_OP(cmpeqi) || input->opcode == IR_OP(cmpnei)) &&
+             input->inputs.length >= 2) {
+    IRNode* lhs = input->inputs.value.p[0];
+    IRNode* rhs = input->inputs.value.p[1];
+    int64_t imm = 0;
+    IRNode* other = NULL;
+    if (IRIsIntConst(rhs)) {
+      imm = IRIntConstValue(rhs);
+      other = lhs;
+    } else if (IRIsIntConst(lhs)) {
+      imm = IRIntConstValue(lhs);
+      other = rhs;
+    } else {
+      return false;
+    }
+    if (other == NULL || other->opcode != IR_OP(getbit)) {
+      return false;
+    }
+    getbit = other;
+    if (input->opcode == IR_OP(cmpeqi)) {
+      if (imm == 0) {
+        want_set = false;
+      } else if (imm == 1) {
+        want_set = true;
+      } else {
+        return false;
+      }
+    } else {
+      // cmpnei
+      if (imm == 0) {
+        want_set = true;
+      } else {
+        return false;
+      }
+    }
+  } else {
+    return false;
+  }
+  if (getbit->inputs.length < 3 || !IRIsIntConst(getbit->inputs.value.p[1]) ||
+      !IRIsIntConst(getbit->inputs.value.p[2])) {
+    return false;
+  }
+  int bit = (int)IRIntConstValue(getbit->inputs.value.p[1]);
+  int width = (int)IRIntConstValue(getbit->inputs.value.p[2]);
+  if (width != 1 || bit < 0 || bit > 63) {
+    return false;
+  }
+  *word_out = getbit->inputs.value.p[0];
+  *bit_out = bit;
+  *branch_if_set_out = reverse ? !want_set : want_set;
+  return true;
+}
+
 static void CompareEqualZero(AARCH64Generator* g, IRNode* value_node,
                              IRNode* target_node, int size) {
   EmitCompareZeroBranch(g, AARCH64_OP(cbz), Materialize(g, value_node),
@@ -3318,6 +3388,29 @@ static TargetInstruction* LowerConditionalBranch(AARCH64Generator* g,
   IRNode* expr = node->inputs.value.p[0];
   IRNode* target_node = node->inputs.value.p[1];
   IRNode* input = node->inputs.value.p[0];
+
+  // Single-bit flag tests (`if (flags.bits.z == 1)`) → tst + b.eq/ne instead
+  // of ubfx+cmp+b.cc (BBC conditional branches).  Avoid tbz/tbnz: Mach-O has
+  // no BRANCH14 reloc for local labels.
+  {
+    IRNode* bit_word = NULL;
+    int bit = 0;
+    bool branch_if_set = false;
+    if (MatchBitTestBranch(input, reverse, &bit_word, &bit, &branch_if_set)) {
+      int size = (bit_word->type != NULL && bit_word->type->size > 4) || bit >= 32
+                     ? kSize64Bit
+                     : kSize32Bit;
+      uint64_t mask = UINT64_C(1) << bit;
+      Emit(g, SetInstructionSize(
+                  NewInstruction2(
+                      AARCH64_OP(tst), Materialize(g, bit_word),
+                      GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)mask)),
+                  size));
+      EmitBranch(g, branch_if_set ? AARCH64_OP(ne) : AARCH64_OP(eq),
+                 target_node);
+      return NULL;
+    }
+  }
 
   // A boolean conversion is represented as (value == 0) or (value != 0).
   // Branch directly on the original integer/address value so the target can
