@@ -659,6 +659,44 @@ static bool FoldAddressIndex(AARCH64Generator* generator,
   return true;
 }
 
+// strb/strh already truncates; ubfx/and masking the value first is dead when
+// that mask is only feeding the store (BBC PC updates: add; uxth; strh).
+static bool FoldTruncBeforeNarrowStore(AARCH64Generator* generator,
+                                       TargetInstruction* store) {
+  int bytes = AccessBytes(store);
+  if (bytes != 1 && bytes != 2) {
+    return false;
+  }
+  TargetInstruction* value = store->operand[0];
+  if (value == NULL || value->users.length != 1) {
+    return false;
+  }
+  TargetInstruction* src = NULL;
+  if (value->opcode == (TargetOpcode)AARCH64_OP(ubfx) &&
+      value->operand[0] != NULL && value->operand[1] != NULL &&
+      value->operand[2] != NULL && AARCH64IsIntConst(value->operand[1]) &&
+      AARCH64IsIntConst(value->operand[2]) &&
+      AARCH64IntValue(value->operand[1]) == 0 &&
+      AARCH64IntValue(value->operand[2]) == bytes * 8) {
+    src = value->operand[0];
+  } else if (value->opcode == (TargetOpcode)AARCH64_OP(and) &&
+             value->operand[0] != NULL && value->operand[1] != NULL &&
+             AARCH64IsIntConst(value->operand[1])) {
+    int64_t mask = AARCH64IntValue(value->operand[1]);
+    if ((bytes == 1 && mask == 0xff) || (bytes == 2 && mask == 0xffff)) {
+      src = value->operand[0];
+    }
+  }
+  if (src == NULL) {
+    return false;
+  }
+  TargetReplaceOperand(store, 0, src);
+  if (value->users.length == 0) {
+    RemoveInstructionAndDeadTempDest(generator, value->block, value);
+  }
+  return true;
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   AARCH64Generator* generator = data;
   TargetInstruction* prev = NULL;
@@ -673,7 +711,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       }
     } else if (IsFoldableStore(inst)) {
       while (FoldAddressAdd(generator, inst, 1, 2) ||
-             FoldAddressIndex(generator, inst, 1, 2)) {
+             FoldAddressIndex(generator, inst, 1, 2) ||
+             FoldTruncBeforeNarrowStore(generator, inst)) {
       }
     }
   }
