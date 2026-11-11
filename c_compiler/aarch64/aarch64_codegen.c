@@ -453,6 +453,17 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
       return 2;
     }
   }
+  // Bitwise ops on two narrow values stay narrow (ldrb|ldrb → still a byte).
+  if (((AARCH64Opcode)inst->opcode == AARCH64_OP(orr) ||
+       (AARCH64Opcode)inst->opcode == AARCH64_OP(and) ||
+       (AARCH64Opcode)inst->opcode == AARCH64_OP(eor)) &&
+      inst->operand[0] != NULL && inst->operand[1] != NULL) {
+    int left = KnownZeroExtendedBytes(inst->operand[0]);
+    int right = KnownZeroExtendedBytes(inst->operand[1]);
+    if (left < 8 && right < 8) {
+      return left > right ? left : right;
+    }
+  }
   if (inst->dest != NULL) {
     return 8;
   }
