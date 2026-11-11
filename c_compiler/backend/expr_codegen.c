@@ -6356,37 +6356,42 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  // short-circuit path because that operand was never evaluated; nested chains
  // would then consume an uninitialized value and could execute a skipped
  // dereference.
- // Non-constant logical operation, generate comparison and branches.  The
- // result lives in a register-promotable temporary: both stores are VarDefs
- // and the reload a VarUse on the variable itself, so SSA turns the merge
- // into a phi instead of a stack slot.
- IRNode* label = NewIR(IR_OP(label));
+ //
+ // Non-constant logical operation: short-circuit with a branch on the left
+ // operand's truthiness, then merge through a register-promotable temporary.
+ // Do not materialize left as a bool value — on the short-circuit path the
+ // result is the constant 0 (&&) or 1 (||), and on the fall-through path it
+ // is only bool(right).  Storing left_bool before the branch forced a cset
+ // (or equivalent) even when the flags were only needed for the branch, which
+ // showed up heavily in ChargeCycles/UpdatePace (`waiting = !i && (...)`).
+ IRNode* short_label = NewIR(IR_OP(label));
+ IRNode* end_label = NewIR(IR_OP(label));
  TypeRecord* bool_type =
      NewTypeRecordWithSize(kTypeBool, kQualPlain);
  Symbol* result = SyntaxNewTemporary(gen->syntax, bool_type);
  IRNode* result_var = GeneratorGetVariable(gen, result);
  IROpcode store_op = GetStoreOpcodeForType(bool_type);
 
- // Evaluate left node.
  IRNode* left = GenerateExpression(gen, node->left);
- IRNode* left_bool = GenerateBooleanValue(gen, left);
- IRNode* store = GeneratorEmit(gen, NewIR2(store_op, result_var, left_bool));
- IRSetType(store, bool_type);
- IRSetVarDef(store, result);
-
- // Short circuit.
  GeneratorEmit(gen, NewIR2(node->base.op == AST_OP(logand) ? IR_OP(bfalse)
                                                            : IR_OP(btrue),
-                           left, label));
+                           left, short_label));
 
- // Evaluate right node and place result in the temporary.
  IRNode* right =
      GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
- store = GeneratorEmit(gen, NewIR2(store_op, result_var, right));
+ IRNode* store = GeneratorEmit(gen, NewIR2(store_op, result_var, right));
+ IRSetType(store, bool_type);
+ IRSetVarDef(store, result);
+ GeneratorEmit(gen, NewIR1(IR_OP(bra), end_label));
+
+ GeneratorEmit(gen, short_label);
+ IRNode* short_value = GeneratorGetIntConstant(
+     gen, bool_type, node->base.op == AST_OP(logand) ? 0 : 1);
+ store = GeneratorEmit(gen, NewIR2(store_op, result_var, short_value));
  IRSetType(store, bool_type);
  IRSetVarDef(store, result);
 
- GeneratorEmit(gen, label);
+ GeneratorEmit(gen, end_label);
  IRNode* value = IRSetType(
      GeneratorEmit(gen, NewIR1(GetLoadOpcodeForType(bool_type), result_var)),
      bool_type);
