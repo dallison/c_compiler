@@ -67,5 +67,6 @@
 //  .size foo, .func_end_foo-foo
 
 void CodeMotionOptimization(Generator* gen);
+bool CodeSinkingOptimization(Generator* gen);
 
 #endif /* codemotion_h */

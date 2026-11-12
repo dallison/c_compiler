@@ -110,7 +110,7 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
   //    with the most recent ssavar IR node.
   IRNode* inst = block->code;
   while (inst != NULL && IRPrev(inst) != block->end_code) {
-    if (IRIsVarDef(inst)) {
+    if (IRIsVarDef(inst) && inst->opcode != IR_OP(setbit)) {
       // Node defines a variable.
       if (inst->opcode == IR_OP(phi)) {
         // A PHI node doesn't have any references to the variables yet.

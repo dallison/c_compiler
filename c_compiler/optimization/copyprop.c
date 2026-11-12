@@ -331,6 +331,13 @@ static void RemoveUnreadSymbolDefinitions(Generator* gen, Map* pooled) {
       IRNode* value = store->inputs.value.p[1];
       BasicBlockRemoveInstruction(gen, store->block, store);
       if (value != NULL && value->outputs.length == 0 &&
+          value->block != NULL && value->opcode == IR_OP(cast) &&
+          value->dest == NULL && value->inputs.length == 1) {
+        IRNode* inner = value->inputs.value.p[0];
+        BasicBlockRemoveInstruction(gen, value->block, value);
+        value = inner;
+      }
+      if (value != NULL && value->outputs.length == 0 &&
           value->block != NULL && IsScalarVariableLoad(value)) {
         BasicBlockRemoveInstruction(gen, value->block, value);
       }
@@ -387,8 +394,19 @@ void SSAVariableCopyPropagation(Generator* gen) {
       continue;
     }
     IRNode* value = store->inputs.value.p[1];
-    if (value != NULL && IsScalarVariableLoad(value)) {
-      IRNode* source = value->inputs.value.p[0];
+    IRNode* load_val = value;
+    if (load_val != NULL && load_val->opcode == IR_OP(cast) &&
+        load_val->dest == NULL && load_val->flags == 0 &&
+        load_val->inputs.length == 1 && load_val->type != NULL &&
+        TypeIsPointer(load_val->type)) {
+      IRNode* inner = load_val->inputs.value.p[0];
+      if (inner != NULL && inner->type != NULL && TypeIsPointer(inner->type) &&
+          inner->type->size == load_val->type->size) {
+        load_val = inner;
+      }
+    }
+    if (load_val != NULL && IsScalarVariableLoad(load_val)) {
+      IRNode* source = load_val->inputs.value.p[0];
       Symbol* symbol = source->opcode == IR_OP(ssavar) ||
                                source->opcode == IR_OP(argument)
                            ? ((IRVariable*)source)->symbol
@@ -403,7 +421,7 @@ void SSAVariableCopyPropagation(Generator* gen) {
       if (source != copy && single_version) {
         for (size_t i = copy->outputs.length; i-- > 0;) {
           IRNode* user = copy->outputs.value.p[i];
-          if (user != store && user->opcode == value->opcode &&
+          if (user != store && user->opcode == load_val->opcode &&
               user->inputs.value.p[0] == copy && IsScalarVariableLoad(user)) {
             IRReplaceInput(user, 0, source);
           }

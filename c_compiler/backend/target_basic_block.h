@@ -85,6 +85,7 @@ bool TargetBasicBlockIsUnreachable(struct TargetGenerator* rv, TargetBasicBlock*
 void TargetBasicBlockClear(struct TargetGenerator* rv, TargetBasicBlock* b);
 
 void TargetBuildBasicBlocks(struct TargetGenerator* rv);
+void TargetRebuildBasicBlocks(struct TargetGenerator* rv);
 void TargetPrintBasicBlocks(TargetGenerator* rv, FILE* fp);
 void TargetBuildBasicBlockInputsAndOutputs(TargetGenerator* rv);
 void TargetMarkCallPreservedInstructions(TargetGenerator* rv,

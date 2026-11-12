@@ -6278,6 +6278,107 @@ static IRNode* TryFoldUnsignedRangeConjunction(Generator* gen,
   return value;
 }
 
+// True when `expr` is a tiny, pure, trap-free, memory-load-free scalar integer
+// expression reading only local/parameter scalar variables and constants.
+static bool ASTExprIsTinyPureRegisterOnly(ASTNode* expr, int* budget) {
+  if (expr == NULL || *budget <= 0 || expr->type == NULL ||
+      TypeIsVolatile(expr->type) || !TypeIsIntegral(expr->type) ||
+      TypeIsInt128(expr->type) || TypeIsBitInt(expr->type) ||
+      expr->type->size > 8 ||
+      (expr->flags & (kASTNeedAddress | kASTTemporaryCleanupCall)) != 0) {
+    return false;
+  }
+  (*budget)--;
+  if (ASTNodeIsIntConstant(expr)) {
+    return true;
+  }
+  switch (expr->op) {
+    case AST_OP(identifier): {
+      Symbol* sym = ((IdentifierASTNode*)expr)->symbol;
+      return sym != NULL &&
+             (sym->flags.is_local || sym->flags.is_argument) &&
+             !StorageIs(sym->storage, STO(static)) && sym->type != NULL &&
+             !TypeIsVolatile(sym->type) && TypeIsIntegral(sym->type) &&
+             !TypeIsArray(sym->type) && !TypeIsFunction(sym->type) &&
+             !TypeIsReference(sym->type) && sym->type->size <= 8;
+    }
+    case AST_OP(not):
+    case AST_OP(onescomp):
+    case AST_OP(uplus):
+    case AST_OP(c2i):
+    case AST_OP(c2s):
+    case AST_OP(c2l):
+    case AST_OP(c2ll):
+    case AST_OP(c2b):
+    case AST_OP(s2i):
+    case AST_OP(s2c):
+    case AST_OP(s2l):
+    case AST_OP(s2ll):
+    case AST_OP(s2b):
+    case AST_OP(i2c):
+    case AST_OP(i2s):
+    case AST_OP(i2l):
+    case AST_OP(i2ll):
+    case AST_OP(i2b):
+    case AST_OP(l2c):
+    case AST_OP(l2s):
+    case AST_OP(l2i):
+    case AST_OP(l2ll):
+    case AST_OP(l2b):
+    case AST_OP(ll2c):
+    case AST_OP(ll2s):
+    case AST_OP(ll2i):
+    case AST_OP(ll2l):
+    case AST_OP(ll2b):
+    case AST_OP(b2c):
+    case AST_OP(b2s):
+    case AST_OP(b2i):
+    case AST_OP(b2l):
+    case AST_OP(b2ll):
+      return ASTExprIsTinyPureRegisterOnly(((UnaryASTNode*)expr)->sub, budget);
+    case AST_OP(cast): {
+      CastASTNode* cn = (CastASTNode*)expr;
+      if (cn->kind == kCastDynamic || cn->kind == kCastBit ||
+          TypeIsReference(cn->cast_type)) {
+        return false;
+      }
+      return ASTExprIsTinyPureRegisterOnly(cn->expr, budget);
+    }
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(logand):
+    case AST_OP(logor):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq): {
+      BinaryASTNode* bn = (BinaryASTNode*)expr;
+      return ASTExprIsTinyPureRegisterOnly(bn->left, budget) &&
+             ASTExprIsTinyPureRegisterOnly(bn->right, budget);
+    }
+    case AST_OP(lshift):
+    case AST_OP(rshiftl):
+    case AST_OP(rshifta): {
+      BinaryASTNode* bn = (BinaryASTNode*)expr;
+      if (!ASTNodeIsIntConstant(bn->right) || bn->left == NULL ||
+          bn->left->type == NULL) {
+        return false;
+      }
+      int64_t sh = ((ConstantASTNode*)bn->right)->value.ivalue;
+      int width = bn->left->type->size * 8;
+      if (sh < 0 || sh >= width) {
+        return false;
+      }
+      return ASTExprIsTinyPureRegisterOnly(bn->left, budget);
+    }
+    default:
+      return false;
+  }
+}
+
 static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
  IRNode* folded_range = TryFoldUnsignedRangeConjunction(gen, node);
  if (folded_range != NULL) {
@@ -6312,6 +6413,25 @@ static IRNode* GenerateLogicalOperation(Generator* gen, BinaryASTNode* node) {
    return TypeIsBool(node->base.type)
               ? result
               : GenerateZeroExtend(gen, (ASTNode*)node, result);
+ }
+ if (OptLevel2() && !gen->for_constant_evaluation &&
+     (node->base.flags & kASTNeedAddress) == 0) {
+   int budget = 8;
+   if (ASTExprIsTinyPureRegisterOnly(node->right, &budget)) {
+     TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+     IRNode* left_bool =
+         GenerateBooleanValue(gen, GenerateExpression(gen, node->left));
+     IRNode* right_bool =
+         GenerateBooleanValue(gen, GenerateExpression(gen, node->right));
+     IROpcode comb = node->base.op == AST_OP(logand) ? IR_OP(andi) : IR_OP(ori);
+     IRNode* value =
+         IRSetType(GeneratorEmit(gen, NewIR2(comb, left_bool, right_bool)),
+                   bool_type);
+     if (!TypeIsBool(node->base.type)) {
+       return GenerateZeroExtend(gen, (ASTNode*)node, value);
+     }
+     return value;
+   }
  }
  // Constexpr pcode evaluation spills boolean temps to the stack for && / ||.
  // That spill can overlap EH catch-binding storage and clobber the caught
@@ -6611,6 +6731,72 @@ static IRNode* GenerateConditionalExpression(Generator* gen,
                       direct_struct_destination ||
                       (TypeIsTernaryMemoryAggregate(node->base.type) &&
                        node->base.value_category != kValueCategoryPrvalue);
+
+  if (OptLevel2() && !gen->for_constant_evaluation && value_is_used &&
+      node->base.value_category == kValueCategoryPrvalue &&
+      !need_address && !fills_struct_address && node->base.type != NULL &&
+      TypeIsIntegral(node->base.type) && !TypeIsInt128(node->base.type) &&
+      !TypeIsBitInt(node->base.type) && node->base.type->size <= 8 &&
+      ASTNodeIsIntConstant(colon->left) && ASTNodeIsIntConstant(colon->right)) {
+    int64_t c1 = ((ConstantASTNode*)colon->left)->value.ivalue;
+    int64_t c0 = ((ConstantASTNode*)colon->right)->value.ivalue;
+    int bits = TypeIsBool(node->base.type) ? 1 : node->base.type->size * 8;
+    if (bits > 0 && bits < 64) {
+      uint64_t mask = (UINT64_C(1) << bits) - 1;
+      uint64_t u1 = (uint64_t)c1 & mask;
+      uint64_t u0 = (uint64_t)c0 & mask;
+      if (!TypeIsUnsigned(node->base.type) && !TypeIsBool(node->base.type)) {
+        if ((u1 & (UINT64_C(1) << (bits - 1))) != 0) u1 |= ~mask;
+        if ((u0 & (UINT64_C(1) << (bits - 1))) != 0) u0 |= ~mask;
+      }
+      c1 = (int64_t)u1;
+      c0 = (int64_t)u0;
+    }
+    if (c1 == c0) {
+      GenerateExpression(gen, node->left);
+      return GeneratorGetIntConstant(gen, node->base.type, c1);
+    }
+    uint64_t pos_diff = (uint64_t)c1 - (uint64_t)c0;
+    uint64_t neg_diff = (uint64_t)c0 - (uint64_t)c1;
+    bool pos_pow2 = pos_diff > 0 && pos_diff <= (UINT64_C(1) << 62) &&
+                    (pos_diff & (pos_diff - 1)) == 0;
+    bool neg_pow2 = !pos_pow2 && neg_diff > 0 &&
+                    neg_diff <= (UINT64_C(1) << 62) &&
+                    (neg_diff & (neg_diff - 1)) == 0;
+    if (pos_pow2 || neg_pow2) {
+      IRNode* cond_bool =
+          GenerateBooleanValue(gen, GenerateExpression(gen, node->left));
+      if (neg_pow2) {
+        cond_bool = IRSetType(GeneratorEmit(gen, NewIR1(IR_OP(noti), cond_bool)),
+                              cond_bool->type);
+      }
+      IRNode* bit_val = TypeIsBool(node->base.type)
+                            ? cond_bool
+                            : GenerateZeroExtend(gen, (ASTNode*)node, cond_bool);
+      uint64_t delta = pos_pow2 ? pos_diff : neg_diff;
+      int64_t base_c = pos_pow2 ? c0 : c1;
+      IRNode* scaled = bit_val;
+      if (delta > 1) {
+        int shift = 0;
+        for (uint64_t tmp_d = delta; tmp_d > 1; tmp_d >>= 1) {
+          shift++;
+        }
+        scaled = IRSetType(
+            GeneratorEmit(
+                gen, NewIR2(IR_OP(lsli), bit_val,
+                            GeneratorGetIntConstant(gen, NULL, shift))),
+            node->base.type);
+      }
+      if (base_c == 0) {
+        return scaled;
+      }
+      return IRSetType(
+          GeneratorEmit(
+              gen, NewIR2(IR_OP(addi), scaled,
+                          GeneratorGetIntConstant(gen, node->base.type, base_c))),
+          node->base.type);
+    }
+  }
 
   // Non-constant condition, emit comparison and assignments to tmp.
   IRNode* false_label = NewIR(IR_OP(label));

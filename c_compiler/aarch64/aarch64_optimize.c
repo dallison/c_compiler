@@ -386,8 +386,8 @@ static bool EliminateMovesInBlock(AARCH64Generator* generator,
         TargetInstruction* def = NULL;
         for (TargetInstruction* p = TargetBasicBlockBegin(block);
              p != NULL && p != inst; p = TargetNext(p)) {
-          if (IsMove(p) && p->dest == source) {
-            def = p;
+          if (p->dest == source) {
+            def = IsMove(p) ? p : NULL;
           }
         }
         if (def != NULL && MoveSizesCompatible(def, inst)) {
@@ -397,8 +397,18 @@ static bool EliminateMovesInBlock(AARCH64Generator* generator,
                p = TargetNext(p)) {
             if (WritesFixedValue(p, forwarded) ||
                 SameFixedRegister(p->dest, forwarded) ||
+                WritesAliasedReturnRegister(forwarded, p) ||
                 (WritesRegisterOperand(p) &&
-                 SameFixedRegister(p->operand[0], forwarded))) {
+                 SameFixedRegister(p->operand[0], forwarded)) ||
+                (AARCH64IsFixedRegister(forwarded) &&
+                 (AARCH64IsCall(p) ||
+                  p->opcode == (TargetOpcode)AARCH64_OP(asm))) ||
+                (AARCH64IsCall(forwarded) &&
+                 (AARCH64IsCall(p) ||
+                  p->opcode == (TargetOpcode)AARCH64_OP(asm) ||
+                  (p->dest != NULL &&
+                   (AARCH64IsFixedRegister(p->dest) ||
+                    AARCH64IsResult(p->dest)))))) {
               clobbered = true;
               break;
             }
@@ -600,12 +610,17 @@ static bool FoldAddressAdd(AARCH64Generator* generator,
 // add base, index [, lsl #n] used only to form [tmp, #0].  Fold into the
 // register-offset form [base, index] (or scaled when n matches the access
 // size).  Unscaled (ldur*) opcodes have no register-offset encoding.
+static bool IsRegisterAddressAddOperand(TargetInstruction* op) {
+  return op != NULL && !AARCH64IsConst(op) && !AARCH64IsSymbol(op) &&
+         op->opcode != (TargetOpcode)AARCH64_OP(literal);
+}
+
 static bool IsRegisterAddressAdd(TargetInstruction* inst) {
   return inst != NULL &&
          inst->opcode == (TargetOpcode)AARCH64_OP(add) &&
          inst->dest == NULL &&
-         inst->operand[0] != NULL && !AARCH64IsIntConst(inst->operand[0]) &&
-         inst->operand[1] != NULL && !AARCH64IsIntConst(inst->operand[1]);
+         IsRegisterAddressAddOperand(inst->operand[0]) &&
+         IsRegisterAddressAddOperand(inst->operand[1]);
 }
 
 static int RegisterAddressAddShift(TargetInstruction* add) {
@@ -636,7 +651,10 @@ static bool FoldAddressIndex(AARCH64Generator* generator,
   TargetInstruction* offset = memory->operand[offset_index];
   if (!IsRegisterAddressAdd(base) || offset == NULL ||
       !AARCH64IsIntConst(offset) || AARCH64IntValue(offset) != 0 ||
-      IsUnscaledOnly(memory)) {
+      IsUnscaledOnly(memory) ||
+      memory->opcode == (TargetOpcode)AARCH64_OP(fldr) ||
+      memory->opcode == (TargetOpcode)AARCH64_OP(fstr) ||
+      AccessBytes(memory) > 8) {
     return false;
   }
   int shift = RegisterAddressAddShift(base);
@@ -972,29 +990,1096 @@ static bool FoldCsetCompareZeroBranch(AARCH64Generator* generator,
   return true;
 }
 
+static bool ReadsConditionFlags(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(cset):
+    case AARCH64_OP(csetm):
+    case AARCH64_OP(csel):
+    case AARCH64_OP(csinc):
+    case AARCH64_OP(csinv):
+    case AARCH64_OP(csneg):
+    case AARCH64_OP(cinc):
+    case AARCH64_OP(cinv):
+    case AARCH64_OP(cneg):
+    case AARCH64_OP(ccmp):
+    case AARCH64_OP(ccmn):
+    case AARCH64_OP(adc):
+    case AARCH64_OP(adcs):
+    case AARCH64_OP(sbc):
+    case AARCH64_OP(sbcs):
+    case AARCH64_OP(ngc):
+    case AARCH64_OP(ngcs):
+    case AARCH64_OP(asm):
+      return true;
+    case AARCH64_OP(b):
+      return inst->operand[0] != NULL &&
+             inst->operand[0]->opcode != (TargetOpcode)AARCH64_OP(al);
+    default:
+      return false;
+  }
+}
+
+static bool OverwritesConditionFlags(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(cmp):
+    case AARCH64_OP(cmn):
+    case AARCH64_OP(tst):
+    case AARCH64_OP(fcmp):
+    case AARCH64_OP(adds):
+    case AARCH64_OP(subs):
+    case AARCH64_OP(negs):
+    case AARCH64_OP(ands):
+    case AARCH64_OP(bics):
+    case AARCH64_OP(eons):
+    case AARCH64_OP(bl):
+    case AARCH64_OP(blr):
+    case AARCH64_OP(ret):
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool FlagsDeadAfter(TargetBasicBlock* block, TargetInstruction* pos) {
+  for (TargetInstruction* cur = TargetNext(pos);
+       cur != NULL && cur->block == block; cur = TargetNext(cur)) {
+    if (ReadsConditionFlags(cur)) {
+      return false;
+    }
+    if (OverwritesConditionFlags(cur)) {
+      return true;
+    }
+    if (cur == block->end_code) {
+      break;
+    }
+  }
+  return true;
+}
+
+static bool IsCompareWithZero(TargetInstruction* inst) {
+  if (inst == NULL || inst->opcode != (TargetOpcode)AARCH64_OP(cmp) ||
+      inst->operand[0] == NULL || inst->operand[1] == NULL) {
+    return false;
+  }
+  if (inst->operand[1]->opcode == (TargetOpcode)AARCH64_OP(zr)) {
+    return true;
+  }
+  return AARCH64IsIntConst(inst->operand[1]) &&
+         AARCH64IntValue(inst->operand[1]) == 0;
+}
+
+static bool IsZeroOneValue(TargetInstruction* inst) {
+  if (inst == NULL) {
+    return false;
+  }
+  if (inst->opcode == (TargetOpcode)AARCH64_OP(cset)) {
+    return true;
+  }
+  if (inst->opcode == (TargetOpcode)AARCH64_OP(and) &&
+      inst->operand[2] == NULL && inst->operand[1] != NULL &&
+      AARCH64IsIntConst(inst->operand[1]) &&
+      AARCH64IntValue(inst->operand[1]) == 1) {
+    return true;
+  }
+  if (inst->opcode == (TargetOpcode)AARCH64_OP(ubfx) &&
+      inst->operand[2] != NULL && AARCH64IsIntConst(inst->operand[2]) &&
+      AARCH64IntValue(inst->operand[2]) == 1) {
+    return true;
+  }
+  return false;
+}
+
+static bool ExtractSingleBitTest(TargetInstruction* val,
+                                 TargetBasicBlock* block,
+                                 int max_bits,
+                                 TargetInstruction** base_out,
+                                 int* bit_out) {
+  TargetInstruction* src = PeelMovSource(val, block);
+  if (src == NULL || src->block != block || src->dest != NULL) {
+    return false;
+  }
+  if (src->opcode == (TargetOpcode)AARCH64_OP(and) &&
+      src->operand[2] == NULL && src->operand[0] != NULL &&
+      !AARCH64IsConst(src->operand[0]) && src->operand[1] != NULL &&
+      AARCH64IsIntConst(src->operand[1])) {
+    uint64_t mask = (uint64_t)AARCH64IntValue(src->operand[1]);
+    if (max_bits == 32) {
+      mask &= 0xffffffffu;
+    }
+    if (mask != 0 && (mask & (mask - 1)) == 0) {
+      int bit = 0;
+      while (((mask >> bit) & 1u) == 0) {
+        bit++;
+      }
+      if (bit >= 0 && bit < max_bits) {
+        *base_out = src->operand[0];
+        *bit_out = bit;
+        return true;
+      }
+    }
+  }
+  if (src->opcode == (TargetOpcode)AARCH64_OP(ubfx) &&
+      src->operand[0] != NULL && !AARCH64IsConst(src->operand[0]) &&
+      src->operand[1] != NULL && AARCH64IsIntConst(src->operand[1]) &&
+      src->operand[2] != NULL && AARCH64IsIntConst(src->operand[2]) &&
+      AARCH64IntValue(src->operand[2]) == 1) {
+    int64_t bit = AARCH64IntValue(src->operand[1]);
+    if (bit >= 0 && bit < max_bits) {
+      *base_out = src->operand[0];
+      *bit_out = (int)bit;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void CombineShiftAndMaskInBlock(TargetBasicBlock* block, void* data) {
+  AARCH64Generator* generator = data;
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
+       inst = next) {
+    next = TargetNext(inst);
+    if (inst->opcode != (TargetOpcode)AARCH64_OP(and) ||
+        inst->operand[2] != NULL || inst->operand[0] == NULL ||
+        inst->operand[1] == NULL || !AARCH64IsIntConst(inst->operand[1])) {
+      continue;
+    }
+    int width_bits = InstructionSize(inst) == kSize64Bit ? 64 : 32;
+    uint64_t mask = (uint64_t)AARCH64IntValue(inst->operand[1]);
+    if (width_bits == 32) {
+      mask &= 0xffffffffu;
+    }
+    if (mask == 0 || mask == UINT64_MAX || ((mask + 1) & mask) != 0) {
+      continue;
+    }
+    int w = 0;
+    for (uint64_t m = mask; m != 0; m >>= 1) {
+      w++;
+    }
+    TargetInstruction* shift = inst->operand[0];
+    if (shift->dest != NULL || shift->users.length != 1 ||
+        shift->block != block || shift->operand[0] == NULL ||
+        AARCH64IsConst(shift->operand[0]) || shift->operand[1] == NULL ||
+        !AARCH64IsIntConst(shift->operand[1]) ||
+        InstructionSize(shift) != InstructionSize(inst) ||
+        (shift->opcode != (TargetOpcode)AARCH64_OP(lsr) &&
+         shift->opcode != (TargetOpcode)AARCH64_OP(asr))) {
+      continue;
+    }
+    int64_t lsb = AARCH64IntValue(shift->operand[1]);
+    if (lsb <= 0 || w <= 0 || lsb + w > width_bits) {
+      continue;
+    }
+    TargetInstruction* base = shift->operand[0];
+    TargetInstruction* lsb_const = shift->operand[1];
+    TargetInstruction* w_const =
+        TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, w);
+    inst->opcode = (TargetOpcode)AARCH64_OP(ubfx);
+    TargetReplaceOperand(inst, 0, base);
+    TargetReplaceOperand(inst, 1, lsb_const);
+    AddOperand(inst, 2, w_const);
+    TargetBasicBlockRemoveInstruction(&generator->base, block, shift);
+  }
+}
+
+static void SimplifyRedundantCsetsInBlock(TargetBasicBlock* block, void* data) {
+  AARCH64Generator* generator = data;
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
+       inst = next) {
+    next = TargetNext(inst);
+    if (inst->opcode != (TargetOpcode)AARCH64_OP(cset) ||
+        inst->dest != NULL || inst->operand[0] == NULL) {
+      continue;
+    }
+    AARCH64Opcode cond = (AARCH64Opcode)inst->operand[0]->opcode;
+    if (cond != AARCH64_OP(eq) && cond != AARCH64_OP(ne)) {
+      continue;
+    }
+    TargetInstruction* prev = TargetPrev(inst);
+    while (prev != NULL && prev->block == block &&
+           (prev == inst->operand[0] ||
+            prev->opcode == (TargetOpcode)AARCH64_OP(loc))) {
+      prev = TargetPrev(prev);
+    }
+    if (!IsCompareWithZero(prev) || !FlagsDeadAfter(block, inst)) {
+      continue;
+    }
+    TargetInstruction* src = PeelMovSource(prev->operand[0], block);
+    if (src == NULL || src->block != block || src->dest != NULL ||
+        InstructionSize(src) != InstructionSize(inst)) {
+      if (prev->operand[0] != NULL &&
+          prev->operand[0]->opcode == (TargetOpcode)AARCH64_OP(and) &&
+          prev->operand[0]->block == block &&
+          prev->operand[0]->dest == NULL &&
+          prev->operand[0]->users.length == 1 &&
+          prev->operand[0]->operand[0] != NULL &&
+          prev->operand[0]->operand[1] != NULL &&
+          prev->operand[0]->operand[2] == NULL &&
+          InstructionSize(prev->operand[0]) == InstructionSize(prev)) {
+        TargetInstruction* and_inst = prev->operand[0];
+        prev->opcode = (TargetOpcode)AARCH64_OP(tst);
+        TargetReplaceOperand(prev, 0, and_inst->operand[0]);
+        TargetReplaceOperand(prev, 1, and_inst->operand[1]);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, and_inst);
+      }
+      continue;
+    }
+    if (cond == AARCH64_OP(ne) && IsZeroOneValue(src)) {
+      TargetRetargetInstruction(inst, src);
+      TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+      TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
+      continue;
+    }
+    if (cond == AARCH64_OP(eq) &&
+        src->opcode == (TargetOpcode)AARCH64_OP(cset) &&
+        src->operand[0] != NULL && src->users.length == 1 &&
+        prev->operand[0] == src) {
+      AARCH64Opcode inv = InvertCond((AARCH64Opcode)src->operand[0]->opcode);
+      if (inv != AARCH64_OP(al)) {
+        TargetInstruction* inv_inst =
+            TargetNewInstruction((TargetOpcode)inv);
+        TargetBasicBlockEmitBefore(&generator->base, block, inv_inst, src);
+        TargetReplaceOperand(src, 0, inv_inst);
+        TargetRetargetInstruction(inst, src);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, inst);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
+        continue;
+      }
+    }
+    if (cond == AARCH64_OP(eq) && IsZeroOneValue(src)) {
+      TargetInstruction* one =
+          TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, 1);
+      inst->opcode = (TargetOpcode)AARCH64_OP(eor);
+      TargetReplaceOperand(inst, 0, src);
+      AddOperand(inst, 1, one);
+      TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
+      continue;
+    }
+    int max_bits = InstructionSize(prev) == kSize64Bit ? 64 : 32;
+    TargetInstruction* base = NULL;
+    int bit = 0;
+    if (src->users.length == 1 && prev->operand[0] == src &&
+        ExtractSingleBitTest(src, block, max_bits, &base, &bit) &&
+        !AARCH64IsConst(base) && !AARCH64IsSymbol(base) &&
+        base->opcode != (TargetOpcode)AARCH64_OP(literal)) {
+      if (cond == AARCH64_OP(ne) &&
+          InstructionSize(base) == InstructionSize(inst)) {
+        TargetInstruction* lsb_const =
+            TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, bit);
+        TargetInstruction* w_const =
+            TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, 1);
+        inst->opcode = (TargetOpcode)AARCH64_OP(ubfx);
+        TargetReplaceOperand(inst, 0, base);
+        AddOperand(inst, 1, lsb_const);
+        AddOperand(inst, 2, w_const);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, src);
+        continue;
+      }
+      if (src->opcode == (TargetOpcode)AARCH64_OP(and) &&
+          src->operand[1] != NULL && AARCH64IsIntConst(src->operand[1])) {
+        prev->opcode = (TargetOpcode)AARCH64_OP(tst);
+        TargetReplaceOperand(prev, 0, base);
+        TargetReplaceOperand(prev, 1, src->operand[1]);
+        TargetBasicBlockRemoveInstruction(&generator->base, block, src);
+        continue;
+      }
+    }
+  }
+}
+
+static bool TryFoldBitTestBranch(AARCH64Generator* generator,
+                                 TargetBasicBlock* block,
+                                 TargetInstruction* branch,
+                                 bool allow_tbz) {
+  if (!allow_tbz) {
+    return false;
+  }
+  if ((branch->opcode == (TargetOpcode)AARCH64_OP(cbz) ||
+       branch->opcode == (TargetOpcode)AARCH64_OP(cbnz)) &&
+      branch->operand[1] != NULL &&
+      branch->operand[1]->opcode == (TargetOpcode)AARCH64_OP(label)) {
+    FoldRedundantZextBeforeCompareZeroBranch(generator, block, branch);
+    bool is_nonzero = branch->opcode == (TargetOpcode)AARCH64_OP(cbnz);
+    TargetInstruction* cand = PeelMovSource(branch->operand[0], block);
+    if (cand != NULL && cand->block == block && cand->dest == NULL &&
+        cand->opcode == (TargetOpcode)AARCH64_OP(eor) &&
+        cand->operand[0] != NULL && cand->operand[1] != NULL &&
+        AARCH64IsIntConst(cand->operand[1]) &&
+        AARCH64IntValue(cand->operand[1]) == 1 &&
+        IsZeroOneValue(PeelMovSource(cand->operand[0], block))) {
+      is_nonzero = !is_nonzero;
+      cand = cand->operand[0];
+    }
+    int max_bits = InstructionSize(branch) == kSize64Bit ? 64 : 32;
+    TargetInstruction* base = NULL;
+    int bit = 0;
+    if (!ExtractSingleBitTest(cand, block, max_bits, &base, &bit)) {
+      return false;
+    }
+    TargetInstruction* old_val = branch->operand[0];
+    TargetInstruction* target = branch->operand[1];
+    TargetInstruction* bit_const =
+        TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, bit);
+    branch->opcode =
+        (TargetOpcode)(is_nonzero ? AARCH64_OP(tbnz) : AARCH64_OP(tbz));
+    SetInstructionSize(branch, bit >= 32 ? kSize64Bit : kSize32Bit);
+    TargetReplaceOperand(branch, 0, base);
+    TargetReplaceOperand(branch, 1, bit_const);
+    AddOperand(branch, 2, target);
+    if (old_val != NULL && old_val->users.length == 0) {
+      RemoveInstructionAndDeadTempDest(generator, block, old_val);
+    }
+    return true;
+  }
+  if (branch->opcode == (TargetOpcode)AARCH64_OP(b) &&
+      branch->operand[0] != NULL && branch->operand[1] != NULL &&
+      branch->operand[1]->opcode == (TargetOpcode)AARCH64_OP(label)) {
+    AARCH64Opcode cond = (AARCH64Opcode)branch->operand[0]->opcode;
+    if (cond != AARCH64_OP(eq) && cond != AARCH64_OP(ne)) {
+      return false;
+    }
+    TargetInstruction* prev = TargetPrev(branch);
+    while (prev != NULL && prev->block == block &&
+           (prev == branch->operand[0] ||
+            prev->opcode == (TargetOpcode)AARCH64_OP(loc))) {
+      prev = TargetPrev(prev);
+    }
+    if (!IsCompareWithZero(prev) || !FlagsDeadAfter(block, branch)) {
+      return false;
+    }
+    int max_bits = InstructionSize(prev) == kSize64Bit ? 64 : 32;
+    TargetInstruction* base = NULL;
+    int bit = 0;
+    if (!ExtractSingleBitTest(prev->operand[0], block, max_bits, &base, &bit)) {
+      return false;
+    }
+    TargetInstruction* target = branch->operand[1];
+    TargetInstruction* bit_const =
+        TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, bit);
+    branch->opcode = (TargetOpcode)(cond == AARCH64_OP(ne) ? AARCH64_OP(tbnz)
+                                                           : AARCH64_OP(tbz));
+    SetInstructionSize(branch, bit >= 32 ? kSize64Bit : kSize32Bit);
+    TargetReplaceOperand(branch, 0, base);
+    TargetReplaceOperand(branch, 1, bit_const);
+    AddOperand(branch, 2, target);
+    TargetBasicBlockRemoveInstruction(&generator->base, block, prev);
+    return true;
+  }
+  return false;
+}
+
+typedef struct {
+  AARCH64Generator* generator;
+  bool allow_tbz;
+} BranchFoldCtx;
+
 static void FoldCsetCompareZeroBranchesInBlock(TargetBasicBlock* block,
                                                void* data) {
-  AARCH64Generator* generator = data;
+  BranchFoldCtx* ctx = data;
+  AARCH64Generator* generator = ctx->generator;
   for (TargetInstruction* inst = TargetBasicBlockBegin(block);
        !TargetBasicBlockIsEmpty(block) &&
        inst != TargetBasicBlockEnd(block);
        inst = TargetNext(inst)) {
     FoldCsetCompareZeroBranch(generator, block, inst);
+    TryFoldBitTestBranch(generator, block, inst, ctx->allow_tbz);
   }
 }
 
 static void FoldCsetCompareZeroBranches(AARCH64Generator* generator) {
+  size_t count = 0;
+  for (TargetInstruction* p = TargetFirstInstruction(&generator->base);
+       p != NULL; p = TargetNext(p)) {
+    if (AARCH64IsConst(p) ||
+        p->opcode == (TargetOpcode)AARCH64_OP(loc) ||
+        p->opcode == (TargetOpcode)AARCH64_OP(label) ||
+        AARCH64IsVarRegister(p)) {
+      continue;
+    }
+    count++;
+    if (count >= 6000) {
+      break;
+    }
+  }
+  BranchFoldCtx ctx = {generator, count < 6000};
   TargetTraverseDominatorTree(&generator->base,
                               FoldCsetCompareZeroBranchesInBlock,
-                              kTraversePreOrder, generator);
+                              kTraversePreOrder, &ctx);
+}
+
+static TargetInstruction* EmitLocalZeroReg(AARCH64Generator* generator,
+                                           TargetBasicBlock* cond_blk,
+                                           TargetInstruction* before_pos) {
+  if (generator->zero != NULL) {
+    return generator->zero;
+  }
+  TargetInstruction* z = TargetNewInstruction((TargetOpcode)AARCH64_OP(zr));
+  TargetBasicBlockEmitBefore(&generator->base, cond_blk, z, before_pos);
+  return z;
+}
+
+static bool IsSafePureArmAlu(TargetInstruction* inst) {
+  if (inst == NULL || inst->observable_checkpoint ||
+      AARCH64HasFloatResult(inst)) {
+    return false;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(add):
+    case AARCH64_OP(sub):
+    case AARCH64_OP(and):
+    case AARCH64_OP(orr):
+    case AARCH64_OP(eor):
+    case AARCH64_OP(lsl):
+    case AARCH64_OP(lsr):
+    case AARCH64_OP(asr):
+      return inst->operand[0] != NULL && inst->operand[1] != NULL &&
+             inst->operand[2] == NULL && inst->operand[3] == NULL;
+    case AARCH64_OP(ubfx):
+      return inst->operand[0] != NULL && inst->operand[1] != NULL &&
+             inst->operand[2] != NULL && inst->operand[3] == NULL &&
+             AARCH64IsIntConst(inst->operand[1]) &&
+             AARCH64IsIntConst(inst->operand[2]);
+    default:
+      return false;
+  }
+}
+
+static bool ExtractSingleArmAssignment(TargetBasicBlock* arm,
+                                       TargetBasicBlock* expected_succ,
+                                       TargetInstruction** dest_out,
+                                       TargetInstruction** val_out,
+                                       TargetInstruction** alu_out,
+                                       int* size_out) {
+  if (arm == NULL || arm->is_unreachable || arm->contains_call ||
+      arm->uses_floating_point || arm->code == NULL ||
+      arm->in_edges.length != 1 || arm->out_edges.length != 1 ||
+      (size_t)arm->out_edges.value.w[0] != expected_succ->block_id) {
+    return false;
+  }
+  TargetInstruction* exec1 = NULL;
+  TargetInstruction* exec2 = NULL;
+  for (TargetInstruction* p = arm->code; p != NULL; p = TargetNext(p)) {
+    AARCH64Opcode op = (AARCH64Opcode)p->opcode;
+    if ((p->flags & TARGET_INST_KEEP_UNREACHABLE) != 0) {
+      return false;
+    }
+    if (op == AARCH64_OP(loc) || op == AARCH64_OP(al)) {
+      if (p == arm->end_code) break;
+      continue;
+    }
+    if (op == AARCH64_OP(label)) {
+      if (p != arm->code || p->users.length > 1) {
+        return false;
+      }
+      if (p == arm->end_code) break;
+      continue;
+    }
+    if (p == arm->end_code && op == AARCH64_OP(b) &&
+        p->operand[0] != NULL &&
+        p->operand[0]->opcode == (TargetOpcode)AARCH64_OP(al) &&
+        p->operand[1] != NULL &&
+        p->operand[1]->opcode == (TargetOpcode)AARCH64_OP(label) &&
+        p->operand[1]->block == expected_succ) {
+      break;
+    }
+    if (exec1 == NULL) {
+      exec1 = p;
+    } else if (exec2 == NULL) {
+      exec2 = p;
+    } else {
+      return false;
+    }
+    if (p == arm->end_code) {
+      break;
+    }
+  }
+  if (exec1 == NULL) {
+    return false;
+  }
+  if (exec2 == NULL) {
+    if ((exec1->opcode == (TargetOpcode)AARCH64_OP(mov) ||
+         exec1->opcode == (TargetOpcode)AARCH64_OP(mv)) &&
+        exec1->dest != NULL && exec1->users.length == 0 &&
+        exec1->operand[0] != NULL && exec1->operand[1] == NULL &&
+        !AARCH64HasFloatResult(exec1) &&
+        !AARCH64HasFloatResult(exec1->dest) &&
+        AARCH64IsVarRegister(exec1->dest)) {
+      *dest_out = exec1->dest;
+      *val_out = exec1->operand[0];
+      *alu_out = NULL;
+      *size_out = InstructionSize(exec1) == kSize64Bit ? kSize64Bit
+                                                       : kSize32Bit;
+      return true;
+    }
+    if (IsSafePureArmAlu(exec1) && exec1->dest != NULL &&
+        exec1->users.length == 0 && !AARCH64HasFloatResult(exec1->dest) &&
+        AARCH64IsVarRegister(exec1->dest)) {
+      *dest_out = exec1->dest;
+      *val_out = exec1;
+      *alu_out = exec1;
+      *size_out = InstructionSize(exec1) == kSize64Bit ? kSize64Bit
+                                                       : kSize32Bit;
+      return true;
+    }
+    return false;
+  }
+  if (IsSafePureArmAlu(exec1) && exec1->dest == NULL &&
+      exec1->users.length == 1 &&
+      (exec2->opcode == (TargetOpcode)AARCH64_OP(mov) ||
+       exec2->opcode == (TargetOpcode)AARCH64_OP(mv)) &&
+      exec2->operand[0] == exec1 && exec2->operand[1] == NULL &&
+      exec2->dest != NULL && exec2->users.length == 0 &&
+      !AARCH64HasFloatResult(exec2) &&
+      !AARCH64HasFloatResult(exec2->dest) &&
+      InstructionSize(exec1) == InstructionSize(exec2) &&
+      AARCH64IsVarRegister(exec2->dest)) {
+    *dest_out = exec2->dest;
+    *val_out = exec1;
+    *alu_out = exec1;
+    *size_out = InstructionSize(exec2) == kSize64Bit ? kSize64Bit : kSize32Bit;
+    return true;
+  }
+  return false;
+}
+
+static bool IsEmptyPassthroughArm(TargetBasicBlock* arm,
+                                  TargetBasicBlock* expected_succ) {
+  if (arm == NULL || arm->is_unreachable || arm->contains_call ||
+      arm->uses_floating_point || arm->in_edges.length != 1 ||
+      arm->out_edges.length != 1 ||
+      (size_t)arm->out_edges.value.w[0] != expected_succ->block_id) {
+    return false;
+  }
+  for (TargetInstruction* p = arm->code; p != NULL; p = TargetNext(p)) {
+    AARCH64Opcode op = (AARCH64Opcode)p->opcode;
+    if ((p->flags & TARGET_INST_KEEP_UNREACHABLE) != 0) {
+      return false;
+    }
+    if (op == AARCH64_OP(loc) || op == AARCH64_OP(al)) {
+      if (p == arm->end_code) break;
+      continue;
+    }
+    if (op == AARCH64_OP(label)) {
+      if (p != arm->code || p->users.length > 1) {
+        return false;
+      }
+      if (p == arm->end_code) break;
+      continue;
+    }
+    if (p == arm->end_code && op == AARCH64_OP(b) &&
+        p->operand[0] != NULL &&
+        p->operand[0]->opcode == (TargetOpcode)AARCH64_OP(al) &&
+        p->operand[1] != NULL &&
+        p->operand[1]->opcode == (TargetOpcode)AARCH64_OP(label) &&
+        p->operand[1]->block == expected_succ) {
+      break;
+    }
+    return false;
+  }
+  return true;
+}
+
+static bool HasDominatingVarRegDef(TargetGenerator* gen,
+                                   TargetBasicBlock* cond_blk,
+                                   TargetInstruction* var) {
+  if (!AARCH64IsVarRegister(var)) {
+    return false;
+  }
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    TargetBasicBlock* blk = gen->basic_blocks.value.p[b];
+    if (blk == NULL || blk->code == NULL ||
+        (blk != cond_blk && !BitSetContains(&cond_blk->dominators, b))) {
+      continue;
+    }
+    for (TargetInstruction* p = blk->code; p != NULL; p = TargetNext(p)) {
+      if (p->dest == var) {
+        return true;
+      }
+      if (p == blk->end_code) {
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+static TargetInstruction* UnlinkArmAluToCond(TargetGenerator* gen,
+                                             TargetBasicBlock* arm,
+                                             TargetBasicBlock* cond_blk,
+                                             TargetInstruction* alu,
+                                             TargetInstruction* before_pos) {
+  if (arm->code == alu) {
+    arm->code = arm->end_code == alu ? NULL : TargetNext(alu);
+  }
+  if (arm->end_code == alu) {
+    arm->end_code = TargetPrev(alu);
+  }
+  ListDeleteElement(&gen->code, &alu->header);
+  alu->header.next = NULL;
+  alu->header.prev = NULL;
+  alu->dest = NULL;
+  TargetBasicBlockEmitBefore(gen, cond_blk, alu, before_pos);
+  return alu;
+}
+
+static TargetInstruction* MaterializeCselConst(AARCH64Generator* generator,
+                                               TargetBasicBlock* cond_blk,
+                                               TargetInstruction* before_pos,
+                                               TargetInstruction* cinst,
+                                               int size) {
+  if (cinst->opcode == (TargetOpcode)AARCH64_OP(zr) ||
+      (AARCH64IsIntConst(cinst) && AARCH64IntValue(cinst) == 0)) {
+    return EmitLocalZeroReg(generator, cond_blk, before_pos);
+  }
+  TargetInstruction* mv =
+      SetInstructionSize(TargetNewInstruction1((TargetOpcode)AARCH64_OP(mov),
+                                               cinst),
+                         size);
+  TargetBasicBlockEmitBefore(&generator->base, cond_blk, mv, before_pos);
+  return mv;
+}
+
+static bool ConvertDiamondsToCselOnce(AARCH64Generator* generator) {
+  TargetGenerator* gen = &generator->base;
+  if (gen->exception_edges.length != 0 || gen->basic_blocks.length < 3) {
+    return false;
+  }
+  size_t nblocks = gen->basic_blocks.length;
+  bool* touched = calloc(nblocks, sizeof(bool));
+  bool changed = false;
+
+  for (size_t b_id = 0; b_id < nblocks; b_id++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[b_id];
+    if (b == NULL || b->is_unreachable || touched[b_id] || b->code == NULL ||
+        b->end_code == NULL || b->out_edges.length != 2) {
+      continue;
+    }
+    TargetInstruction* br = b->end_code;
+    AARCH64Opcode brop = (AARCH64Opcode)br->opcode;
+    TargetInstruction* taken_lbl = NULL;
+    AARCH64Opcode cond_code = AARCH64_OP(al);
+    if (brop == AARCH64_OP(b)) {
+      if (br->operand[0] == NULL || br->operand[1] == NULL ||
+          br->operand[1]->opcode != (TargetOpcode)AARCH64_OP(label)) {
+        continue;
+      }
+      cond_code = (AARCH64Opcode)br->operand[0]->opcode;
+      if (InvertCond(cond_code) == AARCH64_OP(al)) {
+        continue;
+      }
+      taken_lbl = br->operand[1];
+    } else if (brop == AARCH64_OP(cbz) || brop == AARCH64_OP(cbnz)) {
+      if (br->operand[0] == NULL || br->operand[1] == NULL ||
+          br->operand[1]->opcode != (TargetOpcode)AARCH64_OP(label)) {
+        continue;
+      }
+      cond_code = brop == AARCH64_OP(cbz) ? AARCH64_OP(eq) : AARCH64_OP(ne);
+      taken_lbl = br->operand[1];
+    } else if (brop == AARCH64_OP(tbz) || brop == AARCH64_OP(tbnz)) {
+      if (br->operand[0] == NULL || br->operand[1] == NULL ||
+          !AARCH64IsIntConst(br->operand[1]) || br->operand[2] == NULL ||
+          br->operand[2]->opcode != (TargetOpcode)AARCH64_OP(label)) {
+        continue;
+      }
+      cond_code = brop == AARCH64_OP(tbz) ? AARCH64_OP(eq) : AARCH64_OP(ne);
+      taken_lbl = br->operand[2];
+    } else {
+      continue;
+    }
+
+    TargetBasicBlock* taken_blk = taken_lbl->block;
+    if (taken_blk == NULL || taken_blk == b ||
+        taken_blk->block_id >= nblocks) {
+      continue;
+    }
+    size_t e0 = (size_t)b->out_edges.value.w[0];
+    size_t e1 = (size_t)b->out_edges.value.w[1];
+    size_t fall_id = (e0 == taken_blk->block_id) ? e1 : e0;
+    if (fall_id >= nblocks || fall_id == taken_blk->block_id ||
+        fall_id == b_id) {
+      continue;
+    }
+    TargetBasicBlock* fall_blk = gen->basic_blocks.value.p[fall_id];
+    if (fall_blk == NULL || touched[taken_blk->block_id] ||
+        touched[fall_id]) {
+      continue;
+    }
+
+    TargetBasicBlock* join_blk = NULL;
+    TargetInstruction* dest_var = NULL;
+    TargetInstruction* val_true = NULL;
+    TargetInstruction* val_false = NULL;
+    TargetInstruction* alu_true = NULL;
+    TargetInstruction* alu_false = NULL;
+    int sel_size = 0;
+    bool clear_taken = false;
+    bool clear_fall = false;
+
+    // 2-arm diamond: taken_blk -> join_blk and fall_blk -> join_blk.
+    if (taken_blk->out_edges.length == 1 && fall_blk->out_edges.length == 1 &&
+        taken_blk->out_edges.value.w[0] == fall_blk->out_edges.value.w[0]) {
+      size_t jid = (size_t)taken_blk->out_edges.value.w[0];
+      if (jid < nblocks && jid != b_id && jid != taken_blk->block_id &&
+          jid != fall_id && !touched[jid]) {
+        TargetBasicBlock* cand_join = gen->basic_blocks.value.p[jid];
+        TargetInstruction* dt = NULL;
+        TargetInstruction* df = NULL;
+        int st = 0, sf = 0;
+        if (cand_join != NULL && cand_join != gen->exit_block) {
+          bool ok_t = ExtractSingleArmAssignment(taken_blk, cand_join, &dt,
+                                                 &val_true, &alu_true, &st);
+          bool ok_f = ExtractSingleArmAssignment(fall_blk, cand_join, &df,
+                                                 &val_false, &alu_false, &sf);
+          if (ok_t && ok_f && dt == df && st == sf) {
+            join_blk = cand_join;
+            dest_var = dt;
+            sel_size = st;
+            clear_taken = true;
+            clear_fall = true;
+          } else if (ok_t && !ok_f &&
+                     IsEmptyPassthroughArm(fall_blk, cand_join) &&
+                     HasDominatingVarRegDef(gen, b, dt)) {
+            join_blk = cand_join;
+            dest_var = dt;
+            val_false = dt;
+            alu_false = NULL;
+            sel_size = st;
+            clear_taken = true;
+            clear_fall = true;
+          } else if (!ok_t && ok_f &&
+                     IsEmptyPassthroughArm(taken_blk, cand_join) &&
+                     HasDominatingVarRegDef(gen, b, df)) {
+            join_blk = cand_join;
+            dest_var = df;
+            val_true = df;
+            alu_true = NULL;
+            sel_size = sf;
+            clear_taken = true;
+            clear_fall = true;
+          }
+        }
+      }
+    }
+
+    // 1-arm triangle (taken bypasses fall_blk: taken_blk == join_blk, fall_blk -> taken_blk).
+    if (join_blk == NULL && fall_blk->out_edges.length == 1 &&
+        (size_t)fall_blk->out_edges.value.w[0] == taken_blk->block_id &&
+        taken_blk != gen->exit_block) {
+      TargetInstruction* df = NULL;
+      int sf = 0;
+      if (ExtractSingleArmAssignment(fall_blk, taken_blk, &df, &val_false,
+                                     &alu_false, &sf) &&
+          HasDominatingVarRegDef(gen, b, df)) {
+        join_blk = taken_blk;
+        dest_var = df;
+        val_true = df;
+        alu_true = NULL;
+        sel_size = sf;
+        clear_taken = false;
+        clear_fall = true;
+      }
+    }
+
+    // 1-arm triangle (fall bypasses taken_blk: fall_blk == join_blk, taken_blk -> fall_blk).
+    if (join_blk == NULL && taken_blk->out_edges.length == 1 &&
+        (size_t)taken_blk->out_edges.value.w[0] == fall_id &&
+        fall_blk != gen->exit_block) {
+      TargetInstruction* dt = NULL;
+      int st = 0;
+      if (ExtractSingleArmAssignment(taken_blk, fall_blk, &dt, &val_true,
+                                     &alu_true, &st) &&
+          HasDominatingVarRegDef(gen, b, dt)) {
+        join_blk = fall_blk;
+        dest_var = dt;
+        val_false = dt;
+        alu_false = NULL;
+        sel_size = st;
+        clear_taken = true;
+        clear_fall = false;
+      }
+    }
+
+    if (join_blk == NULL || dest_var == NULL || join_blk->code == NULL) {
+      continue;
+    }
+
+    // Ensure `join_blk` starts with an explicit label.
+    TargetInstruction* join_lbl = join_blk->code;
+    if (join_lbl->opcode != (TargetOpcode)AARCH64_OP(label)) {
+      join_lbl = TargetNewInstruction((TargetOpcode)AARCH64_OP(label));
+      TargetBasicBlockEmitBefore(gen, join_blk, join_lbl, join_blk->code);
+    }
+
+    // Move pure ALU instructions (if any) into `b` before `br` (flag-safe).
+    if (alu_true != NULL) {
+      val_true = UnlinkArmAluToCond(gen, taken_blk, b, alu_true, br);
+    }
+    if (alu_false != NULL) {
+      val_false = UnlinkArmAluToCond(gen, fall_blk, b, alu_false, br);
+    }
+
+    bool t_const = val_true->opcode == (TargetOpcode)AARCH64_OP(zr) ||
+                   AARCH64IsIntConst(val_true);
+    bool f_const = val_false->opcode == (TargetOpcode)AARCH64_OP(zr) ||
+                   AARCH64IsIntConst(val_false);
+    int64_t t_cval = val_true->opcode == (TargetOpcode)AARCH64_OP(zr)
+                         ? 0
+                         : (t_const ? AARCH64IntValue(val_true) : 0);
+    int64_t f_cval = val_false->opcode == (TargetOpcode)AARCH64_OP(zr)
+                         ? 0
+                         : (f_const ? AARCH64IntValue(val_false) : 0);
+    if (sel_size == kSize32Bit) {
+      t_cval = (int64_t)(int32_t)t_cval;
+      f_cval = (int64_t)(int32_t)f_cval;
+    }
+
+    // Materialize non-special constants BEFORE flag setup (mov never touches
+    // NZCV, and keeping cmp/tst adjacent to csel is cleanest).
+    TargetInstruction* r_true = val_true;
+    TargetInstruction* r_false = val_false;
+    if (t_const && f_const) {
+      if (!((t_cval == 1 && f_cval == 0) || (t_cval == 0 && f_cval == 1) ||
+            (t_cval == -1 && f_cval == 0) || (t_cval == 0 && f_cval == -1))) {
+        r_true = MaterializeCselConst(generator, b, br, val_true, sel_size);
+        r_false = MaterializeCselConst(generator, b, br, val_false, sel_size);
+        t_const = false;
+        f_const = false;
+      }
+    } else if (t_const && !f_const) {
+      if (t_cval != 0 && t_cval != 1 && t_cval != -1) {
+        r_true = MaterializeCselConst(generator, b, br, val_true, sel_size);
+        t_const = false;
+      }
+    } else if (!t_const && f_const) {
+      if (f_cval != 0 && f_cval != 1 && f_cval != -1) {
+        r_false = MaterializeCselConst(generator, b, br, val_false, sel_size);
+        f_const = false;
+      }
+    }
+
+    // Emit explicit cmp/tst if `br` was cbz/cbnz/tbz/tbnz.
+    if (brop == AARCH64_OP(cbz) || brop == AARCH64_OP(cbnz)) {
+      int csz = InstructionSize(br) == kSize64Bit ? kSize64Bit : kSize32Bit;
+      TargetInstruction* cmp = SetInstructionSize(
+          TargetNewInstruction2((TargetOpcode)AARCH64_OP(cmp), br->operand[0],
+                                EmitLocalZeroReg(generator, b, br)),
+          csz);
+      TargetBasicBlockEmitBefore(gen, b, cmp, br);
+    } else if (brop == AARCH64_OP(tbz) || brop == AARCH64_OP(tbnz)) {
+      int bit = (int)AARCH64IntValue(br->operand[1]);
+      int tsz = bit >= 32 ? kSize64Bit : kSize32Bit;
+      TargetInstruction* mask_c = TargetGetIntConstant(
+          gen, NULL, tsz == kSize64Bit ? kTargetType64Bit : kTargetType32Bit,
+          (int64_t)(UINT64_C(1) << bit));
+      TargetInstruction* tst = SetInstructionSize(
+          TargetNewInstruction2((TargetOpcode)AARCH64_OP(tst), br->operand[0],
+                                mask_c),
+          tsz);
+      TargetBasicBlockEmitBefore(gen, b, tst, br);
+    }
+
+    TargetInstruction* sel = NULL;
+    if (t_const && f_const) {
+      bool inv = (t_cval == 0);
+      AARCH64Opcode cc = inv ? InvertCond(cond_code) : cond_code;
+      AARCH64Opcode set_op =
+          (t_cval == -1 || f_cval == -1) ? AARCH64_OP(csetm) : AARCH64_OP(cset);
+      TargetInstruction* cc_inst = TargetNewInstruction((TargetOpcode)cc);
+      TargetBasicBlockEmitBefore(gen, b, cc_inst, br);
+      sel = SetInstructionSize(
+          TargetNewInstruction1((TargetOpcode)set_op, cc_inst), sel_size);
+    } else if (t_const && !f_const) {
+      TargetInstruction* zr = EmitLocalZeroReg(generator, b, br);
+      if (t_cval == 0) {
+        TargetInstruction* cc_inst =
+            TargetNewInstruction((TargetOpcode)cond_code);
+        TargetBasicBlockEmitBefore(gen, b, cc_inst, br);
+        sel = SetInstructionSize(
+            TargetNewInstruction3((TargetOpcode)AARCH64_OP(csel), zr, r_false,
+                                  cc_inst),
+            sel_size);
+      } else {
+        AARCH64Opcode cs_op =
+            t_cval == 1 ? AARCH64_OP(csinc) : AARCH64_OP(csinv);
+        TargetInstruction* cc_inst =
+            TargetNewInstruction((TargetOpcode)InvertCond(cond_code));
+        TargetBasicBlockEmitBefore(gen, b, cc_inst, br);
+        sel = SetInstructionSize(
+            TargetNewInstruction3((TargetOpcode)cs_op, r_false, zr, cc_inst),
+            sel_size);
+      }
+    } else if (!t_const && f_const) {
+      TargetInstruction* zr = EmitLocalZeroReg(generator, b, br);
+      TargetInstruction* cc_inst =
+          TargetNewInstruction((TargetOpcode)cond_code);
+      TargetBasicBlockEmitBefore(gen, b, cc_inst, br);
+      AARCH64Opcode cs_op =
+          f_cval == 0 ? AARCH64_OP(csel)
+                      : (f_cval == 1 ? AARCH64_OP(csinc) : AARCH64_OP(csinv));
+      sel = SetInstructionSize(
+          TargetNewInstruction3((TargetOpcode)cs_op, r_true, zr, cc_inst),
+          sel_size);
+    } else {
+      TargetInstruction* cc_inst =
+          TargetNewInstruction((TargetOpcode)cond_code);
+      TargetBasicBlockEmitBefore(gen, b, cc_inst, br);
+      sel = SetInstructionSize(
+          TargetNewInstruction3((TargetOpcode)AARCH64_OP(csel), r_true, r_false,
+                                cc_inst),
+          sel_size);
+    }
+    sel->dest = dest_var;
+    TargetBasicBlockEmitBefore(gen, b, sel, br);
+
+    // Delete `br` plus cleared arm blocks.
+    TargetBasicBlockRemoveInstruction(gen, b, br);
+    if (clear_taken) {
+      TargetBasicBlockClear(gen, taken_blk);
+    }
+    if (clear_fall) {
+      TargetBasicBlockClear(gen, fall_blk);
+    }
+
+    // If `join_lbl` does not immediately follow `sel` in linear layout, jump
+    // to `join_lbl`; if it does and has no other users, drop `join_lbl` too so
+    // `b` and `join_blk` merge into one straight-line block!
+    if (TargetNext(sel) != join_lbl) {
+      TargetInstruction* al_inst =
+          TargetNewInstruction((TargetOpcode)AARCH64_OP(al));
+      TargetBasicBlockEmitAfter(gen, b, al_inst, sel);
+      TargetInstruction* jmp = TargetNewInstruction2(
+          (TargetOpcode)AARCH64_OP(b), al_inst, join_lbl);
+      TargetBasicBlockEmitAfter(gen, b, jmp, al_inst);
+    } else if (join_lbl->users.length == 0 &&
+               (join_lbl->flags & (TARGET_INST_KEEP_UNREACHABLE |
+                                   TARGET_INST_EXCEPTION_LANDING |
+                                   AARCH64_EXPORTED_LABEL)) == 0) {
+      TargetBasicBlockRemoveInstruction(gen, join_blk, join_lbl);
+    }
+
+    touched[b_id] = true;
+    touched[taken_blk->block_id] = true;
+    touched[fall_id] = true;
+    touched[join_blk->block_id] = true;
+    changed = true;
+  }
+
+  free(touched);
+  if (changed) {
+    TargetRebuildBasicBlocks(gen);
+  }
+  return changed;
+}
+
+static void ConvertDiamondsToCsel(AARCH64Generator* generator) {
+  for (int round = 0; round < 3; round++) {
+    if (!ConvertDiamondsToCselOnce(generator)) {
+      break;
+    }
+  }
+}
+
+static bool IsFallthroughJumpToNext(TargetInstruction* inst) {
+  if (inst == NULL || inst->block == NULL || inst->block->is_unreachable ||
+      (inst->flags & TARGET_INST_KEEP_UNREACHABLE) != 0 ||
+      inst->opcode != (TargetOpcode)AARCH64_OP(b) ||
+      inst->operand[0] == NULL ||
+      inst->operand[0]->opcode != (TargetOpcode)AARCH64_OP(al) ||
+      inst->operand[1] == NULL ||
+      inst->operand[1]->opcode != (TargetOpcode)AARCH64_OP(label)) {
+    return false;
+  }
+  TargetInstruction* target = inst->operand[1];
+  for (TargetInstruction* p = TargetNext(inst); p != NULL; p = TargetNext(p)) {
+    if (p == target) {
+      return p->block != NULL && !p->block->is_unreachable;
+    }
+    if (p->opcode == (TargetOpcode)AARCH64_OP(loc)) {
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
+static void SimplifyCFGForOptimize(AARCH64Generator* generator) {
+  TargetGenerator* gen = &generator->base;
+  if (generator->exception_ranges.length != 0 ||
+      gen->exception_edges.length != 0 || gen->entry_block == NULL) {
+    return;
+  }
+  bool changed = false;
+  bool in_jump_table = false;
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
+       inst = next) {
+    next = TargetNext(inst);
+    if (inst->block == NULL) {
+      continue;
+    }
+    AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+    if (op != AARCH64_OP(label) && op != AARCH64_OP(named_label) &&
+        op != AARCH64_OP(loc) && !AARCH64IsConst(inst) &&
+        !AARCH64IsSymbol(inst) && !AARCH64IsVarRegister(inst) &&
+        op != AARCH64_OP(al) && !inst->observable_checkpoint) {
+      if (op == AARCH64_OP(br) &&
+          (inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+        in_jump_table = true;
+      } else if (!(op == AARCH64_OP(b) && inst->operand[0] != NULL &&
+                   inst->operand[0]->opcode == (TargetOpcode)AARCH64_OP(al))) {
+        in_jump_table = false;
+      }
+    }
+    if (!in_jump_table && IsFallthroughJumpToNext(inst)) {
+      TargetBasicBlockRemoveInstruction(gen, inst->block, inst);
+      changed = true;
+    }
+  }
+  for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
+       inst = next) {
+    next = TargetNext(inst);
+    if (inst->block == NULL || inst->block->is_unreachable ||
+        inst == gen->entry_block->code) {
+      continue;
+    }
+    if (inst->opcode == (TargetOpcode)AARCH64_OP(label) &&
+        inst->users.length == 0 &&
+        (inst->flags & (TARGET_INST_KEEP_UNREACHABLE |
+                        TARGET_INST_EXCEPTION_LANDING |
+                        AARCH64_EXPORTED_LABEL)) == 0) {
+      TargetBasicBlockRemoveInstruction(gen, inst->block, inst);
+      changed = true;
+    }
+  }
+  if (changed) {
+    TargetRebuildBasicBlocks(gen);
+  }
 }
 
 void AARCH64Optimize(AARCH64Generator* generator) {
+  SimplifyCFGForOptimize(generator);
   EliminateMoves(generator);
   RemoveUnusedExpressions(generator);
   CombineLoadOrStores(generator);
   CombineShiftedAdds(generator);
+  TargetTraverseDominatorTree(&generator->base, CombineShiftAndMaskInBlock,
+                              kTraversePreOrder, generator);
+  TargetTraverseDominatorTree(&generator->base, SimplifyRedundantCsetsInBlock,
+                              kTraversePreOrder, generator);
   FoldCsetCompareZeroBranches(generator);
+  ConvertDiamondsToCsel(generator);
+  SimplifyCFGForOptimize(generator);
+  EliminateMoves(generator);
   RemoveUnusedExpressions(generator);
   TargetBuildBasicBlockInputsAndOutputs(&generator->base);
 }

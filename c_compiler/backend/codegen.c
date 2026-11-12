@@ -2326,6 +2326,18 @@ void OptimizeFunctionIR(Generator* gen) {
     if (compiler->ir_optimizations.dce) {
       DeadCodeEliminationOptimization(gen);
     }
+    if (compiler->ir_optimizations.code_motion) {
+      if (CodeSinkingOptimization(gen)) {
+        MemoryOptimization(gen);
+        StrengthReductionOptimization(gen);
+        if (compiler->ir_optimizations.copy_prop) {
+          CopyPropagationOptimization(gen);
+        }
+        if (compiler->ir_optimizations.dce) {
+          DeadCodeEliminationOptimization(gen);
+        }
+      }
+    }
   }
 
   DetectInvalidValueReads(gen);

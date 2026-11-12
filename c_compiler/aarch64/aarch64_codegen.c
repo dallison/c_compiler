@@ -663,6 +663,8 @@ bool AARCH64IsBranch(TargetInstruction* inst) {
     case AARCH64_OP(br):
     case AARCH64_OP(cbz):
     case AARCH64_OP(cbnz):
+    case AARCH64_OP(tbz):
+    case AARCH64_OP(tbnz):
       return true;
     default:
       return false;
@@ -680,6 +682,8 @@ bool AARCH64IsConditionalBranch(TargetInstruction* inst) {
 
     case AARCH64_OP(cbz):
     case AARCH64_OP(cbnz):
+    case AARCH64_OP(tbz):
+    case AARCH64_OP(tbnz):
       return true;
       
     default:
@@ -825,7 +829,8 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
         TypeUsesFloat64Representation(node->type) ||
         TypeIsStructOrUnion(node->type) || TypeIsVector(node->type) ||
         TypeUsesLongDoubleRepresentation(node->type) ||
-        TypeIsInt128(node->type)) {
+        TypeIsInt128(node->type) ||
+        TypeIsMemberPointerAggregate(node->type)) {
       size = kSize64Bit;
     }
     // A 16-bit narrowing sign-extend is lsl/asr #48 in a 64-bit register.
@@ -853,6 +858,10 @@ TargetInstruction* CopyOrSetInstructionSize(IRNode* node, TargetInstruction* ins
 TargetInstruction* AARCH64GetBranchTarget(TargetInstruction* inst) {
   if (((int)inst->opcode == (int)AARCH64_OP(br))) {
     return inst->operand[0];
+  }
+  if (((int)inst->opcode == (int)AARCH64_OP(tbz)) ||
+      ((int)inst->opcode == (int)AARCH64_OP(tbnz))) {
+    return inst->operand[2];
   }
   return inst->operand[1];
 }
@@ -1235,13 +1244,12 @@ static TargetInstruction* FloatingPointVariableRegister(AARCH64Generator* g, int
 // instruction, otherwise load the immediate and use an add instruction.
 static TargetInstruction* AddImmediate(AARCH64Generator* g, TargetInstruction* src,
                                        int64_t immed) {
-  int64_t imm = immed;
-  if (immed < 0) {
-    imm = -immed;
+  if (immed == 0) {
+    return src;
   }
   TargetInstruction* immed_inst =
       GetIntConstant(g, NULL, kTargetType64Bit, immed);
-  if (imm <= 0x7ff) {
+  if (IsAddSubImmediate(immed)) {
     return Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(add), src, immed_inst), 0));
   }
   TargetInstruction* movi =
@@ -1428,9 +1436,9 @@ static TargetInstruction* PagedOffsetFrom(AARCH64Generator* g, TargetInstruction
   // calculated from the src.
   int page;
   if (offset < 0) {
-    page = -(-offset & ~0x7ff);
+    page = -(-offset & ~0xfff);
   } else {
-    page = offset & ~0x7ff;
+    page = offset & ~0xfff;
   }
   // Do not cache this calculation globally.  The source is not necessarily the
   // frame pointer, and a calculation emitted in one control-flow branch may not
@@ -1446,8 +1454,7 @@ static TargetInstruction* PagedOffsetFrom(AARCH64Generator* g, TargetInstruction
 // offset from the src.
 static TargetInstruction* OffsetFrom(AARCH64Generator* g, TargetInstruction* src,
                                      int32_t offset) {
-  bool offset_in_range = AARCH64IsPossibleImmediate(offset);
-  if (offset_in_range) {
+  if (IsAddSubImmediate(offset)) {
     return AddImmediate(g, src, offset);
   }
   int page_offset;
@@ -1458,17 +1465,111 @@ static TargetInstruction* OffsetFrom(AARCH64Generator* g, TargetInstruction* src
   return AddImmediate(g, page_inst, page_offset);
 }
 
-static TargetInstruction* LoadImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
-                                          TargetInstruction* base, int32_t offset) {
-  if (AARCH64LoadStoreImmInRange(offset)) {
-    return Emit(g, NewInstruction2(opcode, base,
-                                    GetIntConstant(g, NULL, kTargetType32Bit, offset)));
+static AARCH64Opcode UnscaledLoadOpcode(AARCH64Opcode opcode) {
+  switch (opcode) {
+    case AARCH64_OP(ldrb): return AARCH64_OP(ldurb);
+    case AARCH64_OP(ldrh): return AARCH64_OP(ldurh);
+    case AARCH64_OP(ldrsb): return AARCH64_OP(ldursb);
+    case AARCH64_OP(ldrsh): return AARCH64_OP(ldursh);
+    case AARCH64_OP(ldr): return AARCH64_OP(ldur);
+    default: return opcode;
   }
-  // The offset does not fit the load's 9-bit immediate; fold it into the base
-  // address and load at offset 0.
+}
+
+static AARCH64Opcode UnscaledStoreOpcode(AARCH64Opcode opcode) {
+  switch (opcode) {
+    case AARCH64_OP(strb): return AARCH64_OP(sturb);
+    case AARCH64_OP(strh): return AARCH64_OP(sturh);
+    case AARCH64_OP(str): return AARCH64_OP(stur);
+    default: return opcode;
+  }
+}
+
+static int LoadStoreOpcodeScale(AARCH64Opcode opcode, int size) {
+  switch (opcode) {
+    case AARCH64_OP(ldrb):
+    case AARCH64_OP(ldurb):
+    case AARCH64_OP(ldrsb):
+    case AARCH64_OP(ldursb):
+    case AARCH64_OP(strb):
+    case AARCH64_OP(sturb):
+      return 1;
+    case AARCH64_OP(ldrh):
+    case AARCH64_OP(ldurh):
+    case AARCH64_OP(ldrsh):
+    case AARCH64_OP(ldursh):
+    case AARCH64_OP(strh):
+    case AARCH64_OP(sturh):
+      return 2;
+    default:
+      return size == kSize32Bit ? 4 : 8;
+  }
+}
+
+static TargetInstruction* LoadImmediateSized(AARCH64Generator* g,
+                                             AARCH64Opcode opcode,
+                                             TargetInstruction* base,
+                                             int32_t offset, int size) {
+  int scale = LoadStoreOpcodeScale(opcode, size);
+  if (offset >= 0 && (offset & (scale - 1)) == 0 && offset / scale <= 0xfff) {
+    return Emit(g, SetInstructionSize(
+                       NewInstruction2(
+                           opcode, base,
+                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                       size));
+  }
+  if (AARCH64LoadStoreImmInRange(offset)) {
+    return Emit(g, SetInstructionSize(
+                       NewInstruction2(
+                           UnscaledLoadOpcode(opcode), base,
+                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                       size));
+  }
   TargetInstruction* addr = OffsetFrom(g, base, offset);
-  return Emit(g, NewInstruction2(opcode, addr,
-                                  GetIntConstant(g, NULL, kTargetType32Bit, 0)));
+  return Emit(g, SetInstructionSize(
+                     NewInstruction2(
+                         opcode, addr,
+                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                     size));
+}
+
+static COMPILER_UNUSED TargetInstruction* LoadImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
+                                          TargetInstruction* base, int32_t offset) {
+  int size = opcode == AARCH64_OP(ldrb) || opcode == AARCH64_OP(ldrh) ||
+                     opcode == AARCH64_OP(ldurb) || opcode == AARCH64_OP(ldurh)
+                 ? kSize32Bit
+                 : kSize64Bit;
+  return LoadImmediateSized(g, opcode, base, offset, size);
+}
+
+static TargetInstruction* StoreImmediateSized(AARCH64Generator* g,
+                                              AARCH64Opcode opcode,
+                                              TargetInstruction* value,
+                                              TargetInstruction* base,
+                                              int32_t offset, int size) {
+  int scale = LoadStoreOpcodeScale(opcode, size);
+  if (offset >= 0 && (offset & (scale - 1)) == 0 && offset / scale <= 0xfff) {
+    return Emit(g, SetInstructionSize(
+                       NewInstruction3(
+                           opcode, value, base,
+                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                       size));
+  }
+  if (AARCH64LoadStoreImmInRange(offset)) {
+    return Emit(g, SetInstructionSize(
+                       NewInstruction3(
+                           UnscaledStoreOpcode(opcode), value, base,
+                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                       size));
+  }
+  // The offset does not fit any single-instruction immediate; fold it into the
+  // base address and store at offset 0.
+  TargetInstruction* addr = OffsetFrom(g, base, offset);
+  return Emit(g, SetInstructionSize(
+                     NewInstruction3(
+                         opcode, value, addr,
+                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
+                     size));
 }
 
 static TargetInstruction* StoreImmediate(AARCH64Generator* g, AARCH64Opcode opcode,
@@ -1477,21 +1578,7 @@ static TargetInstruction* StoreImmediate(AARCH64Generator* g, AARCH64Opcode opco
                      opcode == AARCH64_OP(sturb) || opcode == AARCH64_OP(sturh)
                  ? kSize32Bit
                  : kSize64Bit;
-  if (AARCH64LoadStoreImmInRange(offset)) {
-    return Emit(g, SetInstructionSize(
-                       NewInstruction3(
-                           opcode, value, base,
-                           GetIntConstant(g, NULL, kTargetType32Bit, offset)),
-                       size));
-  }
-  // The offset does not fit the store's 9-bit immediate; fold it into the base
-  // address and store at offset 0.
-  TargetInstruction* addr = OffsetFrom(g, base, offset);
-  return Emit(g, SetInstructionSize(
-                     NewInstruction3(
-                         opcode, value, addr,
-                         GetIntConstant(g, NULL, kTargetType32Bit, 0)),
-                     size));
+  return StoreImmediateSized(g, opcode, value, base, offset, size);
 }
 
 // Like SetDestOrMove for a fixed argument register of a helper call.  An
@@ -1512,18 +1599,41 @@ static TargetInstruction* SetDestOrMoveToHelperArg(AARCH64Generator* g,
 static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_addr,
                                  TargetInstruction* src_addr, int length,
                                  int src_offset, int dest_offset, bool count_as_call) {
-  if (length <= 40) {
-    // Length is short, copy using sequence of ld/sd and lb/sb instructions.
-    int num_bytes = length & 7;
-    int num_words = length >> 3;
-    TargetInstruction* result = NULL;
-    for (int i = 0; i < num_words; i++, src_offset += 8, dest_offset += 8) {
-      TargetInstruction* load = LoadImmediate(g, AARCH64_OP(ldr), src_addr, src_offset);
-      result = StoreImmediate(g, AARCH64_OP(str), load, dest_addr, dest_offset);
+  if (length <= 64) {
+    TargetInstruction* result = dest_addr;
+    int rem = length;
+    while (rem >= 8) {
+      TargetInstruction* load =
+          LoadImmediateSized(g, AARCH64_OP(ldr), src_addr, src_offset, kSize64Bit);
+      result = StoreImmediateSized(g, AARCH64_OP(str), load, dest_addr,
+                                   dest_offset, kSize64Bit);
+      src_offset += 8;
+      dest_offset += 8;
+      rem -= 8;
     }
-    for (int i = 0; i < num_bytes; i++, src_offset += 1, dest_offset += 1) {
-      TargetInstruction* load = LoadImmediate(g, AARCH64_OP(ldrb), src_addr, src_offset);
-      result = StoreImmediate(g, AARCH64_OP(strb), load, dest_addr, dest_offset);
+    if (rem >= 4) {
+      TargetInstruction* load =
+          LoadImmediateSized(g, AARCH64_OP(ldr), src_addr, src_offset, kSize32Bit);
+      result = StoreImmediateSized(g, AARCH64_OP(str), load, dest_addr,
+                                   dest_offset, kSize32Bit);
+      src_offset += 4;
+      dest_offset += 4;
+      rem -= 4;
+    }
+    if (rem >= 2) {
+      TargetInstruction* load =
+          LoadImmediateSized(g, AARCH64_OP(ldrh), src_addr, src_offset, kSize32Bit);
+      result = StoreImmediateSized(g, AARCH64_OP(strh), load, dest_addr,
+                                   dest_offset, kSize32Bit);
+      src_offset += 2;
+      dest_offset += 2;
+      rem -= 2;
+    }
+    if (rem >= 1) {
+      TargetInstruction* load =
+          LoadImmediateSized(g, AARCH64_OP(ldrb), src_addr, src_offset, kSize32Bit);
+      result = StoreImmediateSized(g, AARCH64_OP(strb), load, dest_addr,
+                                   dest_offset, kSize32Bit);
     }
     if (count_as_call) {
       g->base.num_calls--;
@@ -1564,19 +1674,60 @@ static TargetInstruction* Memcpy(AARCH64Generator* g, TargetInstruction* dest_ad
   return Emit(g, NewInstruction2(AARCH64_OP(bl), memcpy, regarg));
 }
 
+static TargetInstruction* EmitMemsetStores(AARCH64Generator* g,
+                                           TargetInstruction* dest_addr,
+                                           TargetInstruction* fill,
+                                           int length, int offset) {
+  TargetInstruction* result = dest_addr;
+  if (length <= 0) {
+    return result;
+  }
+  if (length >= 16 &&
+      ((offset & 7) != 0 || offset < -512 || offset + length - 16 > 504)) {
+    dest_addr = OffsetFrom(g, dest_addr, offset);
+    offset = 0;
+  }
+  int rem = length;
+  while (rem >= 16) {
+    result = Emit(g, SetInstructionSize(
+                         NewInstruction4(
+                             AARCH64_OP(stp), fill, fill, dest_addr,
+                             GetIntConstant(g, NULL, kTargetType32Bit, offset)),
+                         kSize64Bit));
+    offset += 16;
+    rem -= 16;
+  }
+  if (rem >= 8) {
+    result = StoreImmediateSized(g, AARCH64_OP(str), fill, dest_addr, offset,
+                                 kSize64Bit);
+    offset += 8;
+    rem -= 8;
+  }
+  if (rem >= 4) {
+    result = StoreImmediateSized(g, AARCH64_OP(str), fill, dest_addr, offset,
+                                 kSize32Bit);
+    offset += 4;
+    rem -= 4;
+  }
+  if (rem >= 2) {
+    result = StoreImmediateSized(g, AARCH64_OP(strh), fill, dest_addr, offset,
+                                 kSize32Bit);
+    offset += 2;
+    rem -= 2;
+  }
+  if (rem >= 1) {
+    result = StoreImmediateSized(g, AARCH64_OP(strb), fill, dest_addr, offset,
+                                 kSize32Bit);
+  }
+  return result;
+}
+
 static TargetInstruction* Memzero(AARCH64Generator* g, TargetInstruction* dest_addr,
                                   int length, int offset) {
-  if (length <= 40) {
-    // Length is short, copy using sequence of ld/sd and lb/sb instructions.
-    int num_bytes = length & 7;
-    int num_words = length >> 3;
-    TargetInstruction* result = NULL;
-    for (int i = 0; i < num_words; i++, offset += 8) {
-      result = StoreImmediate(g, AARCH64_OP(str), ZeroReg(g), dest_addr, offset);
-    }
-    for (int i = 0; i < num_bytes; i++, offset += 1) {
-      result = StoreImmediate(g, AARCH64_OP(strb), ZeroReg(g), dest_addr, offset);
-    }
+  if (length <= 128) {
+    TargetInstruction* fill = length > 0 ? ZeroReg(g) : NULL;
+    TargetInstruction* result =
+        EmitMemsetStores(g, dest_addr, fill, length, offset);
     g->base.num_calls--;
     return result;
   }
@@ -2094,63 +2245,63 @@ static int PopulationCount(uint64_t x) {
 //
 // Let's assume that both a slli and an add instruction take 1 cycle.
 static TargetInstruction* MultiplyByConstant(AARCH64Generator* g,
-                               IRNode* variable,
-                               IRConstant* constant) {
-  int64_t value = constant->value.ivalue;
-  int numbits = PopulationCount(value);
-  // The register allocator may coalesce a shifted term with the original
-  // input. A second shifted term then has to reload that input and can clobber
-  // the first term before the add. Keep only powers of two and the safe
-  // input-plus-one-shift form; use mul when both set bits require shifts.
-  if (numbits > 2 || (numbits == 2 && (value & 1) == 0)) {
+                                             IRNode* node,
+                                             IRNode* variable,
+                                             IRConstant* constant) {
+  int size = (node->type != NULL && node->type->size > 4) ? kSize64Bit
+                                                          : kSize32Bit;
+  int width_bits = size == kSize64Bit ? 64 : 32;
+  int64_t value = size == kSize32Bit ? (int64_t)(int32_t)constant->value.ivalue
+                                     : constant->value.ivalue;
+  if (value <= 1) {
     return NULL;
   }
-  int num_cycles = numbits * 2 - 1;
-  if ((value & 1) == 1) {
-    // If the bottom bit is 1 we can subtract one instruction.
-    num_cycles--;
+  uint64_t uval = size == kSize32Bit ? (uint64_t)(uint32_t)value
+                                     : (uint64_t)value;
+  int tz = 0;
+  while ((uval & 1) == 0) {
+    tz++;
+    uval >>= 1;
   }
-  const int kMaxCycles = 8;
-  if (num_cycles > kMaxCycles) {
-    return NULL;
-  }
- 
-  TargetInstruction* left = NULL;   // Current left instruction.
-  TargetInstruction* right = NULL;  // Current right instruction.
-  TargetInstruction* input = GetLoweredNode(variable);
-  
-  // TODO: use AARCH64's shifted register instructions to make this more efficient.
-  int bitpos = 0;
-  while (value != 0) {
-    if ((value & 1) == 1) {
-      // Build a shift by the bitpos.
-      TargetInstruction* inst;
-      if (bitpos == 0) {
-        inst = input;     // Bit 0, use input directly.
-      } else {
-        // Shift left by the bitpos.
-       inst =
-           Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(lsl), input,
-                           GetIntConstant(g, NULL, kTargetType32Bit, bitpos)), 0));
-      }
-      if (left == NULL) {
-        left = inst;
-      } else if (right == NULL) {
-        right = inst;
-      }
-      if (left != NULL && right != NULL) {
-        // Add left and right together.
-        inst = Emit(g, CopyInstructionSize(NewInstruction2(AARCH64_OP(add), left, right), 0));
-        
-        // Left is now the result of the add.  Right is empty.
-        left = inst;
-        right = NULL;
-      }
+  if (uval == 1) {
+    if (tz <= 0 || tz >= width_bits) {
+      return NULL;
     }
-    bitpos++;
-    value >>= 1;
+    return SetInstructionSize(
+        NewInstruction2(AARCH64_OP(lsl), Materialize(g, variable),
+                        GetIntConstant(g, NULL, kTargetType32Bit, tz)),
+        size);
   }
-  return left;
+  // `((1 << a) + 1) << tz`: emit `add sum, x, x, lsl #a` (via CombineShiftedAdds)
+  // optionally followed by `lsl res, sum, #tz`.  `input` is never used after
+  // `sum`, avoiding two simultaneously live shifted terms of `input`.
+  if (PopulationCount((int64_t)uval) == 2) {
+    uint64_t hi = uval - 1;
+    if (!IsPowerOf2((int64_t)hi)) {
+      return NULL;
+    }
+    int a = Log2((int64_t)hi);
+    if (a <= 0 || a >= width_bits || tz >= width_bits) {
+      return NULL;
+    }
+    TargetInstruction* input = Materialize(g, variable);
+    TargetInstruction* shifted = Emit(
+        g, SetInstructionSize(
+               NewInstruction2(AARCH64_OP(lsl), input,
+                               GetIntConstant(g, NULL, kTargetType32Bit, a)),
+               size));
+    TargetInstruction* sum = SetInstructionSize(
+        NewInstruction2(AARCH64_OP(add), input, shifted), size);
+    if (tz == 0) {
+      return sum;
+    }
+    sum = Emit(g, sum);
+    return SetInstructionSize(
+        NewInstruction2(AARCH64_OP(lsl), sum,
+                        GetIntConstant(g, NULL, kTargetType32Bit, tz)),
+        size);
+  }
+  return NULL;
 }
 
 static TargetInstruction* LowerModulo(AARCH64Generator* g, IRNode* node,
@@ -2452,6 +2603,16 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
       IRNode* op2 = node->inputs.value.p[1];
       if (IRIsConst(op1) || IRIsConst(op2)) {
         if (IRIsConst(op1) && IRIsConst(op2)) {
+          int64_t prod = (int64_t)((uint64_t)((IRConstant*)op1)->value.ivalue *
+                                   (uint64_t)((IRConstant*)op2)->value.ivalue);
+          inst = NewInstruction1(
+              AARCH64_OP(mov),
+              GetIntConstant(g, NULL,
+                             (node->type != NULL && node->type->size > 4)
+                                 ? kTargetType64Bit
+                                 : kTargetType32Bit,
+                             prod));
+          ref_counts_ok = true;
           break;
         }
         // One is constant, put it on the right of the slli instruction.
@@ -2464,8 +2625,11 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
             // Multiply by 1 is a mv.
             inst = NewInstruction(AARCH64_OP(mov));
             inst->operand[0] = Materialize(g, op2);
+          } else if (c == -1) {
+            inst = NewInstruction1(AARCH64_OP(neg), Materialize(g, op2));
+            ref_counts_ok = true;
           } else {
-            inst = MultiplyByConstant(g, op2, (IRConstant*)op1);
+            inst = MultiplyByConstant(g, node, op2, (IRConstant*)op1);
             if (inst == NULL) {
               break;
             }
@@ -2480,8 +2644,11 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
             // Multiply by 1 is a mv.
             inst = NewInstruction(AARCH64_OP(mov));
             inst->operand[0] = Materialize(g, op1);
+          } else if (c == -1) {
+            inst = NewInstruction1(AARCH64_OP(neg), Materialize(g, op1));
+            ref_counts_ok = true;
           } else {
-            inst = MultiplyByConstant(g, op1, (IRConstant*)op2);
+            inst = MultiplyByConstant(g, node, op1, (IRConstant*)op2);
             if (inst == NULL) {
               break;
             }
@@ -2514,6 +2681,46 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
               NewInstruction2(AARCH64_OP(lsr), Materialize(g, op1),
                               GetIntConstant(g, NULL, kTargetType32Bit, c));
           ref_counts_ok = true;
+        } else if (!TypeIsUnsigned(node->type) && c > 1 && IsPowerOf2(c) &&
+                   node->type != NULL &&
+                   (node->type->size == 4 || node->type->size == 8)) {
+          int width_bits = node->type->size == 8 ? 64 : 32;
+          int size = node->type->size == 8 ? kSize64Bit : kSize32Bit;
+          int k = Log2(c);
+          if (k >= 1 && k < width_bits) {
+            TargetInstruction* lhs = Materialize(g, op1);
+            TargetInstruction* bias;
+            if (k == 1) {
+              bias = Emit(g, SetInstructionSize(
+                                 NewInstruction2(
+                                     AARCH64_OP(lsr), lhs,
+                                     GetIntConstant(g, NULL, kTargetType32Bit,
+                                                    width_bits - 1)),
+                                 size));
+            } else {
+              TargetInstruction* sign = Emit(
+                  g, SetInstructionSize(
+                         NewInstruction2(
+                             AARCH64_OP(asr), lhs,
+                             GetIntConstant(g, NULL, kTargetType32Bit,
+                                            width_bits - 1)),
+                         size));
+              bias = Emit(g, SetInstructionSize(
+                                 NewInstruction2(
+                                     AARCH64_OP(lsr), sign,
+                                     GetIntConstant(g, NULL, kTargetType32Bit,
+                                                    width_bits - k)),
+                                 size));
+            }
+            TargetInstruction* sum = Emit(
+                g, SetInstructionSize(
+                       NewInstruction2(AARCH64_OP(add), lhs, bias), size));
+            inst = SetInstructionSize(
+                NewInstruction2(AARCH64_OP(asr), sum,
+                                GetIntConstant(g, NULL, kTargetType32Bit, k)),
+                size);
+            ref_counts_ok = true;
+          }
         }
       }
 
@@ -3587,6 +3794,7 @@ static TargetInstruction* LowerBranch(AARCH64Generator* g, IRNode* node) {
     VectorAppend(&g->base.fixups, NewBranchFixup(inst, target_node, 1));
   } else {
     inst->operand[1] = target;
+    TargetAddUser(target, inst);
   }
   return inst;
 }
@@ -3641,6 +3849,10 @@ static TargetInstruction* LowerResult(AARCH64Generator* g, IRNode* node) {
   }
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
   TargetInstruction* result_reg = EmitSymbol(g, NewInstruction(result_reg_opcode));
+  if (result->opcode == (TargetOpcode)AARCH64_OP(b) ||
+      result->opcode == (TargetOpcode)AARCH64_OP(br)) {
+    return SetLoweredNode(node, result_reg);
+  }
   // Always write the ABI return register here, at the resulti/resulta
   // instruction.  Redirecting the producer into x0/d0 places that write at the
   // producer, which may sit before a later call that clobbers the return
@@ -4189,23 +4401,39 @@ static TargetInstruction* LowerSetBitField(AARCH64Generator* g, IRNode* node) {
       return result;
     }
     if (v == field_mask) {
+      TargetInstruction* mask_op =
+          GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)mask);
+      if (!AARCH64IsLogicalImmediate((int64_t)mask, size == kSize64Bit)) {
+        mask_op = MoveImmediate(
+            g, GetIntConstant(g, NULL,
+                              size == kSize64Bit ? kTargetType64Bit
+                                                 : kTargetType32Bit,
+                              (int64_t)mask),
+            size);
+      }
       TargetInstruction* result = Emit(
-          g, SetInstructionSize(
-                 NewInstruction2(AARCH64_OP(orr), output,
-                                 GetIntConstant(g, NULL, kTargetType32Bit, (int64_t)mask)),
-                 size));
+          g, SetInstructionSize(NewInstruction2(AARCH64_OP(orr), output, mask_op),
+                                size));
       SetLoweredNode(node, result);
       return result;
     }
     TargetInstruction* cleared = Emit(
         g, SetInstructionSize(NewInstruction2(AARCH64_OP(and), output, clear_mask),
                               size));
+    int64_t shifted_v = (int64_t)(v << bit_pos);
+    TargetInstruction* v_op =
+        GetIntConstant(g, NULL, kTargetType32Bit, shifted_v);
+    if (!AARCH64IsLogicalImmediate(shifted_v, size == kSize64Bit)) {
+      v_op = MoveImmediate(
+          g, GetIntConstant(g, NULL,
+                            size == kSize64Bit ? kTargetType64Bit
+                                               : kTargetType32Bit,
+                            shifted_v),
+          size);
+    }
     TargetInstruction* result = Emit(
-        g, SetInstructionSize(
-               NewInstruction2(AARCH64_OP(orr), cleared,
-                               GetIntConstant(g, NULL, kTargetType32Bit,
-                                              (int64_t)(v << bit_pos))),
-               size));
+        g, SetInstructionSize(NewInstruction2(AARCH64_OP(orr), cleared, v_op),
+                              size));
     SetLoweredNode(node, result);
     return result;
   }
@@ -4615,6 +4843,365 @@ static TargetInstruction* BuildArgList(AARCH64Generator* g, Vector* arg_location
 // register pairs and HFA/HVA classification require extending ArgLocation and
 // the corresponding callee argument reconstruction together.
 //
+static IRNode* UnwrapCallArg(IRNode* arg) {
+  if (arg != NULL && arg->opcode == IR_OP(pusharg) && arg->inputs.length > 0) {
+    return arg->inputs.value.p[0];
+  }
+  return arg;
+}
+
+static int64_t WrapIntegralToType(TypeRecord* type, uint64_t raw) {
+  if (type == NULL || (!TypeIsIntegral(type) && !TypeIsPointer(type)) ||
+      type->size <= 0 || type->size >= 8) {
+    return (int64_t)raw;
+  }
+  int bits = (int)type->size * 8;
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  uint64_t v = raw & mask;
+  if (!TypeIsUnsigned(type) && !TypeIsPointer(type) &&
+      (v & (UINT64_C(1) << (bits - 1))) != 0) {
+    v |= ~mask;
+  }
+  return (int64_t)v;
+}
+
+static bool AddCandidateLength(int64_t vals[2], int* count, int64_t v) {
+  for (int i = 0; i < *count; i++) {
+    if (vals[i] == v) {
+      return true;
+    }
+  }
+  if (*count >= 2) {
+    return false;
+  }
+  vals[(*count)++] = v;
+  return true;
+}
+
+// Evaluates `expr` when it reduces to one or two compile-time constant lengths
+// flowing only through compiler-synthesized `tempvar`s (e.g. `(cond ? 8 : 16) * 3`).
+static bool TryEvalSmallLengths(IRNode* expr, int depth, int64_t vals[2],
+                                int* count) {
+  if (expr == NULL || depth > 8) {
+    return false;
+  }
+  if (IRIsIntConst(expr)) {
+    vals[0] = IRIntConstValue(expr);
+    *count = 1;
+    return true;
+  }
+  if (IRIsComparison(expr) || expr->opcode == IR_OP(noti)) {
+    vals[0] = 0;
+    vals[1] = 1;
+    *count = 2;
+    return true;
+  }
+  if (IRIsLoadOnly(expr) && expr->inputs.length == 1) {
+    IRNode* var = expr->inputs.value.p[0];
+    if (var == NULL ||
+        (var->opcode != IR_OP(tempvar) && var->opcode != IR_OP(localvar)) ||
+        var->type == NULL ||
+        expr->type == NULL || var->type->size != expr->type->size) {
+      return false;
+    }
+    Symbol* sym = ((IRVariable*)var)->symbol;
+    if (sym == NULL || sym->flags.address_taken ||
+        TypeIsVolatile(sym->type) || TypeIsArray(sym->type)) {
+      return false;
+    }
+    int merged_count = 0;
+    int64_t merged[2] = {0, 0};
+    int store_count = 0;
+    for (size_t i = 0; i < var->outputs.length; i++) {
+      IRNode* u = var->outputs.value.p[i];
+      if (IRIsLoadOnly(u) && u->inputs.length == 1 &&
+          u->inputs.value.p[0] == var) {
+        continue;
+      }
+      if (IRIsStoreOnly(u) && u->inputs.length == 2 &&
+          u->inputs.value.p[0] == var && u->inputs.value.p[1] != var) {
+        store_count++;
+        if (store_count > 4) {
+          return false;
+        }
+        int sub_n = 0;
+        int64_t sub_v[2] = {0, 0};
+        if (!TryEvalSmallLengths(u->inputs.value.p[1], depth + 1, sub_v,
+                                 &sub_n)) {
+          return false;
+        }
+        for (int k = 0; k < sub_n; k++) {
+          int64_t wrapped = WrapIntegralToType(expr->type, (uint64_t)sub_v[k]);
+          if (!AddCandidateLength(merged, &merged_count, wrapped)) {
+            return false;
+          }
+        }
+        continue;
+      }
+      return false;
+    }
+    if (merged_count == 0) {
+      return false;
+    }
+    for (int i = 0; i < merged_count; i++) {
+      vals[i] = merged[i];
+    }
+    *count = merged_count;
+    return true;
+  }
+  if (expr->opcode == IR_OP(cast) && expr->inputs.length == 1) {
+    if (expr->type == NULL ||
+        (!TypeIsIntegral(expr->type) && !TypeIsPointer(expr->type))) {
+      return false;
+    }
+    if (!TryEvalSmallLengths(expr->inputs.value.p[0], depth + 1, vals, count)) {
+      return false;
+    }
+    for (int i = 0; i < *count; i++) {
+      vals[i] = WrapIntegralToType(expr->type, (uint64_t)vals[i]);
+    }
+    if (*count == 2 && vals[0] == vals[1]) {
+      *count = 1;
+    }
+    return true;
+  }
+  if (expr->opcode == IR_OP(signextendi) && expr->inputs.length >= 1) {
+    IRNode* src = expr->inputs.value.p[0];
+    if (src == NULL || src->type == NULL || !TypeIsIntegral(src->type) ||
+        src->type->size <= 0 || src->type->size > 8) {
+      return false;
+    }
+    if (!TryEvalSmallLengths(src, depth + 1, vals, count)) {
+      return false;
+    }
+    int bits = (int)src->type->size * 8;
+    for (int i = 0; i < *count; i++) {
+      uint64_t u = (uint64_t)vals[i];
+      if (bits < 64) {
+        uint64_t mask = (UINT64_C(1) << bits) - 1;
+        u &= mask;
+        if ((u & (UINT64_C(1) << (bits - 1))) != 0) {
+          u |= ~mask;
+        }
+      }
+      vals[i] = WrapIntegralToType(expr->type, u);
+    }
+    if (*count == 2 && vals[0] == vals[1]) {
+      *count = 1;
+    }
+    return true;
+  }
+  if (expr->opcode == IR_OP(zeroextendi) && expr->inputs.length == 2 &&
+      IRIsIntConst(expr->inputs.value.p[1])) {
+    IRNode* src = expr->inputs.value.p[0];
+    if (src == NULL || src->type == NULL || expr->type == NULL) {
+      return false;
+    }
+    if (!TryEvalSmallLengths(src, depth + 1, vals, count)) {
+      return false;
+    }
+    uint64_t mask;
+    if (src->type->size == expr->type->size) {
+      mask = (uint64_t)IRIntConstValue(expr->inputs.value.p[1]);
+    } else {
+      int bits = (int)(src->type->size < expr->type->size ? src->type->size
+                                                          : expr->type->size) *
+                 8;
+      mask = bits >= 64 ? UINT64_MAX : ((UINT64_C(1) << bits) - 1);
+    }
+    for (int i = 0; i < *count; i++) {
+      vals[i] = WrapIntegralToType(expr->type, (uint64_t)vals[i] & mask);
+    }
+    if (*count == 2 && vals[0] == vals[1]) {
+      *count = 1;
+    }
+    return true;
+  }
+  if ((expr->opcode == IR_OP(muli) || expr->opcode == IR_OP(addi) ||
+       expr->opcode == IR_OP(subi) || expr->opcode == IR_OP(lsli) ||
+       expr->opcode == IR_OP(xori)) &&
+      expr->inputs.length == 2) {
+    IRNode* lhs = expr->inputs.value.p[0];
+    IRNode* rhs = expr->inputs.value.p[1];
+    bool lhs_const = IRIsIntConst(lhs);
+    bool rhs_const = IRIsIntConst(rhs);
+    if (!lhs_const && !rhs_const) {
+      return false;
+    }
+    int sub_n = 0;
+    int64_t sub_v[2] = {0, 0};
+    IRNode* var_side = rhs_const ? lhs : rhs;
+    uint64_t c = (uint64_t)IRIntConstValue(rhs_const ? rhs : lhs);
+    if (!TryEvalSmallLengths(var_side, depth + 1, sub_v, &sub_n)) {
+      return false;
+    }
+    for (int i = 0; i < sub_n; i++) {
+      uint64_t a = rhs_const ? (uint64_t)sub_v[i] : c;
+      uint64_t b = rhs_const ? c : (uint64_t)sub_v[i];
+      uint64_t r = 0;
+      if (expr->opcode == IR_OP(muli)) {
+        r = a * b;
+      } else if (expr->opcode == IR_OP(addi)) {
+        r = a + b;
+      } else if (expr->opcode == IR_OP(subi)) {
+        r = a - b;
+      } else if (expr->opcode == IR_OP(xori)) {
+        r = a ^ b;
+      } else {
+        if (b >= 64) {
+          return false;
+        }
+        r = a << b;
+      }
+      vals[i] = WrapIntegralToType(expr->type, r);
+    }
+    *count = sub_n;
+    if (*count == 2 && vals[0] == vals[1]) {
+      *count = 1;
+    }
+    return true;
+  }
+  return false;
+}
+
+static TargetInstruction* TryLowerInlineMemCall(AARCH64Generator* g,
+                                                IRNode* node) {
+  if (!OptLevel1() || (node->flags & kIRStructReturnCall) != 0 ||
+      node->inputs.length != 4) {
+    return NULL;
+  }
+  TargetInstruction* target = GetLoweredNode(node->inputs.value.p[0]);
+  if (target == NULL ||
+      target->opcode != (TargetOpcode)AARCH64_OP(symbol)) {
+    return NULL;
+  }
+  Symbol* sym = ((TargetSymbol*)target)->symbol;
+  if (sym == NULL || sym->name.value == NULL || sym->flags.is_local ||
+      StorageIs(sym->storage, STO(static)) || SymbolHasWeakBinding(sym)) {
+    return NULL;
+  }
+  if (sym->type != NULL && TypeIsFunction(sym->type) &&
+      (sym->type->info.function.varargs ||
+       sym->type->info.function.body != NULL)) {
+    return NULL;
+  }
+  const char* name = sym->name.value;
+  bool is_memset =
+      strcmp(name, "memset") == 0 || strcmp(name, "__builtin_memset") == 0;
+  bool is_memcpy =
+      strcmp(name, "memcpy") == 0 || strcmp(name, "__builtin_memcpy") == 0;
+  if (!is_memset && !is_memcpy) {
+    return NULL;
+  }
+
+  IRNode* arg0_ir = UnwrapCallArg(node->inputs.value.p[1]);
+  IRNode* arg1_ir = UnwrapCallArg(node->inputs.value.p[2]);
+  IRNode* arg2_ir = UnwrapCallArg(node->inputs.value.p[3]);
+  if (arg0_ir == NULL || arg1_ir == NULL || arg2_ir == NULL ||
+      arg0_ir->type == NULL || arg1_ir->type == NULL || arg2_ir->type == NULL ||
+      !TypeIsPointer(arg0_ir->type) || !TypeIsIntegral(arg2_ir->type)) {
+    return NULL;
+  }
+
+  TargetInstruction* dst_inst = GetLoweredNode(node->inputs.value.p[1]);
+  if (dst_inst == NULL) {
+    return NULL;
+  }
+
+  if (is_memcpy) {
+    if (!TypeIsPointer(arg1_ir->type) || !IRIsIntConst(arg2_ir)) {
+      return NULL;
+    }
+    int64_t len = IRIntConstValue(arg2_ir);
+    if (len < 0 || len > 64) {
+      return NULL;
+    }
+    TargetInstruction* src_inst = GetLoweredNode(node->inputs.value.p[2]);
+    if (src_inst == NULL) {
+      return NULL;
+    }
+    Memcpy(g, dst_inst, src_inst, (int)len, 0, 0, /*count_as_call=*/true);
+    TargetInstruction* ret = dst_inst;
+    if (node->dest != NULL) {
+      TargetInstruction* dest = GetDestInstruction(g, node);
+      if (dest != NULL) {
+        ret = SetDestOrMove(g, ret, dest, AARCH64_OP(mov));
+      }
+    }
+    return SetLoweredNode(node, ret);
+  }
+
+  if (!TypeIsIntegral(arg1_ir->type) || !IRIsIntConst(arg1_ir)) {
+    return NULL;
+  }
+  uint8_t fill_byte = (uint8_t)(IRIntConstValue(arg1_ir) & 0xff);
+  int64_t max_len = fill_byte == 0 ? 128 : 64;
+  int64_t lengths[2] = {0, 0};
+  int num_lengths = 0;
+  if (!TryEvalSmallLengths(arg2_ir, 0, lengths, &num_lengths)) {
+    return NULL;
+  }
+  for (int i = 0; i < num_lengths; i++) {
+    if (lengths[i] < 0 || lengths[i] > max_len) {
+      return NULL;
+    }
+  }
+
+  TargetInstruction* fill = NULL;
+  if (lengths[0] > 0 || (num_lengths == 2 && lengths[1] > 0)) {
+    if (fill_byte == 0) {
+      fill = ZeroReg(g);
+    } else {
+      uint64_t pat = (uint64_t)fill_byte * UINT64_C(0x0101010101010101);
+      fill = MoveImmediate(
+          g, GetIntConstant(g, NULL, kTargetType64Bit, (int64_t)pat),
+          kSize64Bit);
+    }
+  }
+
+  if (num_lengths == 1) {
+    EmitMemsetStores(g, dst_inst, fill, (int)lengths[0], 0);
+  } else {
+    TargetInstruction* len_inst = GetLoweredNode(node->inputs.value.p[3]);
+    if (len_inst == NULL) {
+      return NULL;
+    }
+    // Keep the smaller length on the taken `b.eq` arm so the larger length is
+    // straight-line fallthrough.
+    int64_t v_branch = lengths[0] < lengths[1] ? lengths[0] : lengths[1];
+    int64_t v_fall = lengths[0] < lengths[1] ? lengths[1] : lengths[0];
+    if (v_branch > 4095) {
+      return NULL;
+    }
+    int cmp_size = arg2_ir->type->size > 4 ? kSize64Bit : kSize32Bit;
+    TargetInstruction* rhs = GetIntConstant(
+        g, NULL, cmp_size == kSize64Bit ? kTargetType64Bit : kTargetType32Bit,
+        v_branch);
+    Emit(g, SetInstructionSize(
+                NewInstruction2(AARCH64_OP(cmp), len_inst, rhs), cmp_size));
+    TargetInstruction* lbl_branch = NewInstruction(AARCH64_OP(label));
+    TargetInstruction* lbl_done = NewInstruction(AARCH64_OP(label));
+    Emit(g, NewInstruction2(AARCH64_OP(b), Condition(g, AARCH64_OP(eq), 0),
+                            lbl_branch));
+    EmitMemsetStores(g, dst_inst, fill, (int)v_fall, 0);
+    Emit(g, NewInstruction2(AARCH64_OP(b), Condition(g, AARCH64_OP(al), 0),
+                            lbl_done));
+    Emit(g, lbl_branch);
+    EmitMemsetStores(g, dst_inst, fill, (int)v_branch, 0);
+    Emit(g, lbl_done);
+  }
+  g->base.num_calls--;
+
+  TargetInstruction* ret = dst_inst;
+  if (node->dest != NULL) {
+    TargetInstruction* dest = GetDestInstruction(g, node);
+    if (dest != NULL) {
+      ret = SetDestOrMove(g, ret, dest, AARCH64_OP(mov));
+    }
+  }
+  return SetLoweredNode(node, ret);
+}
+
 bool AARCH64UsesDarwinVariadicABI(void) {
   return compiler != NULL && compiler->native_object;
 }
@@ -4626,6 +5213,10 @@ bool AARCH64UsesDarwinVariadicABI(void) {
 // On Darwin every unnamed argument takes 8-byte stack slots instead.
 static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length >= 1);
+  TargetInstruction* inline_mem = TryLowerInlineMemCall(g, node);
+  if (inline_mem != NULL) {
+    return inline_mem;
+  }
   size_t struct_area_size = 0;
   int next_int_arg_reg = 0;
   int next_fp_arg_reg = 0;

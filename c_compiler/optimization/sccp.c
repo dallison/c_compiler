@@ -317,6 +317,7 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
                inst->opcode == IR_OP(noti) ||
                inst->opcode == IR_OP(movi) ||
                inst->opcode == IR_OP(mova) ||
+               inst->opcode == IR_OP(cast) ||
                inst->opcode == IR_OP(clzi) ||
                inst->opcode == IR_OP(ctzi) ||
                inst->opcode == IR_OP(popcounti);
@@ -514,6 +515,17 @@ static SCCPValue EvaluateIntegerExpression(SCCPContext* context,
       return TypedConstantValue(inst, ~ulhs);
     case IR_OP(noti):
       return ConstantValue(!lhs.value);
+    case IR_OP(cast):
+      if (inst->flags != 0 || inst->type == NULL ||
+          !TypeIsIntegral(inst->type) || TypeIsInt128(inst->type) ||
+          TypeIsBitInt(inst->type) || TypeIsVoid(inst->type) ||
+          lhs_node == NULL || lhs_node->type == NULL ||
+          !TypeIsIntegral(lhs_node->type) || TypeIsInt128(lhs_node->type) ||
+          TypeIsBitInt(lhs_node->type) ||
+          lhs_node->type->size != inst->type->size) {
+        return OverdefinedValue();
+      }
+      return TypedConstantValue(inst, ulhs);
     default:
       return OverdefinedValue();
   }
@@ -523,6 +535,7 @@ static bool IsSupportedIntegerExpression(IRNode* inst) {
   switch (inst->opcode) {
     case IR_OP(movi):
     case IR_OP(mova):
+    case IR_OP(cast):
     case IR_OP(addi):
     case IR_OP(adda):
     case IR_OP(subi):

@@ -4847,6 +4847,7 @@ static void InitBasic(Compiler* compiler, const char* filename) {
   compiler->diagnostic_error_trap_depth = 0;
   compiler->diagnostic_error_trapped = false;
   compiler->contract_assertion_depth = 0;
+  compiler->loop_analysis_depth = 0;
   compiler->contract_assertion_location = 0;
   compiler->pack_alignment = 0;
   VectorInit(&compiler->pack_stack);

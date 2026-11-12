@@ -481,13 +481,16 @@ static void ReanalyzeLambdaBodyAfterCaptureDeduction(Struct* closure,
   }
   TypeRecord* saved_function = compiler->current_function;
   Struct* saved_access_context = compiler->current_class_access_context;
+  int saved_loop_depth = compiler->loop_analysis_depth;
   compiler->current_function = call_op->type;
   compiler->current_class_access_context = closure;
+  compiler->loop_analysis_depth = 0;
   ASTNodeVisit(call_op->type->info.function.body,
                ClearLambdaBodyAfterCaptureDeduction, 0, NULL);
   AnalyzeStatement(call_op->type->info.function.body);
   StatementFinishAutoReturnDeduction(call_op->type,
                                      call_op->type->info.function.body);
+  compiler->loop_analysis_depth = saved_loop_depth;
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_access_context;
 }

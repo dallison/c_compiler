@@ -374,6 +374,7 @@ typedef struct Compiler {
   LanguageStandard language_standard;
   ContractEvaluationSemantic contract_semantic;
   int contract_assertion_depth;
+  int loop_analysis_depth;
   SourceLocation contract_assertion_location;
   bool convert_warnings_to_errors;
   bool enable_all_warnings;

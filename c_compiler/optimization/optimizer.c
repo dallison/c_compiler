@@ -8,6 +8,7 @@
 
 #include "optimizer.h"
 #include "basic_block.h"
+#include "compiler.h"
 #include "type_compare.h"
 #include "type_core.h"
 #include <limits.h>
@@ -325,6 +326,11 @@ static bool FoldConstantDivision(Generator* gen, BasicBlock* block,
     if (d <= 1 || d > INT32_MAX) {
       return false;
     }
+    if ((d & (d - 1)) == 0 && StringEqual(compiler->target_name, "aarch64")) {
+      // AArch64 lowers signed power-of-two division directly to 3-4 narrow
+      // shifts/add without 64-bit magic multiplication.
+      return false;
+    }
     SignedDivMagic mag = SignedMagic32((int32_t)d);
     IRNode* n64 = ExtendBefore(gen, block, node, dividend, wide_s, true);
     IRNode* magic = GeneratorGetIntConstant(gen, wide_s, mag.magic);
@@ -519,26 +525,65 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       }
       IRNode* left = node->inputs.value.p[0];
       IRNode* right = node->inputs.value.p[1];
+      while (left != NULL &&
+             (left->opcode == IR_OP(cast) || left->opcode == IR_OP(mova)) &&
+             left->dest == NULL && left->inputs.length == 1) {
+        left = left->inputs.value.p[0];
+      }
+      while (right != NULL &&
+             (right->opcode == IR_OP(cast) || right->opcode == IR_OP(mova)) &&
+             right->dest == NULL && right->inputs.length == 1) {
+        right = right->inputs.value.p[0];
+      }
       if (left == NULL || right == NULL) {
         break;
       }
+      IRNode* matched_idx = NULL;
       if (left->opcode == IR_OP(adda) && left->inputs.length == 2) {
-        if (left->inputs.value.p[0] == right) {
-          BasicBlockReplaceInstruction(gen, block, node,
-                                       left->inputs.value.p[1]);
-          break;
-        }
-        if (left->inputs.value.p[1] == right) {
-          BasicBlockReplaceInstruction(gen, block, node,
-                                       left->inputs.value.p[0]);
-          break;
+        for (int s = 0; s < 2; s++) {
+          IRNode* cand_base = left->inputs.value.p[s];
+          while (cand_base != NULL &&
+                 (cand_base->opcode == IR_OP(cast) ||
+                  cand_base->opcode == IR_OP(mova)) &&
+                 cand_base->dest == NULL && cand_base->inputs.length == 1) {
+            cand_base = cand_base->inputs.value.p[0];
+          }
+          bool same_base = cand_base == right;
+          if (!same_base && cand_base != NULL &&
+              cand_base->opcode == IR_OP(loada) &&
+              right->opcode == IR_OP(loada) &&
+              cand_base->inputs.length == 1 && right->inputs.length == 1 &&
+              !IRHasSideEffects(cand_base) && !IRHasSideEffects(right)) {
+            IRNode* bptr = cand_base->inputs.value.p[0];
+            IRNode* rptr = right->inputs.value.p[0];
+            while (bptr != NULL && bptr->opcode == IR_OP(cast) &&
+                   bptr->inputs.length == 1) {
+              bptr = bptr->inputs.value.p[0];
+            }
+            while (rptr != NULL && rptr->opcode == IR_OP(cast) &&
+                   rptr->inputs.length == 1) {
+              rptr = rptr->inputs.value.p[0];
+            }
+            if (bptr == rptr ||
+                (bptr != NULL && rptr != NULL &&
+                 bptr->opcode == IR_OP(loada) && rptr->opcode == IR_OP(loada) &&
+                 bptr->inputs.length == 1 && rptr->inputs.length == 1 &&
+                 bptr->inputs.value.p[0] == rptr->inputs.value.p[0])) {
+              same_base = true;
+            }
+          }
+          if (same_base) {
+            matched_idx = left->inputs.value.p[1 - s];
+            break;
+          }
         }
       }
       // After inlining MemIsIo the pointer lives in a local:
       //   p = memory + addr;  off = p - memory;
       // Look through loada(p) to the storea's adda without needing memopt CSE
       // of the two memory loads (they often remain distinct loada nodes).
-      if (left->opcode == IR_OP(loada) && left->inputs.length >= 1) {
+      if (matched_idx == NULL && left->opcode == IR_OP(loada) &&
+          left->inputs.length >= 1) {
         IRNode* local = left->inputs.value.p[0];
         for (IRNode* prev = IRPrev(node);
              prev != NULL && prev->block == block; prev = IRPrev(prev)) {
@@ -547,10 +592,22 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
             continue;
           }
           IRNode* stored = prev->inputs.value.p[1];
+          while (stored != NULL &&
+                 (stored->opcode == IR_OP(cast) ||
+                  stored->opcode == IR_OP(mova)) &&
+                 stored->dest == NULL && stored->inputs.length == 1) {
+            stored = stored->inputs.value.p[0];
+          }
           if (stored != NULL && stored->opcode == IR_OP(adda) &&
               stored->inputs.length == 2) {
             IRNode* base = stored->inputs.value.p[0];
             IRNode* idx = stored->inputs.value.p[1];
+            while (base != NULL &&
+                   (base->opcode == IR_OP(cast) ||
+                    base->opcode == IR_OP(mova)) &&
+                   base->dest == NULL && base->inputs.length == 1) {
+              base = base->inputs.value.p[0];
+            }
             bool same_base = base == right;
             if (!same_base && base != NULL && right->opcode == IR_OP(loada) &&
                 base->opcode == IR_OP(loada) && base->inputs.length >= 1 &&
@@ -559,11 +616,41 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
               same_base = true;
             }
             if (same_base && idx != NULL) {
-              BasicBlockReplaceInstruction(gen, block, node, idx);
+              matched_idx = idx;
             }
           }
           break;
         }
+      }
+      if (matched_idx != NULL && matched_idx->type != NULL &&
+          node->type != NULL && TypeIsIntegral(matched_idx->type)) {
+        IRNode* replacement = matched_idx;
+        if (matched_idx->type->size > 0 &&
+            matched_idx->type->size < node->type->size &&
+            node->type->size <= 8) {
+          int diff_bits =
+              (int)(node->type->size - matched_idx->type->size) * 8;
+          if (IRIsIntConst(matched_idx)) {
+            int src_bits = (int)matched_idx->type->size * 8;
+            uint64_t mask = (UINT64_C(1) << src_bits) - 1;
+            uint64_t val = (uint64_t)IRIntConstValue(matched_idx) & mask;
+            if (!TypeIsUnsigned(matched_idx->type) &&
+                (val & (UINT64_C(1) << (src_bits - 1))) != 0) {
+              val |= ~mask;
+            }
+            replacement = GeneratorGetIntConstant(gen, node->type, (int64_t)val);
+          } else {
+            IROpcode ext_op = TypeIsUnsigned(matched_idx->type)
+                                  ? IR_OP(zeroextendi)
+                                  : IR_OP(signextendi);
+            replacement = IRSetType(
+                NewIR2(ext_op, matched_idx,
+                       GeneratorGetIntConstant(gen, node->type, diff_bits)),
+                node->type);
+            BasicBlockEmitBefore(gen, block, replacement, node);
+          }
+        }
+        BasicBlockReplaceInstruction(gen, block, node, replacement);
       }
       break;
     }
@@ -599,41 +686,215 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       }
       break;
 
+    case IR_OP(cmplti):
+    case IR_OP(cmplei):
     case IR_OP(cmpgti):
     case IR_OP(cmpgei): {
-      // `zext16(loadu16) > 0xffff` is always false.  Only trust narrow loads,
-      // not arbitrary unsigned temps (those can hold wider values).
+      // `zext16(loadu16) > 0xffff` is always false, and `((x & 0x1f) + 1) < 1`
+      // is always false.  Evaluate conservative non-negative [lo, hi] bounds.
       if (node->inputs.length != 2 || !IRIsIntConst(node->inputs.value.p[1])) {
         break;
       }
-      IRNode* lhs = node->inputs.value.p[0];
-      while (lhs != NULL &&
-             (lhs->opcode == IR_OP(cast) || lhs->opcode == IR_OP(zeroextendi) ||
-              lhs->opcode == IR_OP(mova) || lhs->opcode == IR_OP(movi)) &&
-             lhs->inputs.length >= 1) {
-        lhs = lhs->inputs.value.p[0];
-      }
-      if (lhs == NULL) {
+      IRNode* cur = node->inputs.value.p[0];
+      int64_t add_acc = 0;
+      int64_t base_lo = -1;
+      int64_t base_hi = -1;
+      TypeRecord* cmp_type = cur != NULL ? cur->type : NULL;
+      if (cmp_type == NULL || !TypeIsIntegral(cmp_type) ||
+          TypeIsInt128(cmp_type) || TypeIsBitInt(cmp_type) ||
+          (cmp_type->size != 4 && cmp_type->size != 8)) {
         break;
       }
-      int bits = 0;
-      if (lhs->opcode == IR_OP(loadu8) || lhs->opcode == IR_OP(load8)) {
-        bits = 8;
-      } else if (lhs->opcode == IR_OP(loadu16) || lhs->opcode == IR_OP(load16)) {
-        bits = 16;
-      }
-      if (bits == 0) {
+      int64_t type_max = cmp_type->size == 8 ? INT64_MAX : INT32_MAX;
+      for (int depth = 0; cur != NULL && depth < 8; depth++) {
+        IRNode* in0 = cur->inputs.length >= 1 ? cur->inputs.value.p[0] : NULL;
+        if ((cur->opcode == IR_OP(cast) || cur->opcode == IR_OP(movi) ||
+             cur->opcode == IR_OP(mova)) &&
+            cur->inputs.length == 1 && cur->type != NULL &&
+            in0 != NULL && in0->type != NULL &&
+            TypeIsIntegral(in0->type) &&
+            in0->type->size == cur->type->size) {
+          cur = in0;
+          continue;
+        }
+        if ((cur->opcode == IR_OP(signextendi) ||
+             (cur->opcode == IR_OP(zeroextendi) &&
+              in0 != NULL && in0->type != NULL && cur->type != NULL &&
+              in0->type->size < cur->type->size)) &&
+            cur->inputs.length == 2 && in0 != NULL && in0->type != NULL &&
+            TypeIsIntegral(in0->type) && in0->type->size > 0 &&
+            in0->type->size < cur->type->size && add_acc == 0) {
+          if (cur->opcode == IR_OP(signextendi) && in0->type->size == 4) {
+            type_max = INT32_MAX;
+          } else if (cur->opcode == IR_OP(signextendi) &&
+                     in0->type->size == 2) {
+            type_max = INT16_MAX;
+          } else if (cur->opcode == IR_OP(signextendi) &&
+                     in0->type->size == 1) {
+            type_max = INT8_MAX;
+          }
+          cur = in0;
+          continue;
+        }
+        if (cur->opcode == IR_OP(zeroextendi) && cur->inputs.length == 2 &&
+            IRIsIntConst(cur->inputs.value.p[1]) && cur->type != NULL &&
+            in0 != NULL && in0->type != NULL &&
+            in0->type->size == cur->type->size) {
+          int64_t m = IRIntConstValue(cur->inputs.value.p[1]);
+          if (m >= 0 && m <= type_max - add_acc) {
+            base_lo = 0;
+            base_hi = m;
+          }
+          break;
+        }
+        if (cur->opcode == IR_OP(andi) && cur->inputs.length == 2 &&
+            IRIsIntConst(cur->inputs.value.p[1])) {
+          int64_t m = IRIntConstValue(cur->inputs.value.p[1]);
+          if (m >= 0 && m <= type_max - add_acc) {
+            base_lo = 0;
+            base_hi = m;
+          }
+          break;
+        }
+        if (cur->opcode == IR_OP(addi) && cur->inputs.length == 2 &&
+            IRIsIntConst(cur->inputs.value.p[1]) &&
+            !TypeIsUnsigned(cur->type)) {
+          int64_t c = IRIntConstValue(cur->inputs.value.p[1]);
+          if (c >= 0 && c <= type_max - add_acc) {
+            add_acc += c;
+            cur = in0;
+            continue;
+          }
+          break;
+        }
+        if (IRIsLoadOnly(cur) && !IRHasSideEffects(cur) &&
+            cur->inputs.length == 1 && in0 != NULL &&
+            in0->opcode == IR_OP(ssavar)) {
+          IRNode* var = in0;
+          Symbol* sym = ((IRVariable*)var)->symbol;
+          if (sym != NULL && !sym->flags.address_taken &&
+              !sym->flags.is_argument && !TypeIsVolatile(sym->type) &&
+              !TypeIsArray(sym->type) &&
+              !SymbolIsAnonymousUnionMemberView(sym)) {
+            IRNode* sole_store = NULL;
+            bool ok = true;
+            for (size_t u = 0; u < var->outputs.length; u++) {
+              IRNode* usr = var->outputs.value.p[u];
+              if (IRIsStoreOnly(usr) && usr->inputs.length == 2 &&
+                  usr->inputs.value.p[0] == var && usr->dest == NULL) {
+                if (sole_store != NULL) {
+                  ok = false;
+                  break;
+                }
+                sole_store = usr;
+              } else if (usr->opcode != IR_OP(phi) &&
+                         (!IRIsLoadOnly(usr) || usr->inputs.length != 1 ||
+                          usr->inputs.value.p[0] != var)) {
+                ok = false;
+                break;
+              }
+            }
+            IRNode* st_val =
+                sole_store != NULL ? sole_store->inputs.value.p[1] : NULL;
+            if (ok && sole_store != NULL && sole_store->block != NULL &&
+                cur->block != NULL &&
+                BitSetContains(&cur->block->dominators,
+                               sole_store->block->block_id) &&
+                st_val != NULL && st_val->type != NULL &&
+                cur->type != NULL &&
+                st_val->type->size == cur->type->size) {
+              bool precedes = sole_store->block != cur->block;
+              if (!precedes) {
+                for (IRNode* p = sole_store;
+                     p != NULL && p->block == cur->block; p = IRNext(p)) {
+                  if (p == cur) {
+                    precedes = true;
+                    break;
+                  }
+                }
+              }
+              if (precedes) {
+                cur = st_val;
+                continue;
+              }
+            }
+          }
+        }
+        if (cur->opcode == IR_OP(zeroextendi) && cur->inputs.length >= 1) {
+          IRNode* zsrc = cur->inputs.value.p[0];
+          if (zsrc != NULL &&
+              (zsrc->opcode == IR_OP(loadu8) || zsrc->opcode == IR_OP(load8))) {
+            if (255 <= type_max - add_acc) {
+              base_lo = 0;
+              base_hi = 255;
+            }
+            break;
+          }
+          if (zsrc != NULL && (zsrc->opcode == IR_OP(loadu16) ||
+                               zsrc->opcode == IR_OP(load16))) {
+            if (65535 <= type_max - add_acc) {
+              base_lo = 0;
+              base_hi = 65535;
+            }
+            break;
+          }
+        }
+        if (cur->opcode == IR_OP(loadu8) ||
+            (cur->opcode == IR_OP(load8) && cur->type != NULL &&
+             TypeIsUnsigned(cur->type))) {
+          if (255 <= type_max - add_acc) {
+            base_lo = 0;
+            base_hi = 255;
+          }
+        } else if (cur->opcode == IR_OP(loadu16) ||
+                   (cur->opcode == IR_OP(load16) && cur->type != NULL &&
+                    TypeIsUnsigned(cur->type))) {
+          if (65535 <= type_max - add_acc) {
+            base_lo = 0;
+            base_hi = 65535;
+          }
+        }
         break;
       }
-      uint64_t max_val = (UINT64_C(1) << bits) - 1;
+      if (base_lo < 0 || base_hi < base_lo) {
+        break;
+      }
+      int64_t lo = base_lo + add_acc;
+      int64_t hi = base_hi + add_acc;
       int64_t lim = IRIntConstValue(node->inputs.value.p[1]);
-      bool always_false =
-          node->opcode == IR_OP(cmpgti)
-              ? (lim >= 0 && (uint64_t)lim >= max_val)
-              : (lim > 0 && (uint64_t)lim > max_val);
-      if (always_false) {
-        BasicBlockReplaceInstruction(
-            gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
+      if (IRComparisonIsUnsigned(node)) {
+        if (lim >= 0) {
+          uint64_t ulim = (uint64_t)lim;
+          uint64_t ulo = (uint64_t)lo;
+          uint64_t uhi = (uint64_t)hi;
+          if ((node->opcode == IR_OP(cmplti) && ulo >= ulim) ||
+              (node->opcode == IR_OP(cmplei) && ulo > ulim) ||
+              (node->opcode == IR_OP(cmpgti) && uhi <= ulim) ||
+              (node->opcode == IR_OP(cmpgei) && uhi < ulim)) {
+            BasicBlockReplaceInstruction(
+                gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
+          } else if ((node->opcode == IR_OP(cmplti) && uhi < ulim) ||
+                     (node->opcode == IR_OP(cmplei) && uhi <= ulim) ||
+                     (node->opcode == IR_OP(cmpgti) && ulo > ulim) ||
+                     (node->opcode == IR_OP(cmpgei) && ulo >= ulim)) {
+            BasicBlockReplaceInstruction(
+                gen, block, node, GeneratorGetIntConstant(gen, node->type, 1));
+          }
+        }
+      } else {
+        if ((node->opcode == IR_OP(cmplti) && lo >= lim) ||
+            (node->opcode == IR_OP(cmplei) && lo > lim) ||
+            (node->opcode == IR_OP(cmpgti) && hi <= lim) ||
+            (node->opcode == IR_OP(cmpgei) && hi < lim)) {
+          BasicBlockReplaceInstruction(
+              gen, block, node, GeneratorGetIntConstant(gen, node->type, 0));
+        } else if ((node->opcode == IR_OP(cmplti) && hi < lim) ||
+                   (node->opcode == IR_OP(cmplei) && hi <= lim) ||
+                   (node->opcode == IR_OP(cmpgti) && lo > lim) ||
+                   (node->opcode == IR_OP(cmpgei) && lo >= lim)) {
+          BasicBlockReplaceInstruction(
+              gen, block, node, GeneratorGetIntConstant(gen, node->type, 1));
+        }
       }
       break;
     }
@@ -856,7 +1117,135 @@ void FindTailCalls(BasicBlock* block, void* data) {
   }
 }
 
+static void ThreadTailCallMergeReturns(Generator* gen) {
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    BasicBlock* merge = gen->basic_blocks.value.p[b];
+    if (merge == NULL || merge == gen->entry_block ||
+        BasicBlockIsEmpty(merge) || merge->out_edges.length != 1) {
+      continue;
+    }
+    BasicBlock* ret_blk =
+        VectorGet(&gen->basic_blocks, merge->out_edges.value.w[0]);
+    if (ret_blk == NULL || !ret_blk->return_block) {
+      continue;
+    }
+    bool trivial_ret = true;
+    for (IRNode* inst = BasicBlockBegin(ret_blk);
+         !BasicBlockIsEmpty(ret_blk) && inst != BasicBlockEnd(ret_blk);
+         inst = IRNext(inst)) {
+      if (!IsTrivialReturnInstruction(inst)) {
+        trivial_ret = false;
+        break;
+      }
+    }
+    if (!trivial_ret) {
+      continue;
+    }
+
+    IRNode* merge_label = BasicBlockBegin(merge);
+    if (merge_label->opcode != IR_OP(label)) {
+      continue;
+    }
+    IRNode* ld = NULL;
+    IRNode* res = NULL;
+    IRNode* term = NULL;
+    bool ok = true;
+    for (IRNode* inst = IRNext(merge_label); inst != BasicBlockEnd(merge);
+         inst = IRNext(inst)) {
+      if (inst->opcode == IR_OP(loc)) {
+        continue;
+      }
+      if (ld == NULL && IRIsLoadOnly(inst) && inst->inputs.length == 1 &&
+          inst->outputs.length == 1) {
+        ld = inst;
+      } else if (ld != NULL && res == NULL && IRIsResult(inst) &&
+                 inst->inputs.length == 1 && inst->inputs.value.p[0] == ld) {
+        res = inst;
+      } else if (res != NULL && term == NULL && inst->opcode == IR_OP(bra) &&
+                 inst->inputs.length == 1 &&
+                 IRNext(inst) == BasicBlockEnd(merge)) {
+        term = inst;
+      } else {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok || ld == NULL || res == NULL || term == NULL) {
+      continue;
+    }
+    IRNode* ret_label = term->inputs.value.p[0];
+    if (ret_label == NULL || ret_label->opcode != IR_OP(label)) {
+      continue;
+    }
+    IRNode* var = ld->inputs.value.p[0];
+    if (var == NULL || var->opcode != IR_OP(tempvar) || var->type == NULL) {
+      continue;
+    }
+    Symbol* sym = ((IRVariable*)var)->symbol;
+    if (sym == NULL || sym->flags.address_taken || TypeIsVolatile(sym->type)) {
+      continue;
+    }
+    for (size_t u_idx = 0; u_idx < var->outputs.length; u_idx++) {
+      IRNode* u = var->outputs.value.p[u_idx];
+      if (u == ld) {
+        continue;
+      }
+      if (!IRIsStoreOnly(u) || u->inputs.length != 2 ||
+          u->inputs.value.p[0] != var) {
+        ok = false;
+        break;
+      }
+    }
+    if (!ok) {
+      continue;
+    }
+
+    for (size_t e = 0; e < merge->in_edges.length; e++) {
+      BasicBlock* pred =
+          VectorGet(&gen->basic_blocks, merge->in_edges.value.w[e]);
+      if (pred == NULL || pred == merge || BasicBlockIsEmpty(pred) ||
+          pred->out_edges.length != 1 ||
+          pred->out_edges.value.w[0] != merge->block_id) {
+        continue;
+      }
+      IRNode* br = BasicBlockRBegin(pred);
+      if (br->opcode != IR_OP(bra) || br->inputs.length != 1 ||
+          br->inputs.value.p[0] != merge_label) {
+        continue;
+      }
+      IRNode* cur = IRPrev(br);
+      while (cur != BasicBlockREnd(pred) && cur->opcode == IR_OP(loc)) {
+        cur = IRPrev(cur);
+      }
+      if (cur == BasicBlockREnd(pred) || !IRIsStoreOnly(cur) ||
+          cur->outputs.length != 0 || cur->inputs.length != 2 ||
+          cur->inputs.value.p[0] != var) {
+        continue;
+      }
+      IRNode* st = cur;
+      cur = IRPrev(st);
+      while (cur != BasicBlockREnd(pred) && cur->opcode == IR_OP(loc)) {
+        cur = IRPrev(cur);
+      }
+      if (cur == BasicBlockREnd(pred) || cur != st->inputs.value.p[1] ||
+          cur->opcode != IR_OP(calla) || CallNeedsLiveFrame(cur) ||
+          cur->outputs.length != 1 || cur->dest != NULL || cur->type == NULL ||
+          cur->type->size != var->type->size ||
+          TypeIsUnsigned(cur->type) != TypeIsUnsigned(var->type)) {
+        continue;
+      }
+      IRNode* new_res = IRSetType(NewIR1(res->opcode, cur), res->type);
+      BasicBlockEmitBefore(gen, pred, new_res, st);
+      BasicBlockRemoveInstruction(gen, pred, st);
+      IRReplaceInput(br, 0, ret_label);
+      br->flags |= (term->flags & kIRReturnJump);
+      pred->out_edges.value.w[0] = ret_blk->block_id;
+    }
+  }
+}
+
 void TailCallOptimization(Generator* gen) {
+  ThreadTailCallMergeReturns(gen);
   BasicBlockTraverseDominatorTree(gen, gen->entry_block,
                                   FindTailCalls, kTraversePostOrder, gen);
 }

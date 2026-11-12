@@ -103,6 +103,7 @@ bool CalleeNamesItsFunction(ASTNode* callee);
 bool FunctionCanBeInlined(FunctionInfo* func);
 FunctionInfo* FunctionInfoForCallInlining(FunctionInfo* func);
 ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call);
+ASTNode* MaybePartialInlineLeadingGuards(FunctionInfo* info, VectorASTNode* call);
 ASTNode* LowerVirtualCallerContracts(VectorASTNode* call);
 void AnalyzeAtomicBuiltinChildren(VectorASTNode* node);
 void AnalyzeAtomicCompareExchangeBuiltin(VectorASTNode* node, bool expected_is_pointer, bool returns_bool);

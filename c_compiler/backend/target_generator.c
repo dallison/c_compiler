@@ -661,10 +661,20 @@ void TargetReplaceOperand(TargetInstruction* inst, int op,
   if (old == new) {
     return;
   }
-  // Remove reference from old to inst.
   assert(inst != new);
-  TargetRemoveUser(old, inst);
   inst->operand[op] = new;
+  if (old != NULL) {
+    bool still_used = false;
+    for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
+      if (inst->operand[i] == old) {
+        still_used = true;
+        break;
+      }
+    }
+    if (!still_used) {
+      TargetRemoveUser(old, inst);
+    }
+  }
   if (new != NULL) {
     TargetAddUser(new, inst);
   }

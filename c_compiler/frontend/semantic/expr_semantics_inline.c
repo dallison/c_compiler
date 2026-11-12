@@ -772,6 +772,8 @@ ASTNode* LowerVirtualCallerContracts(VectorASTNode* call) {
 typedef struct {
   int node_count;
   bool found_goto;
+  bool found_call_or_loop;
+  bool found_loop;
   // When true, charge nested inline_call expansions to node_count.  Marked
   // `inline` keeps the cheap "call-sized" accounting so a helper is not
   // rejected merely because its own callees were inlined into it.  Unmarked
@@ -806,6 +808,13 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
        !InlineCallNodeIsInside(node)) ||
       node->op == AST_OP(stmt_expr)) {
     finder->found_goto = true;
+  }
+  if (node->op == AST_OP(for) || node->op == AST_OP(while) ||
+      node->op == AST_OP(do)) {
+    finder->found_loop = true;
+    finder->found_call_or_loop = true;
+  } else if (node->op == AST_OP(call)) {
+    finder->found_call_or_loop = true;
   }
 }
 
@@ -997,11 +1006,28 @@ static void FindNoexceptEscape(ASTNode* node, void* data, int child_id,
   }
 }
 
+static bool IsPartialGuardInlineCall(ASTNode* node) {
+  if (node == NULL || node->op != AST_OP(inline_call)) {
+    return false;
+  }
+  ASTNode* body = ((InlineCallASTNode*)node)->inlined;
+  if (body == NULL || body->op != AST_OP(compound)) {
+    return false;
+  }
+  CompoundStatementASTNode* comp = (CompoundStatementASTNode*)body;
+  if (comp->statements == NULL || comp->statements->length == 0) {
+    return false;
+  }
+  ASTNode* last = comp->statements->value.p[comp->statements->length - 1];
+  return last != NULL && last->op == AST_OP(if);
+}
+
 static void CountInlineCalls(ASTNode* node, void* data, int child_id,
                              VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node->op == AST_OP(inline_call) &&
-      !InlineCallNodeIsInside(node)) {
+      !InlineCallNodeIsInside(node) &&
+      (CompilerIsCXX() || !IsPartialGuardInlineCall(node))) {
     *(int*)data += 1;
   }
 }
@@ -1206,8 +1232,10 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
   }
   TypeRecord* saved_function = compiler->current_function;
   Struct* saved_access = compiler->current_class_access_context;
+  int saved_loop_depth = compiler->loop_analysis_depth;
   compiler->current_function = func_type;
   compiler->current_class_access_context = func->cxx_member_owner;
+  compiler->loop_analysis_depth = 0;
   if (func_type != NULL) {
     VectorAppend(&compiler->functions_being_analyzed, func_type);
   }
@@ -1222,6 +1250,7 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
       }
     }
   }
+  compiler->loop_analysis_depth = saved_loop_depth;
   compiler->current_function = saved_function;
   compiler->current_class_access_context = saved_access;
   return (func->body->flags & kASTAnalyzed) != 0;
@@ -1414,15 +1443,21 @@ static void CountFileIdentifierUses(File* file, Map* counts) {
   }
 }
 
-// The number of references to a static function in the file defining it;
-// kManyUses when it cannot be counted.
+// The number of references to an intra-TU function in the file defining it;
+// kManyUses when it cannot be counted or may be interposed.
 static int64_t StaticFunctionUseCount(FunctionInfo* func) {
   static Map file_counts;  // File* -> Map* of name -> uses.
   static bool file_counts_ready = false;
   Symbol* symbol = func->symbol;
   if (symbol == NULL || func->body == NULL || func->template_origin != NULL ||
-      !StorageIs(symbol->storage, STO(static)) || symbol->flags.is_local) {
+      symbol->flags.is_local) {
     return kManyUses;
+  }
+  bool is_static = StorageIs(symbol->storage, STO(static));
+  if (!is_static) {
+    if (CompilerIsCXX() || SymbolHasWeakBinding(symbol)) {
+      return kManyUses;
+    }
   }
   int fileno = 0, lineno = 0, colno = 0;
   SourceLocationNumbers(func->body->location, &fileno, &lineno, &colno);
@@ -1447,7 +1482,31 @@ static int64_t StaticFunctionUseCount(FunctionInfo* func) {
   }
   MapKeyType name_key = {.p = symbol->name.value};
   MapValueType* uses = MapSearch(counts, name_key);
+  if (!is_static) {
+    return uses != NULL && uses->w > 1 ? uses->w : 2;
+  }
   return uses != NULL && uses->w > 0 ? uses->w : kManyUses;
+}
+
+static void SumLocalStackBytes(ASTNode* node, void* data, int child_id,
+                               VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node->op != AST_OP(vardecl)) {
+    return;
+  }
+  Symbol* sym = ((VariableDeclarationASTNode*)node)->symbol;
+  if (sym == NULL || !sym->flags.is_local ||
+      StorageIs(sym->storage, STO(static) | STO(extern) | STO(thread)) ||
+      sym->type == NULL) {
+    return;
+  }
+  if (TypeIsArray(sym->type) || TypeIsStructOrUnion(sym->type) ||
+      sym->flags.address_taken) {
+    TypeRecordCalculateSize(sym->type);
+    if (sym->type->size > 0) {
+      *(int64_t*)data += sym->type->size;
+    }
+  }
 }
 
 // Contract: Read-only body inspection and size heuristic; false when goto/unresolved/NRVO
@@ -1460,10 +1519,12 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
                                                  int64_t static_uses) {
   const int kMaxInlineNodeCount = OptLevel3() ? 250 : 100;
   const int kMaxUnmarkedInlineNodeCount = 40;
+  const int kMaxLeafInlineNodeCount = 75;
   const int kMaxSingleUseInlineNodeCount = 300;
+  const int kMaxSingleUseInLoopNodeCount = 600;
   const int kMaxTwoUseInlineNodeCount = 200;
-  const int kMaxFewUseInlineNodeCount = 80;
-  GotoFinder finder = {0, false, false};
+  const int kMaxFewUseInlineNodeCount = CompilerIsCXX() ? 80 : 120;
+  GotoFinder finder = {0, false, false, false, false};
   ASTNodeVisit(func->body, ExamineBody, 0, &finder);
   if (finder.found_goto) {
     return false;
@@ -1481,25 +1542,55 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
   if (force_inline) {
     return true;
   }
+  // Do not auto-inline an unmarked callee whose own stack buffers/aggregates
+  // exceed 64 bytes: pulling a cold stack buffer (e.g. a 256B or 2KB packet
+  // buffer) into a hot caller inflates the caller's stack frame on every
+  // invocation.
+  if (unmarked_small && !CompilerIsCXX()) {
+    int64_t stack_bytes = 0;
+    ASTNodeVisit(func->body, SumLocalStackBytes, 0, &stack_bytes);
+    if (stack_bytes > 64) {
+      return false;
+    }
+  }
   int max_nodes =
       unmarked_small ? kMaxUnmarkedInlineNodeCount : kMaxInlineNodeCount;
+  bool is_static =
+      func->symbol != NULL && StorageIs(func->symbol->storage, STO(static));
   if (static_uses == 1) {
-    max_nodes = kMaxSingleUseInlineNodeCount;
-  } else if (static_uses == 2 && max_nodes < kMaxTwoUseInlineNodeCount) {
+    max_nodes = (!CompilerIsCXX() && compiler->loop_analysis_depth > 0)
+                    ? kMaxSingleUseInLoopNodeCount
+                    : kMaxSingleUseInlineNodeCount;
+  } else if (static_uses == 2 && (CompilerIsCXX() || is_static) &&
+             max_nodes < kMaxTwoUseInlineNodeCount) {
     max_nodes = kMaxTwoUseInlineNodeCount;
-  } else if (static_uses <= 4 && max_nodes < kMaxFewUseInlineNodeCount) {
+  } else if (static_uses <= (CompilerIsCXX() ? 4 : 6) &&
+             max_nodes < kMaxFewUseInlineNodeCount) {
     max_nodes = kMaxFewUseInlineNodeCount;
+  } else if (!CompilerIsCXX() && is_static && !finder.found_call_or_loop &&
+             max_nodes < kMaxLeafInlineNodeCount) {
+    max_nodes = kMaxLeafInlineNodeCount;
   }
   int node_count = finder.node_count;
   // Unmarked multi-use auto-inline: if the body already absorbed a large
   // inlined callee, charge the expanded size so we do not re-duplicate it
-  // into every caller (TestAndChangeBits+WriteByte).  Leave single-use and
-  // marked `inline` on the cheap call-sized count.
-  if (unmarked_small && static_uses > 1) {
-    GotoFinder expanded = {0, false, true};
+  // into every caller (TestAndChangeBits+WriteByte).  Single-use callees
+  // with huge nested expansions (> 2 * max_nodes) are also charged so a cold
+  // gated helper (e.g. EconetAdvance) does not pull hundreds of nodes and
+  // spills into a hot caller, while marked `inline` keeps call-sized count.
+  if (unmarked_small) {
+    GotoFinder expanded = {0, false, false, false, true};
     ASTNodeVisit(func->body, ExamineBody, 0, &expanded);
-    if (expanded.node_count > node_count * 2 &&
-        expanded.node_count >= kMaxUnmarkedInlineNodeCount) {
+    if (static_uses > 1) {
+      int mult = CompilerIsCXX() ? 2 : 3;
+      int min_cap = CompilerIsCXX() ? kMaxUnmarkedInlineNodeCount
+                                    : kMaxFewUseInlineNodeCount;
+      if (expanded.node_count > node_count * mult &&
+          expanded.node_count >= min_cap) {
+        node_count = expanded.node_count;
+      }
+    } else if (!CompilerIsCXX() && compiler->loop_analysis_depth == 0 &&
+               expanded.node_count > max_nodes * 2) {
       node_count = expanded.node_count;
     }
   }
@@ -1600,4 +1691,331 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
   }
   return CalleeBodyEligibleByStructureAndSize(func, force_inline,
                                               unmarked_small, static_uses);
+}
+
+typedef struct {
+  FunctionInfo* func;
+  int nodes;
+  bool bad;
+  bool has_deref_or_member;
+} GuardCondCheck;
+
+static void CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
+                                       VisitorMode mode) {
+  (void)child_id;
+  if (mode != kVisitPreChildren || node == NULL) {
+    return;
+  }
+  GuardCondCheck* chk = data;
+  if (chk->bad) {
+    return;
+  }
+  if (++chk->nodes > 24 || (node->type != NULL && TypeIsVolatile(node->type))) {
+    chk->bad = true;
+    return;
+  }
+  switch (node->op) {
+    case AST_OP(number):
+    case AST_OP(charconst):
+    case AST_OP(charwide):
+    case AST_OP(structmember):
+      return;
+    case AST_OP(identifier): {
+      Symbol* sym = ((IdentifierASTNode*)node)->symbol;
+      if (sym == NULL || sym->type == NULL || TypeIsVolatile(sym->type)) {
+        chk->bad = true;
+        return;
+      }
+      bool is_formal = false;
+      for (size_t i = 0; i < chk->func->prototype.length; i++) {
+        if (chk->func->prototype.value.p[i] == sym) {
+          is_formal = true;
+          break;
+        }
+      }
+      if (!is_formal) {
+        chk->bad = true;
+      }
+      return;
+    }
+    case AST_OP(arrow):
+    case AST_OP(dot):
+    case AST_OP(contents):
+    case AST_OP(subscript):
+      chk->has_deref_or_member = true;
+      return;
+    case AST_OP(not):
+    case AST_OP(onescomp):
+    case AST_OP(uminus):
+    case AST_OP(uplus):
+    case AST_OP(ptr_scale):
+    case AST_OP(c2i):
+    case AST_OP(c2s):
+    case AST_OP(c2l):
+    case AST_OP(c2ll):
+    case AST_OP(c2b):
+    case AST_OP(s2i):
+    case AST_OP(s2c):
+    case AST_OP(s2l):
+    case AST_OP(s2ll):
+    case AST_OP(s2b):
+    case AST_OP(i2c):
+    case AST_OP(i2s):
+    case AST_OP(i2l):
+    case AST_OP(i2ll):
+    case AST_OP(i2b):
+    case AST_OP(l2c):
+    case AST_OP(l2s):
+    case AST_OP(l2i):
+    case AST_OP(l2ll):
+    case AST_OP(l2b):
+    case AST_OP(ll2c):
+    case AST_OP(ll2s):
+    case AST_OP(ll2i):
+    case AST_OP(ll2l):
+    case AST_OP(ll2b):
+    case AST_OP(b2c):
+    case AST_OP(b2s):
+    case AST_OP(b2i):
+    case AST_OP(b2l):
+    case AST_OP(b2ll):
+      return;
+    case AST_OP(cast): {
+      CastASTNode* cn = (CastASTNode*)node;
+      if (cn->kind == kCastDynamic || cn->kind == kCastBit ||
+          TypeIsReference(cn->cast_type)) {
+        chk->bad = true;
+      }
+      return;
+    }
+    case AST_OP(and):
+    case AST_OP(bitor):
+    case AST_OP(exor):
+    case AST_OP(logand):
+    case AST_OP(logor):
+    case AST_OP(equal):
+    case AST_OP(noteq):
+    case AST_OP(less):
+    case AST_OP(lesseq):
+    case AST_OP(greater):
+    case AST_OP(greatereq):
+    case AST_OP(plus):
+    case AST_OP(minus):
+    case AST_OP(mult):
+    case AST_OP(lshift):
+    case AST_OP(rshiftl):
+    case AST_OP(rshifta):
+      return;
+    default:
+      chk->bad = true;
+      return;
+  }
+}
+
+static bool StatementIsVoidBareReturn(ASTNode* stmt) {
+  if (stmt == NULL) {
+    return false;
+  }
+  if (stmt->op == AST_OP(return)) {
+    return ((CombinedStatementASTNode*)stmt)->cond == NULL;
+  }
+  if (stmt->op == AST_OP(compound)) {
+    CompoundStatementASTNode* comp = (CompoundStatementASTNode*)stmt;
+    if (comp->statements != NULL && comp->statements->length == 1) {
+      ASTNode* inner = comp->statements->value.p[0];
+      return inner != NULL && inner->op == AST_OP(return) &&
+             ((CombinedStatementASTNode*)inner)->cond == NULL;
+    }
+  }
+  return false;
+}
+
+static bool IsTrivialUninitVarDecl(ASTNode* decl) {
+  if (decl == NULL || decl->op != AST_OP(vardecl)) {
+    return false;
+  }
+  VariableDeclarationASTNode* vd = (VariableDeclarationASTNode*)decl;
+  if (vd->initializer != NULL || vd->symbol == NULL ||
+      vd->symbol->type == NULL || !vd->symbol->flags.is_local ||
+      StorageIs(vd->symbol->storage, STO(static)) ||
+      TypeIsVLA(vd->symbol->type) || TypeIsStructOrUnion(vd->symbol->type)) {
+    return false;
+  }
+  return true;
+}
+
+// Partially inlines leading `if (cond) return;` fast-path guards of a void
+// callee that is too large (or has too much local stack) to inline in full,
+// leaving the cold remainder as an out-of-line call in the `else` arm.
+ASTNode* MaybePartialInlineLeadingGuards(FunctionInfo* info,
+                                         VectorASTNode* call) {
+  if (!OptLevel2() || CompilerIsCXX() || info == NULL || call == NULL ||
+      !TypeIsVoid(call->base.type) || info->cxx_member_owner != NULL ||
+      info->is_constructor || info->is_destructor ||
+      call->caller_contract_function != NULL) {
+    return NULL;
+  }
+  if (InliningBlockedByCalleeOrCompilerFlags(info) ||
+      InliningBlockedByCallerTemplateParameters() ||
+      InliningBlockedByCallerSharingTemplateBody() ||
+      !EnsureInlinedCalleeBodyIsAnalyzed(info)) {
+    return NULL;
+  }
+  if (info->symbol == NULL || info->symbol->flags.noinline ||
+      InliningBlockedByCalleeContractRules(info) ||
+      InliningBlockedByLazyTemplateBodySharing(info) ||
+      InliningBlockedByVirtualBaseMemberOwner(info)) {
+    return NULL;
+  }
+  bool force_inline = false;
+  bool unmarked_small = false;
+  if (InliningBlockedByDefinitionAndLinkage(info, &force_inline,
+                                            &unmarked_small) ||
+      InliningBlockedByCalleeFormals(info) ||
+      InliningBlockedByUnsafeBody(info) ||
+      InliningBlockedByNoexceptBoundary(info)) {
+    return NULL;
+  }
+  if (call->children == NULL ||
+      call->children->length != info->prototype.length) {
+    return NULL;
+  }
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = info->prototype.value.p[i];
+    if (formal == NULL || formal->type == NULL ||
+        TypeIsStructOrUnion(formal->type) || TypeIsArray(formal->type) ||
+        TypeIsReference(formal->type) || TypeIsComplex(formal->type) ||
+        TypeIsInt128(formal->type) || TypeIsVector(formal->type)) {
+      return NULL;
+    }
+  }
+  if (info->body == NULL || info->body->op != AST_OP(compound)) {
+    return NULL;
+  }
+  UnresolvedMemberFinder unresolved = {false};
+  ASTNodeVisit(info->body, FindUnresolvedMemberAccess, 0, &unresolved);
+  if (unresolved.found_unresolved) {
+    return NULL;
+  }
+  if (compiler->current_function != NULL &&
+      compiler->current_function->info.function.body != NULL) {
+    int already = 0;
+    ASTNodeVisit(compiler->current_function->info.function.body,
+                 CountInlineCalls, 0, &already);
+    if (already >= 16) {
+      return NULL;
+    }
+  }
+
+  CompoundStatementASTNode* body = (CompoundStatementASTNode*)info->body;
+  IfStatementASTNode* guards[2] = {NULL, NULL};
+  int num_guards = 0;
+  bool any_deref_or_member = false;
+  if (body->statements == NULL) {
+    return NULL;
+  }
+  for (size_t i = 0; i < body->statements->length; i++) {
+    ASTNode* stmt = body->statements->value.p[i];
+    if (stmt == NULL) {
+      continue;
+    }
+    if (num_guards == 0) {
+      if (IsTrivialUninitVarDecl(stmt)) {
+        continue;
+      }
+      if (stmt->op == AST_OP(decl_list)) {
+        DeclarationListASTNode* dl = (DeclarationListASTNode*)stmt;
+        bool all_trivial = dl->declarations != NULL;
+        for (size_t d = 0; all_trivial && d < dl->declarations->length; d++) {
+          if (!IsTrivialUninitVarDecl(dl->declarations->value.p[d])) {
+            all_trivial = false;
+          }
+        }
+        if (all_trivial) {
+          continue;
+        }
+      }
+    }
+    if (stmt->op != AST_OP(if) || num_guards >= 2) {
+      break;
+    }
+    IfStatementASTNode* ifs = (IfStatementASTNode*)stmt;
+    if (ifs->is_constexpr || ifs->is_consteval || ifs->else_part != NULL ||
+        ifs->cond == NULL || !StatementIsVoidBareReturn(ifs->if_part)) {
+      break;
+    }
+    GuardCondCheck chk = {info, 0, false, false};
+    ASTNodeVisit(ifs->cond, CheckGuardConditionVisitor, 0, &chk);
+    if (chk.bad || chk.nodes == 0) {
+      break;
+    }
+    any_deref_or_member |= chk.has_deref_or_member;
+    guards[num_guards++] = ifs;
+  }
+  if (num_guards == 0 || !any_deref_or_member) {
+    return NULL;
+  }
+
+  ASTNode* outer_parent = call->base.parent;
+  int outer_child_id = call->base.child_id;
+  if (outer_parent != NULL) {
+    ASTNodeReplaceChild(outer_parent, outer_child_id, NULL, false);
+    call->base.parent = NULL;
+  }
+
+  SourceLocation location = call->base.location;
+  Inliner inliner = {0};
+  MapInitForPointerKeys(&inliner.argument_map);
+  Vector* statements = NewVector();
+  CopyArguments(info, call, &inliner, statements,
+                /*reuse_parameter_objects=*/false);
+
+  for (size_t i = 0; i < info->prototype.length; i++) {
+    Symbol* formal = info->prototype.value.p[i];
+    Symbol* local = InlineMappedSymbol(&inliner, formal);
+    ASTNode* actual = AnalyzeExpression(NewIdentifierASTNode(local, location));
+    VectorSet(call->children, i, actual);
+    actual->parent = &call->base;
+    actual->child_id = (int)i;
+  }
+
+  ASTNode* nested = NewExpressionStatementASTNode((ASTNode*)call, location);
+  nested->flags |= kASTAnalyzed;
+
+  TypeRecord* saved_function = compiler->current_function;
+  Struct* saved_access_context = compiler->current_class_access_context;
+  compiler->current_function = info->symbol->type;
+  compiler->current_class_access_context =
+      info->symbol->type->info.function.cxx_member_owner;
+  TypeRecord* bool_type = NewTypeRecordWithSize(kTypeBool, kQualPlain);
+  for (int g = num_guards - 1; g >= 0; g--) {
+    ASTNode* cloned_cond = ASTNodeClone(
+        guards[g]->cond, InlineFunctionBodyStatement, &inliner, NULL);
+    ASTNode* inv_cond =
+        NewUnaryASTNode(AST_OP(not), bool_type, location, cloned_cond);
+    inv_cond->flags |= kASTAnalyzed;
+    ASTNode* guard_if =
+        NewIfStatementASTNode(inv_cond, nested, NULL, false, location);
+    guard_if->flags |= kASTAnalyzed;
+    nested = guard_if;
+  }
+  compiler->current_function = saved_function;
+  compiler->current_class_access_context = saved_access_context;
+
+  VectorAppend(statements, nested);
+  ASTNode* compound = NewCompoundStatementASTNode(statements, location);
+  for (size_t i = 0; i < statements->length; i++) {
+    ASTNode* st = statements->value.p[i];
+    st->parent = compound;
+    st->child_id = (int)i;
+  }
+  MapDestruct(&inliner.argument_map);
+
+  ASTNode* lowered =
+      NewInlineCallASTNode(call->base.type, location, compound, NULL);
+  lowered->value_category = call->base.value_category;
+  if (outer_parent != NULL) {
+    ASTNodeReplaceChild(outer_parent, outer_child_id, lowered, false);
+  }
+  return lowered;
 }

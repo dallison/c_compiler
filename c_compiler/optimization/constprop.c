@@ -73,6 +73,25 @@ static IRNode* TruncatedConstant(Generator* gen, IRConstant* con, int bits) {
   return GeneratorGetIntConstant(gen, con->base.type, value);
 }
 
+static int64_t NormalizeConstPropValue(int64_t val, TypeRecord* type,
+                                       bool force_unsigned) {
+  if (type == NULL || type->size <= 0 || type->size >= 8 ||
+      TypeIsInt128(type) || TypeIsBitInt(type)) {
+    return val;
+  }
+  if (TypeIsBool(type)) {
+    return val != 0 ? 1 : 0;
+  }
+  int bits = (int)type->size * 8;
+  uint64_t mask = (UINT64_C(1) << bits) - 1;
+  uint64_t low = (uint64_t)val & mask;
+  if (!force_unsigned && !TypeIsUnsigned(type) &&
+      (low & (UINT64_C(1) << (bits - 1))) != 0) {
+    low |= ~mask;
+  }
+  return (int64_t)low;
+}
+
 static bool AllConstantInputs(IRNode* node) {
   for (size_t i = 0; i < node->inputs.length; i++) {
     IRNode* input = node->inputs.value.p[i];
@@ -407,14 +426,34 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
 
 #define FOLD_DIV(op) \
         if (AllConstantInputs(inst)) { \
-          int64_t lhs = IRIntConstValue(inst->inputs.value.p[0]); \
-          int64_t rhs = IRIntConstValue(inst->inputs.value.p[1]); \
-          if (rhs != 0) {\
-            IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, lhs op rhs); \
+          IRNode* in0 = inst->inputs.value.p[0]; \
+          IRNode* in1 = inst->inputs.value.p[1]; \
+          bool is_u = (inst->type != NULL && TypeIsUnsigned(inst->type)) || \
+                      (in0->type != NULL && TypeIsUnsigned(in0->type)); \
+          int64_t lhs = NormalizeConstPropValue(IRIntConstValue(in0), in0->type, is_u); \
+          int64_t rhs = NormalizeConstPropValue(IRIntConstValue(in1), in1->type, is_u); \
+          if (rhs != 0 && (is_u || !(lhs == INT64_MIN && rhs == -1))) { \
+            int64_t raw = is_u ? (int64_t)((uint64_t)lhs op (uint64_t)rhs) : (lhs op rhs); \
+            int64_t res = NormalizeConstPropValue(raw, inst->type, false); \
+            IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, res); \
             GeneratorReplaceInstruction(gen, inst, const_inst); \
             BasicBlockRemoveInstruction(gen, block, inst); \
             continue; \
           } \
+        }
+
+#define FOLD_CMP(op) \
+        if (AllConstantInputs(inst)) { \
+          IRNode* in0 = inst->inputs.value.p[0]; \
+          IRNode* in1 = inst->inputs.value.p[1]; \
+          bool is_u = IRComparisonIsUnsigned(inst); \
+          int64_t lhs = NormalizeConstPropValue(IRIntConstValue(in0), in0->type, is_u); \
+          int64_t rhs = NormalizeConstPropValue(IRIntConstValue(in1), in1->type, is_u); \
+          int64_t res = is_u ? ((uint64_t)lhs op (uint64_t)rhs) : (lhs op rhs); \
+          IRNode* const_inst = GeneratorGetIntConstant(gen, inst->type, res); \
+          GeneratorReplaceInstruction(gen, inst, const_inst); \
+          BasicBlockRemoveInstruction(gen, block, inst); \
+          continue; \
         }
 #define FOLD_UNARY(op) \
         if (AllConstantInputs(inst)) { \
@@ -476,22 +515,22 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         PropagateShiftConstant(gen, block, inst, IR_OP(lsli));
         break;
       case IR_OP(cmpeqi):
-        FOLD_BINARY(==);
+        FOLD_CMP(==);
         break;
       case IR_OP(cmpnei):
-        FOLD_BINARY(!=);
+        FOLD_CMP(!=);
         break;
       case IR_OP(cmplti):
-        FOLD_BINARY(<);
+        FOLD_CMP(<);
         break;
       case IR_OP(cmplei):
-        FOLD_BINARY(<=);
+        FOLD_CMP(<=);
         break;
       case IR_OP(cmpgti):
-        FOLD_BINARY(>);
+        FOLD_CMP(>);
         break;
       case IR_OP(cmpgei):
-        FOLD_BINARY(>=);
+        FOLD_CMP(>=);
         break;
       case IR_OP(negi):
         FOLD_UNARY(-);
@@ -501,6 +540,35 @@ static void PropagateConstants(Generator* gen, ConstantPropagator* p,
         break;
       case IR_OP(noti):
         FOLD_UNARY(!);
+        break;
+      case IR_OP(cast):
+        if (inst->flags == 0 && inst->inputs.length == 1 &&
+            AllConstantInputs(inst) && inst->type != NULL &&
+            TypeIsIntegral(inst->type) && !TypeIsInt128(inst->type) &&
+            !TypeIsBitInt(inst->type) && !TypeIsVoid(inst->type)) {
+          IRNode* src = inst->inputs.value.p[0];
+          if (src != NULL && src->type != NULL && TypeIsIntegral(src->type) &&
+              !TypeIsInt128(src->type) && !TypeIsBitInt(src->type) &&
+              src->type->size == inst->type->size) {
+            uint64_t raw = (uint64_t)IRIntConstValue(src);
+            int bits = inst->type->size * 8;
+            int64_t folded = (int64_t)raw;
+            if (bits > 0 && bits < 64) {
+              uint64_t mask = (UINT64_C(1) << bits) - 1;
+              uint64_t low = raw & mask;
+              if (!TypeIsUnsigned(inst->type) && !TypeIsBool(inst->type) &&
+                  (low & (UINT64_C(1) << (bits - 1))) != 0) {
+                low |= ~mask;
+              }
+              folded = (int64_t)low;
+            }
+            IRNode* const_inst =
+                GeneratorGetIntConstant(gen, inst->type, folded);
+            GeneratorReplaceInstruction(gen, inst, const_inst);
+            BasicBlockRemoveInstruction(gen, block, inst);
+            continue;
+          }
+        }
         break;
       case IR_OP(zeroextendi):
         if (AllConstantInputs(inst)) {

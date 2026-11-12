@@ -41,31 +41,81 @@ static bool SymbolHasIncDec(Generator* gen, Symbol* symbol) {
   return false;
 }
 
+static bool IsDeadWriteOnlyAddressOf(IRNode* addr, IRNode* var) {
+  if (addr == NULL || addr->opcode != IR_OP(addressof) || addr->dest != NULL ||
+      addr->inputs.length != 1 || addr->inputs.value.p[0] != var) {
+    return false;
+  }
+  for (size_t i = 0; i < addr->outputs.length; i++) {
+    IRNode* u = addr->outputs.value.p[i];
+    if (!IRIsStoreOnly(u) || u->outputs.length != 0 || u->inputs.length != 2 ||
+        u->inputs.value.p[0] != addr || u->inputs.value.p[1] == addr) {
+      return false;
+    }
+  }
+  return true;
+}
+
+static bool SymbolHasOtherReadOrRMW(Generator* gen, Symbol* symbol) {
+  for (IRNode* inst = GeneratorFirstInstruction(gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if (IRIsVarRef(inst) && inst->var.use == symbol) {
+      return true;
+    }
+    if (IRIsVarDef(inst) && !IRIsStoreOnly(inst) && inst->var.def == symbol) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static bool IsDeadLocalStore(Generator* gen, IRNode* inst) {
-  if (!IRIsStoreOnly(inst) || inst->inputs.length == 0) {
+  if (!IRIsStoreOnly(inst) || inst->inputs.length == 0 ||
+      inst->outputs.length != 0) {
     return false;
   }
   IRNode* dest = inst->inputs.value.p[0];
+  if (dest == NULL) {
+    return false;
+  }
+  bool via_addressof = false;
+  if (dest->opcode == IR_OP(addressof) && dest->inputs.length == 1) {
+    dest = dest->inputs.value.p[0];
+    via_addressof = true;
+  }
   if (dest == NULL || !IRIsVariable(dest)) {
     return false;
   }
+  if (via_addressof && dest->opcode != IR_OP(localvar) &&
+      dest->opcode != IR_OP(tempvar)) {
+    return false;
+  }
   Symbol* symbol = IRGetVariableSymbol(dest);
-  if (symbol == NULL || symbol->flags.address_taken ||
-      symbol->flags.is_argument ||
+  if (symbol == NULL || symbol->flags.is_argument ||
       (!symbol->flags.is_local && !symbol->flags.is_temp) ||
+      SymbolIsAnonymousUnionMemberView(symbol) ||
       StorageIs(symbol->storage, STO(static) | STO(extern) | STO(thread)) ||
       TypeIsVolatile(symbol->type)) {
     return false;
   }
-  if (SymbolHasIncDec(gen, symbol)) {
+  if (!via_addressof && symbol->flags.address_taken) {
+    return false;
+  }
+  if (via_addressof ? SymbolHasOtherReadOrRMW(gen, symbol)
+                    : SymbolHasIncDec(gen, symbol)) {
     return false;
   }
   for (size_t i = 0; i < dest->outputs.length; i++) {
     IRNode* user = dest->outputs.value.p[i];
-    if (!IRIsStoreOnly(user) || user->inputs.length == 0 ||
-        user->inputs.value.p[0] != dest) {
-      return false;
+    if (IRIsStoreOnly(user) && user->outputs.length == 0 &&
+        user->inputs.length == 2 && user->inputs.value.p[0] == dest &&
+        user->inputs.value.p[1] != dest) {
+      continue;
     }
+    if (via_addressof && IsDeadWriteOnlyAddressOf(user, dest)) {
+      continue;
+    }
+    return false;
   }
   return true;
 }

@@ -828,6 +828,20 @@ static bool ExecuteCondBranch(AARCH64Interpreter* interpreter, uint32_t insn,
   return true;
 }
 
+static bool ExecuteTestBranch(AARCH64Interpreter* interpreter, uint32_t insn,
+                              bool tbnz, bool* pc_updated) {
+  int bit = (int)((((insn >> 31) & 1u) << 5) | ((insn >> 19) & 0x1fu));
+  int64_t imm14 = SignExtend64((insn >> 5) & 0x3fff, 14);
+  int rt = insn & 0x1f;
+  uint64_t value = ReadX(interpreter, rt);
+  bool is_set = ((value >> bit) & 1u) != 0;
+  if (tbnz ? is_set : !is_set) {
+    interpreter->pc = (uint64_t)((int64_t)interpreter->pc + (imm14 << 2));
+    *pc_updated = true;
+  }
+  return true;
+}
+
 static bool ExecuteCompareBranch(AARCH64Interpreter* interpreter, uint32_t insn,
                                  bool cbnz, bool* pc_updated) {
   bool sf = (insn >> 31) & 1;
@@ -1510,6 +1524,12 @@ static bool ExecuteInstruction(AARCH64Interpreter* interpreter, uint32_t insn,
   }
   if ((insn & 0x7F000000) == 0x35000000) {
     return ExecuteCompareBranch(interpreter, insn, true, pc_updated);
+  }
+  if ((insn & 0x7F000000) == 0x36000000) {
+    return ExecuteTestBranch(interpreter, insn, false, pc_updated);
+  }
+  if ((insn & 0x7F000000) == 0x37000000) {
+    return ExecuteTestBranch(interpreter, insn, true, pc_updated);
   }
   if ((insn & 0xFF000010) == 0x54000000) {
     return ExecuteCondBranch(interpreter, insn, pc_updated);

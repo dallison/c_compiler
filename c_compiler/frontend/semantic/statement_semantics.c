@@ -2021,6 +2021,7 @@ static bool CXXLoopConditionIsConstantTrue(ASTNode* cond) {
 }
 
 static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
+  compiler->loop_analysis_depth++;
   node->cond = AnalyzeExpression(node->cond);
   SemanticConvertToNewType(node->cond,
                            NewTypeRecordWithSize(kTypeBool, kQualPlain),
@@ -2037,9 +2038,11 @@ static void AnalyzeWhileStatement(CombinedStatementASTNode* node) {
     node->base.flags |= kASTTrivialInfiniteLoop;
   }
   SemanticCheckScalarType(node->cond);
+  compiler->loop_analysis_depth--;
 }
 
 static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
+  compiler->loop_analysis_depth++;
   node->cond = AnalyzeExpression(node->cond);
   SemanticConvertToNewType(node->cond,
                            NewTypeRecordWithSize(kTypeBool, kQualPlain),
@@ -2056,6 +2059,7 @@ static void AnalyzeDoStatement(CombinedStatementASTNode* node) {
     node->base.flags |= kASTTrivialInfiniteLoop;
   }
   SemanticCheckScalarType(node->cond);
+  compiler->loop_analysis_depth--;
 }
 
 // Function to compare case values for the qsort function.  This
@@ -2458,6 +2462,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
     }
   }
 
+  compiler->loop_analysis_depth++;
   node->c2 = AnalyzeExpression(node->c2);
   bool constant_true_condition = node->c2 == NULL;
   if (node->c2 != NULL) {
@@ -2476,6 +2481,7 @@ static void AnalyzeForStatement(ForStatementASTNode* node) {
 
   // Finally the statment.
   AnalyzeStatement(node->stmt);
+  compiler->loop_analysis_depth--;
   if (CompilerCXXAtLeast(kLanguageStandardCXX11) &&
       node->c3 == NULL && IsTriviallyEmptyIterationBody(node->stmt) &&
       constant_true_condition) {

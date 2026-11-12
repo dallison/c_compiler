@@ -204,6 +204,10 @@ static bool InstructionClobbersAvailability(const IRMemoryLocation* location,
   if (IRIsObservableCheckpoint(inst)) {
     return true;
   }
+  if (inst != NULL && inst->opcode == IR_OP(phi) && location->base != NULL &&
+      inst->var.def == location->base) {
+    return true;
+  }
   return IRAliasInstMayClobber(location, inst);
 }
 
@@ -291,6 +295,15 @@ static bool PathMayClobber(Generator* gen, IRNode* from, IRNode* to,
   CollectBackwardReachable(gen, to_bb, &backward);
   BitSetIntersection(&forward, &backward, &on_path);
 
+  bool to_reaches_self = false;
+  for (size_t e = 0; e < to_bb->out_edges.length; e++) {
+    BlockId succ = to_bb->out_edges.value.w[e];
+    if (succ != from_bb->block_id && BitSetContains(&on_path, succ)) {
+      to_reaches_self = true;
+      break;
+    }
+  }
+
   bool clobbered = false;
   BitSetIterator it;
   BitSetIteratorStart(&it, &on_path);
@@ -304,7 +317,7 @@ static bool PathMayClobber(Generator* gen, IRNode* from, IRNode* to,
           (node == from || ComesBeforeInBlock(node, from))) {
         continue;
       }
-      if (block == to_bb &&
+      if (block == to_bb && !to_reaches_self &&
           (node == to || !ComesBeforeInBlock(node, to))) {
         break;
       }
@@ -384,7 +397,20 @@ static void CrossBlockLoadCSE(Generator* gen) {
                candidate != BasicBlockEnd(other) && candidate != load;
                candidate = IRNext(candidate)) {
             IRMemoryLocation candidate_location;
-            if (!IRIsLoadOnly(candidate) ||
+            IRNode* l_addr =
+                load->inputs.length >= 1 ? load->inputs.value.p[0] : NULL;
+            IRNode* c_addr = candidate->inputs.length >= 1
+                                 ? candidate->inputs.value.p[0]
+                                 : NULL;
+            bool ssa_versioned =
+                (l_addr != NULL && (l_addr->opcode == IR_OP(ssavar) ||
+                                    l_addr->opcode == IR_OP(phi) ||
+                                    l_addr->opcode == IR_OP(argument))) ||
+                (c_addr != NULL && (c_addr->opcode == IR_OP(ssavar) ||
+                                    c_addr->opcode == IR_OP(phi) ||
+                                    c_addr->opcode == IR_OP(argument)));
+            if ((ssa_versioned && l_addr != c_addr) ||
+                !IRIsLoadOnly(candidate) ||
                 !IRAliasDecode(candidate, &candidate_location) ||
                 IRAliasClassify(&candidate_location, &location) !=
                     kIRMustAlias ||

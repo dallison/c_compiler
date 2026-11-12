@@ -4045,12 +4045,17 @@ static ASTNode* FunctionCallTryLowerContractsOrInline(VectorASTNode* node,
     }
     if (!TypeIsStructOrUnion(return_type) && !has_initializer_list_actual &&
         !CXXMemberInitializerMayElidePrvalue(node) &&
-        !CXXConstructorCallElidesPrvalueSource(node) &&
-        FunctionCanBeInlined(func)) {
-      ASTNode* inline_call = InlineFunctionCall(func, node);
-      ASTNodeReplaceChild(node->base.parent,
-                          node->base.child_id, inline_call, true);
-      return inline_call;
+        !CXXConstructorCallElidesPrvalueSource(node)) {
+      if (FunctionCanBeInlined(func)) {
+        ASTNode* inline_call = InlineFunctionCall(func, node);
+        ASTNodeReplaceChild(node->base.parent,
+                            node->base.child_id, inline_call, true);
+        return inline_call;
+      }
+      ASTNode* partial_inline = MaybePartialInlineLeadingGuards(func, node);
+      if (partial_inline != NULL) {
+        return partial_inline;
+      }
     }
   }
   return NULL;

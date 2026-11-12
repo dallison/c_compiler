@@ -896,6 +896,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
       compiler->immediate_function_context_depth;
   int saved_constant_evaluation_depth =
       compiler->constant_evaluation_required_depth;
+  int saved_loop_depth = compiler->loop_analysis_depth;
   compiler->current_function = node->type;
   Symbol* function_symbol = node->type->info.function.symbol;
   compiler->current_class_access_context =
@@ -905,6 +906,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
                                     : NULL;
   compiler->immediate_function_context_depth = 0;
   compiler->constant_evaluation_required_depth = 0;
+  compiler->loop_analysis_depth = 0;
   int saved_instantiation_depth = compiler->template_instantiation_depth;
   if (function_symbol != NULL &&
       function_symbol->instantiation_depth > saved_instantiation_depth) {
@@ -983,6 +985,7 @@ void SemanticAnalyzeFunction(Syntax* syntax, ASTNode* node) {
   compiler->immediate_function_context_depth = saved_immediate_context_depth;
   compiler->constant_evaluation_required_depth =
       saved_constant_evaluation_depth;
+  compiler->loop_analysis_depth = saved_loop_depth;
   compiler->template_instantiation_depth = saved_instantiation_depth;
   compiler->current_function = saved_current_function;
   compiler->current_class_access_context = saved_class_access_context;

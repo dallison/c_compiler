@@ -1338,8 +1338,21 @@ void TargetBuildBasicBlocks(TargetGenerator* gen) {
   VectorDestruct(&branches);
   
   RemoveUnreachableBlocks(gen);
-  
+
   TargetBuildBasicBlockInputsAndOutputs(gen);
+}
+
+void TargetRebuildBasicBlocks(TargetGenerator* gen) {
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    TargetBasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b != NULL) {
+      TargetBasicBlockDelete(b);
+    }
+  }
+  VectorClear(&gen->basic_blocks);
+  gen->entry_block = NULL;
+  gen->exit_block = NULL;
+  TargetBuildBasicBlocks(gen);
 }
 
 // The dominator tree walk records a value as live in a block only if the block
