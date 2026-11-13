@@ -528,6 +528,8 @@ int GetRegisterSize(TargetInstruction* inst);
 TargetInstruction* SetInstructionSize(TargetInstruction* inst, int size);
 
 TargetInstruction* AARCH64GetBranchTarget(TargetInstruction* inst);
+// The condition operand of an unconditional b.
+TargetInstruction* AARCH64AlwaysCondition(AARCH64Generator* g);
 
 const char* AARCH64OpcodeName(int op);
 #endif /* aarch64_codegen_h */

@@ -1161,6 +1161,10 @@ static TargetInstruction* Condition(AARCH64Generator* g, AARCH64Opcode cond, int
   return inst;
 }
 
+TargetInstruction* AARCH64AlwaysCondition(AARCH64Generator* g) {
+  return Condition(g, AARCH64_OP(al), 0);
+}
+
 static TargetInstruction* IntArgumentRegister(AARCH64Generator* g, int argnum) {
   if (g->int_argument_registers[argnum] == NULL) {
     // Allocate instruction for argument register and emit it.  The argument

@@ -9,8 +9,10 @@
 //  physical registers precolored, and colors it with iterated register
 //  coalescing (George and Appel).  Values it cannot color are spilled around
 //  every definition and use, and the graph is rebuilt until everything
-//  colors.  A backend describes its registers and supplies the instructions
-//  the allocator inserts through TargetRegAllocDesc.
+//  colors.  Before coloring, values live both on the call-free path from the
+//  entry and past it are split in two, so that the call-free path can run
+//  without a frame.  A backend describes its registers and supplies the
+//  instructions the allocator inserts through TargetRegAllocDesc.
 //
 
 #ifndef target_reg_alloc_h
@@ -64,8 +66,10 @@ typedef struct TargetRegAllocDesc {
   int (*forbidden_keys)(TargetInstruction* inst, int* keys, int max_keys);
 
   // A new copy of |value| that also writes |dest| when it is not NULL.  The
-  // allocator inserts it.  When |dest| is |value|'s dest the copy takes over
-  // writing it, and |value| may drop its dest.
+  // allocator inserts it, possibly between a compare and the branch that
+  // reads its flags, so it must leave the flags alone.  When |dest| is
+  // |value|'s dest the copy takes over writing it, and |value| may drop its
+  // dest.  |value| may also be a location.
   TargetInstruction* (*create_copy)(void* ctx, TargetInstruction* value,
                                     TargetInstruction* dest);
   // A new stack slot for a value of |reg_class|.
@@ -77,6 +81,15 @@ typedef struct TargetRegAllocDesc {
   TargetInstruction* (*create_reload)(void* ctx, TargetInstruction* spill);
   // Gives |inst| the physical register |key|.
   void (*assign)(void* ctx, TargetInstruction* inst, int key);
+
+  // For splitting; the allocator does not split when these are NULL.
+  // A new location for a value or location like |like|: same register class,
+  // size and register constraints.  NULL when |like| cannot be split.
+  TargetInstruction* (*create_location)(void* ctx, TargetInstruction* like);
+  // A new label, and a new unconditional branch to |label|, for the blocks
+  // the allocator places on edges.
+  TargetInstruction* (*create_label)(void* ctx);
+  TargetInstruction* (*create_jump)(void* ctx, TargetInstruction* label);
 } TargetRegAllocDesc;
 
 typedef struct {
@@ -86,6 +99,7 @@ typedef struct {
   int coalesced;
   int spilled;
   int copies;  // Copies inserted where a value and its dest differ.
+  int split;   // Values and locations split at the fast path.
 } TargetRegAllocStats;
 
 // Allocates registers for |gen|'s current function.  Leaves every operand

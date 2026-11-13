@@ -3193,48 +3193,59 @@ static void ShrinkWrapFunction(AARCH64RegisterAllocator* allocator) {
     if (progress) {
       continue;
     }
-    for (size_t b = 0; b < orig_blocks && num_clones < 24; b++) {
-      TargetBasicBlock* blk = gen->basic_blocks.value.p[b];
-      if (blk == NULL || sim_pure_fast[b] || sim_clone[b] ||
-          !eligible_clone[b] || !can_reach_ret[b] || blk_exec[b] > 22 ||
-          cloned_insts + blk_exec[b] > 40 || blk->in_edges.length == 0) {
-        continue;
-      }
-      bool has_fast_pred = false;
-      bool has_slow_pred = false;
-      bool forward_only = true;
-      for (size_t e = 0; e < blk->in_edges.length; e++) {
-        size_t pred_id = (size_t)blk->in_edges.value.w[e];
-        if (pred_id < orig_blocks &&
-            (sim_pure_fast[pred_id] || sim_clone[pred_id])) {
-          has_fast_pred = true;
-          if (pred_id >= b) {
-            forward_only = false;
-            break;
-          }
-          if (sim_clone[pred_id] || !eligible_pure[b]) {
+    // The cheapest block first, so that the budget completes as many paths
+    // to the epilogue as it can, and blocks inside loops last: cloning one
+    // only peels the loop's first test.
+    for (int pass = 0; pass < 2 && !progress; pass++) {
+      size_t best = orig_blocks;
+      for (size_t b = 0; b < orig_blocks && num_clones < 24; b++) {
+        TargetBasicBlock* blk = gen->basic_blocks.value.p[b];
+        if (blk == NULL || sim_pure_fast[b] || sim_clone[b] ||
+            (pass == 0 && blk->loop_nesting > 0) || !eligible_clone[b] ||
+            !can_reach_ret[b] || blk_exec[b] > 22 ||
+            cloned_insts + blk_exec[b] > 40 || blk->in_edges.length == 0) {
+          continue;
+        }
+        bool has_fast_pred = false;
+        bool has_slow_pred = false;
+        bool forward_only = true;
+        for (size_t e = 0; e < blk->in_edges.length; e++) {
+          size_t pred_id = (size_t)blk->in_edges.value.w[e];
+          if (pred_id < orig_blocks &&
+              (sim_pure_fast[pred_id] || sim_clone[pred_id])) {
+            has_fast_pred = true;
+            if (pred_id >= b) {
+              forward_only = false;
+              break;
+            }
+            if (sim_clone[pred_id] || !eligible_pure[b]) {
+              has_slow_pred = true;
+            }
+          } else {
             has_slow_pred = true;
           }
-        } else {
-          has_slow_pred = true;
+        }
+        if (!has_fast_pred || !has_slow_pred || !forward_only) {
+          continue;
+        }
+        uint32_t ns = total_saved | blk_saved[b];
+        uint32_t nt = total_temp | blk_temp[b];
+        if (SWPopCount(ns) > max_scratch_pool - SWPopCount(nt)) {
+          continue;
+        }
+        if (best == orig_blocks || blk_exec[b] < blk_exec[best]) {
+          best = b;
         }
       }
-      if (!has_fast_pred || !has_slow_pred || !forward_only) {
-        continue;
+      if (best < orig_blocks) {
+        sim_clone[best] = true;
+        total_saved |= blk_saved[best];
+        total_temp |= blk_temp[best];
+        total_arg |= blk_arg[best];
+        cloned_insts += blk_exec[best];
+        num_clones++;
+        progress = true;
       }
-      uint32_t ns = total_saved | blk_saved[b];
-      uint32_t nt = total_temp | blk_temp[b];
-      if (SWPopCount(ns) > max_scratch_pool - SWPopCount(nt)) {
-        continue;
-      }
-      sim_clone[b] = true;
-      total_saved = ns;
-      total_temp = nt;
-      total_arg |= blk_arg[b];
-      cloned_insts += blk_exec[b];
-      num_clones++;
-      progress = true;
-      break;
     }
   }
 
@@ -4917,14 +4928,15 @@ static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
 
 // `mov xD, xS` left by allocation.  Forward xS to same-block users when
 // nothing in between overwrites either register.  32-bit moves zero the
-// upper half and are left alone.
+// upper half and are left alone, as are moves that also write a dest, whose
+// readers are not among the users.
 static bool FoldPhysicalCopy(TargetGenerator* gen, TargetBasicBlock* block,
                              TargetInstruction* mov) {
   AARCH64Opcode op = (AARCH64Opcode)mov->opcode;
   if ((op != AARCH64_OP(mov) && op != AARCH64_OP(mv)) ||
       mov->operand[1] != NULL || mov->operand[0] == NULL ||
-      TargetIsConst(mov->operand[0]) || mov->users.length == 0 ||
-      mov->block != block) {
+      mov->dest != NULL || TargetIsConst(mov->operand[0]) ||
+      mov->users.length == 0 || mov->block != block) {
     return false;
   }
   int size = GetRegisterSize(mov);
@@ -5041,14 +5053,7 @@ static bool UseColoringAllocator(AARCH64RegisterAllocator* allocator) {
   return true;
 }
 
-void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(&allocator->g->base, AARCH64RAInfo(), NULL, stderr, 3);
-  }
-  if (UseColoringAllocator(allocator) &&
-      AARCH64AllocateRegistersByColoring(allocator)) {
-    return;
-  }
+static void AllocateByDominatorWalk(AARCH64RegisterAllocator* allocator) {
   // The hidden aggregate-result pointer has an ABI-selected dedicated
   // register. Reserve that physical register before allocating ordinary
   // variable registers; otherwise an incoming argument can be assigned the
@@ -5075,6 +5080,16 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   // Process all basic blocks in the AARCH64 generator by traversing the
   // dominator tree.
   ProcessBasicBlock(allocator, allocator->g->base.entry_block);
+}
+
+void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
+  if (getenv("DAVECC_RA_CHECK") != NULL) {
+    TargetRACheck(&allocator->g->base, AARCH64RAInfo(), NULL, stderr, 3);
+  }
+  if (!UseColoringAllocator(allocator) ||
+      !AARCH64AllocateRegistersByColoring(allocator)) {
+    AllocateByDominatorWalk(allocator);
+  }
   ShrinkWrapFunction(allocator);
   HoistLoopInvariantValues(allocator);
   FoldPhysicalCopies(allocator);

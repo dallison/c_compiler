@@ -106,7 +106,7 @@ typedef struct {
   TargetRAIndex unspillable;  // Values the spill code gave short ranges.
   TargetRAIndex spilled_locations;
   TargetRAIndex transparent;  // Copies added for values in fixed registers.
-
+  TargetRAIndex split_copies;  // Copies joining the two sides of a split.
   Vector insts;  // InstInfo*, in block order.
 
   TargetRAIndex reads;       // Value -> number of operand reads.
@@ -116,8 +116,9 @@ typedef struct {
   Vector uses;  // Nodes each instruction reads.
   Vector defs;  // Nodes each instruction writes.
 
-  // Live nodes at the end of each block.
+  // Live nodes at the start and end of each block.
   size_t words;
+  uint64_t* live_in;
   uint64_t* live_out;
 
   HashSet edges;  // Interference edges, by EdgeKey.
@@ -325,8 +326,12 @@ static bool IsTransparentCopy(RA* ra, TargetInstruction* inst) {
   return TargetRAIndexFind(&ra->transparent, inst) >= 0;
 }
 
+static bool IsSplitCopy(RA* ra, TargetInstruction* inst) {
+  return TargetRAIndexFind(&ra->split_copies, inst) >= 0;
+}
+
 static TargetRACopyKind CopyKind(RA* ra, TargetInstruction* inst) {
-  if (IsTransparentCopy(ra, inst)) {
+  if (IsTransparentCopy(ra, inst) || IsSplitCopy(ra, inst)) {
     return kTargetRACopy;
   }
   return ra->desc->copy_kind(inst);
@@ -452,10 +457,10 @@ static int LoopWeight(TargetBasicBlock* block) {
   return 1 << (3 * depth);
 }
 
-static void AddMove(RA* ra, int a, int b, int weight) {
+static Move* AddMove(RA* ra, int a, int b, int weight) {
   if (a < 0 || b < 0 || a == b || (IsPrecolored(a) && IsPrecolored(b)) ||
       NodeAt(ra, a)->reg_class != NodeAt(ra, b)->reg_class) {
-    return;
+    return NULL;
   }
   Move* m = malloc(sizeof(Move));
   m->a = a;
@@ -463,6 +468,7 @@ static void AddMove(RA* ra, int a, int b, int weight) {
   m->weight = weight;
   m->state = kMoveWorklist;
   VectorAppend(&ra->moves, m);
+  return m;
 }
 
 static void BuildNodes(RA* ra) {
@@ -524,7 +530,14 @@ static void BuildNodes(RA* ra) {
         int src = OperandNode(ra, inst->operand[0]);
         if (copy == kTargetRACopy) {
           info->group[0] = src;
-          AddMove(ra, src, own >= 0 ? own : dest, weight);
+          Move* m = AddMove(ra, src, own >= 0 ? own : dest, weight);
+          // Coalescing the two sides of a split would undo it.  Once one side
+          // is a reload, or a value stored as soon as it is made, the copy
+          // joins a short range instead and may go.
+          if (m != NULL && own < 0 && IsSplitCopy(ra, inst) &&
+              TargetRAIndexFind(&ra->unspillable, inst->operand[0]) < 0) {
+            m->state = kMoveFrozen;
+          }
         } else {
           info->converting = true;
         }
@@ -554,6 +567,7 @@ static void ComputeLiveness(RA* ra) {
   uint64_t* gen_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
   uint64_t* kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
   uint64_t* live_in = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  ra->live_in = live_in;
   ra->live_out = calloc(num_blocks * words + 1, sizeof(uint64_t));
 
   for (int i = NumInsts(ra) - 1; i >= 0; i--) {
@@ -603,7 +617,6 @@ static void ComputeLiveness(RA* ra) {
   }
   free(gen_bits);
   free(kill_bits);
-  free(live_in);
 }
 
 // ---------------------------------------------------------------------------
@@ -1275,6 +1288,8 @@ static void FreeRound(RA* ra) {
   VectorDestructWithContents(&ra->nodes, DestructNode, /*free_element=*/true);
   VectorDestruct(&ra->uses);
   VectorDestruct(&ra->defs);
+  free(ra->live_in);
+  ra->live_in = NULL;
   free(ra->live_out);
   ra->live_out = NULL;
   HashSetDestruct(&ra->edges);
@@ -1292,6 +1307,515 @@ static void BuildRound(RA* ra) {
   BuildNodes(ra);
   ComputeLiveness(ra);
   BuildGraph(ra);
+}
+
+// ---------------------------------------------------------------------------
+// Splitting at the fast path.
+//
+// The blocks the entry reaches before any call form the fast path, and the
+// rest of the function the slow path.  When the fast path can return, a
+// target can leave its frame to the slow path, provided the fast path keeps
+// out of callee-saved registers and stack slots.  But a value live across a
+// call takes a callee-saved register for its whole range, and spilling it
+// stores it where it is made.  So each value or location live on an edge
+// between the two paths gets a location of its own on each side, with copies
+// on the edges between them, and its fast side never crosses a call.  The
+// copies bias coloring toward one register for both sides, but are never
+// coalesced, which would undo the split.
+
+enum {
+  // Blocks the fast path shares with the slow path, such as the epilogue.
+  kMaxJoinedSize = 24,
+  kMaxJoinedTotal = 48,
+};
+
+typedef struct {
+  bool fast_home;            // Whether it is made on the fast path.
+  TargetInstruction* home;   // Its name on the side it is made on.
+  TargetInstruction* other;  // Its name on the other side; NULL if unsplit.
+} SplitNames;
+
+typedef enum {
+  kPlaceAtStart,  // Every edge into the target crosses the same way.
+  kPlaceAtEnd,    // Every edge out of the source crosses the same way.
+  kPlaceOnEdge,   // A new block on the edge.
+  kPlaceNowhere,
+} Placement;
+
+typedef struct {
+  TargetBasicBlock* from;
+  TargetBasicBlock* to;
+  Placement placement;
+} CrossingEdge;
+
+static TargetBasicBlock* EdgeBlock(RA* ra, const Vector* edges, size_t i) {
+  size_t id = (size_t)edges->value.w[i];
+  return id < ra->gen->basic_blocks.length ? BlockAt(ra->gen, id) : NULL;
+}
+
+// How many of |block|'s predecessors are on the fast path.  |forward| is set
+// when every edge into and out of |block| runs forward in block order.
+static size_t FastPreds(RA* ra, TargetBasicBlock* block, const bool* fast,
+                        bool* forward) {
+  size_t n = 0;
+  *forward = true;
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    TargetBasicBlock* pred = EdgeBlock(ra, &block->in_edges, i);
+    n += pred != NULL && fast[pred->block_id];
+    *forward = *forward && pred != NULL && pred->block_id < block->block_id;
+  }
+  for (size_t i = 0; i < block->out_edges.length; i++) {
+    size_t succ = (size_t)block->out_edges.value.w[i];
+    *forward = *forward && succ > block->block_id;
+  }
+  return n;
+}
+
+// Marks the fast path in |fast|, by block id: the entry and every call-free
+// block whose predecessors all lie on it, then short call-free blocks it
+// shares with the slow path.  Returns whether splitting can help, which needs
+// a fast block that returns and a slow block that calls.
+static bool FindFastPath(RA* ra, bool* fast) {
+  TargetGenerator* gen = ra->gen;
+  size_t num_blocks = gen->basic_blocks.length;
+  bool* calls = calloc(num_blocks, sizeof(bool));
+  bool* returns = calloc(num_blocks, sizeof(bool));
+  int* sizes = calloc(num_blocks, sizeof(int));
+  for (size_t b = 0; b < num_blocks; b++) {
+    TargetBasicBlock* block = BlockAt(gen, b);
+    for (TargetInstruction* inst = block == NULL ? NULL : block->code;
+         inst != NULL; inst = NextInBlock(block, inst)) {
+      calls[b] = calls[b] || gen->virtuals->is_call(inst);
+      returns[b] = returns[b] || gen->virtuals->is_return(inst);
+      sizes[b]++;
+    }
+  }
+  bool useful = false;
+  size_t entry = gen->entry_block->block_id;
+  if (entry < num_blocks && BlockAt(gen, entry) != NULL && !calls[entry]) {
+    fast[entry] = true;
+    int joined = 0;
+    for (;;) {
+      bool grew = false;
+      for (size_t b = 0; b < num_blocks; b++) {
+        TargetBasicBlock* block = BlockAt(gen, b);
+        bool forward;
+        if (block != NULL && !fast[b] && !calls[b] &&
+            block->in_edges.length > 0 &&
+            FastPreds(ra, block, fast, &forward) == block->in_edges.length) {
+          fast[b] = true;
+          grew = true;
+        }
+      }
+      for (size_t b = 0; b < num_blocks && !grew; b++) {
+        TargetBasicBlock* block = BlockAt(gen, b);
+        bool forward;
+        if (block != NULL && !fast[b] && !calls[b] &&
+            sizes[b] <= kMaxJoinedSize &&
+            joined + sizes[b] <= kMaxJoinedTotal &&
+            FastPreds(ra, block, fast, &forward) > 0 && forward) {
+          fast[b] = true;
+          joined += sizes[b];
+          grew = true;
+        }
+      }
+      if (!grew) {
+        break;
+      }
+    }
+    bool fast_returns = false;
+    bool slow_calls = false;
+    for (size_t b = 0; b < num_blocks; b++) {
+      if (BlockAt(gen, b) != NULL) {
+        fast_returns = fast_returns || (fast[b] && returns[b]);
+        slow_calls = slow_calls || (!fast[b] && calls[b]);
+      }
+    }
+    useful = fast_returns && slow_calls;
+  }
+  free(calls);
+  free(returns);
+  free(sizes);
+  return useful;
+}
+
+static bool AllEdgesOnSide(RA* ra, const Vector* edges, const bool* fast,
+                           bool side) {
+  for (size_t i = 0; i < edges->length; i++) {
+    TargetBasicBlock* block = EdgeBlock(ra, edges, i);
+    if (block == NULL || fast[block->block_id] != side) {
+      return false;
+    }
+  }
+  return edges->length > 0;
+}
+
+// The block control falls into from the end of |block|, or NULL.
+static TargetBasicBlock* FallthroughBlock(RA* ra, TargetBasicBlock* block) {
+  TargetVirtuals* v = ra->gen->virtuals;
+  TargetInstruction* end = block->end_code;
+  if (v->is_return(end) || (v->is_branch(end) && !v->is_conditional_branch(end))) {
+    return NULL;
+  }
+  TargetInstruction* next = TargetNext(end);
+  return next == NULL ? NULL : next->block;
+}
+
+// The operand of the branch ending |from| that names |to|'s label, or -1.
+static int BranchOperand(RA* ra, TargetBasicBlock* from, TargetBasicBlock* to) {
+  TargetVirtuals* v = ra->gen->virtuals;
+  TargetInstruction* end = from->end_code;
+  if (!v->is_branch(end) || (end->flags & TARGET_INST_TABLE_JUMP) != 0) {
+    return -1;
+  }
+  TargetInstruction* label = v->get_branch_target(end);
+  if (label == NULL || label->block != to) {
+    return -1;
+  }
+  for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
+    if (end->operand[op] == label) {
+      return op;
+    }
+  }
+  return -1;
+}
+
+static bool EndsWithoutFallthrough(RA* ra, TargetInstruction* inst) {
+  TargetVirtuals* v = ra->gen->virtuals;
+  if (inst->block == NULL || inst->block->end_code != inst ||
+      (inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+    return false;
+  }
+  return v->is_return(inst) ||
+         (v->is_branch(inst) && !v->is_conditional_branch(inst));
+}
+
+// Where a block for a branch out of |from| can go: after the nearest block
+// that control cannot fall out of, so that the new block runs only when
+// branched to and stays within the branch's reach.
+static TargetInstruction* PlaceNear(RA* ra, TargetBasicBlock* from) {
+  for (TargetInstruction* inst = from->end_code; inst != NULL;
+       inst = TargetNext(inst)) {
+    if (EndsWithoutFallthrough(ra, inst)) {
+      return inst;
+    }
+  }
+  for (TargetInstruction* inst = TargetPrev(from->code); inst != NULL;
+       inst = TargetPrev(inst)) {
+    if (EndsWithoutFallthrough(ra, inst)) {
+      return inst;
+    }
+  }
+  return NULL;
+}
+
+static Placement PlaceCopies(RA* ra, const bool* fast, TargetBasicBlock* from,
+                             TargetBasicBlock* to) {
+  if (AllEdgesOnSide(ra, &to->in_edges, fast, fast[from->block_id])) {
+    return kPlaceAtStart;
+  }
+  if (AllEdgesOnSide(ra, &from->out_edges, fast, fast[to->block_id])) {
+    return kPlaceAtEnd;
+  }
+  bool falls = FallthroughBlock(ra, from) == to;
+  bool branches = BranchOperand(ra, from, to) >= 0;
+  if (falls != branches && (falls || PlaceNear(ra, from) != NULL)) {
+    return kPlaceOnEdge;
+  }
+  return kPlaceNowhere;
+}
+
+static void ReplaceEdge(Vector* edges, size_t from, size_t to) {
+  for (size_t i = 0; i < edges->length; i++) {
+    if ((size_t)edges->value.w[i] == from) {
+      edges->value.w[i] = (intptr_t)to;
+      return;
+    }
+  }
+}
+
+// Puts a new block on the edge from |from| to |to|: right after |from| when
+// control falls through, otherwise near it, ending in a jump.
+static TargetBasicBlock* SplitEdge(RA* ra, TargetBasicBlock* from,
+                                   TargetBasicBlock* to) {
+  TargetGenerator* gen = ra->gen;
+  const TargetRegAllocDesc* desc = ra->desc;
+  TargetBasicBlock* edge = NewTargetBasicBlock(gen->basic_blocks.length);
+  VectorAppend(&gen->basic_blocks, edge);
+  TargetInstruction* label = desc->create_label(desc->ctx);
+  label->block = edge;
+  edge->code = edge->end_code = label;
+  int op = BranchOperand(ra, from, to);
+  if (op < 0) {
+    TargetEmitAfter(gen, label, from->end_code);
+  } else {
+    TargetInstruction* branch = from->end_code;
+    TargetInstruction* jump = desc->create_jump(desc->ctx, branch->operand[op]);
+    TargetEmitAfter(gen, label, PlaceNear(ra, from));
+    TargetEmitAfter(gen, jump, label);
+    jump->block = edge;
+    edge->end_code = jump;
+    TargetReplaceOperand(branch, op, label);
+  }
+  ReplaceEdge(&from->out_edges, to->block_id, edge->block_id);
+  ReplaceEdge(&to->in_edges, from->block_id, edge->block_id);
+  VectorAppend(&edge->in_edges, (void*)(uintptr_t)from->block_id);
+  VectorAppend(&edge->out_edges, (void*)(uintptr_t)to->block_id);
+  BitSetCopy(&edge->dominators, &from->dominators);
+  BitSetInsert(&edge->dominators, edge->block_id);
+  edge->idom = from;
+  edge->loop_nesting = from->loop_nesting < to->loop_nesting
+                           ? from->loop_nesting
+                           : to->loop_nesting;
+  return edge;
+}
+
+static void EmitAtStart(RA* ra, TargetBasicBlock* block,
+                        TargetInstruction* inst) {
+  TargetInstruction* pos = block->code;
+  while (pos != NULL && ra->gen->virtuals->is_label(pos)) {
+    pos = NextInBlock(block, pos);
+  }
+  if (pos == NULL) {
+    TargetBasicBlockEmitAfter(ra->gen, block, inst, block->end_code);
+  } else {
+    TargetBasicBlockEmitBefore(ra->gen, block, inst, pos);
+  }
+}
+
+static void EmitAtEnd(RA* ra, TargetBasicBlock* block,
+                      TargetInstruction* inst) {
+  TargetInstruction* end = block->end_code;
+  if (ra->gen->virtuals->is_branch(end)) {
+    TargetBasicBlockEmitBefore(ra->gen, block, inst, end);
+  } else {
+    TargetBasicBlockEmitAfter(ra->gen, block, inst, end);
+  }
+}
+
+// The name |inst| has on one side of a split, or NULL if it is not split.
+static TargetInstruction* SplitName(RA* ra, const SplitNames* names,
+                                    int num_nodes, TargetInstruction* inst,
+                                    bool fast) {
+  TargetRAKind kind = ra->info->kind(inst);
+  int n = kind == kTargetRAValue      ? ValueNode(ra, inst)
+          : kind == kTargetRALocation ? LocationNode(ra, inst)
+                                      : kNoNode;
+  if (n < TARGET_RA_FIXED_KEYS || n >= num_nodes || names[n].other == NULL) {
+    return NULL;
+  }
+  return fast == names[n].fast_home ? names[n].home : names[n].other;
+}
+
+static void RenameReads(RA* ra, const SplitNames* names, int num_nodes,
+                        TargetInstruction* holder, bool fast, int depth) {
+  for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
+    TargetInstruction* read = holder->operand[op];
+    if (read == NULL) {
+      continue;
+    }
+    if (ra->info->kind(read) == kTargetRANone) {
+      if (ReadsThrough(ra, read, depth)) {
+        RenameReads(ra, names, num_nodes, read, fast, depth + 1);
+      }
+      continue;
+    }
+    TargetInstruction* name = SplitName(ra, names, num_nodes, read, fast);
+    if (name != NULL) {
+      TargetReplaceOperand(holder, op, name);
+    }
+  }
+}
+
+// Copies every split node in |live| from its name on one side to its name on
+// the other, at the start or the end of |block|.
+static void EmitSplitCopies(RA* ra, const SplitNames* names, int num_nodes,
+                            const uint64_t* live, bool from_fast,
+                            TargetBasicBlock* block, bool at_start) {
+  const TargetRegAllocDesc* desc = ra->desc;
+  for (int n = TARGET_RA_FIXED_KEYS; n < num_nodes; n++) {
+    if ((live[n / 64] & (UINT64_C(1) << (n % 64))) == 0 ||
+        names[n].other == NULL) {
+      continue;
+    }
+    bool home_first = from_fast == names[n].fast_home;
+    TargetInstruction* from = home_first ? names[n].home : names[n].other;
+    TargetInstruction* to = home_first ? names[n].other : names[n].home;
+    TargetInstruction* copy = desc->create_copy(desc->ctx, from, to);
+    TargetRAIndexInsert(&ra->split_copies, copy, 1);
+    if (at_start) {
+      EmitAtStart(ra, block, copy);
+    } else {
+      EmitAtEnd(ra, block, copy);
+    }
+  }
+}
+
+// Picks the nodes to split from the edges between the two paths, and where
+// their copies go.  Returns the number of crossing edges, or 0 when there is
+// nothing to split or a copy has nowhere to go.
+static size_t PlanSplit(RA* ra, const bool* fast, uint64_t* split,
+                        CrossingEdge* crossing) {
+  TargetGenerator* gen = ra->gen;
+  size_t words = ra->words;
+  size_t num_crossing = 0;
+  bool any = false;
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    TargetBasicBlock* from = BlockAt(gen, b);
+    for (size_t i = 0; from != NULL && i < from->out_edges.length; i++) {
+      TargetBasicBlock* to = EdgeBlock(ra, &from->out_edges, i);
+      if (to == NULL || fast[b] == fast[to->block_id]) {
+        continue;
+      }
+      const uint64_t* live = ra->live_in + to->block_id * words;
+      bool live_across = false;
+      for (int n = TARGET_RA_FIXED_KEYS; n < NumNodes(ra); n++) {
+        if ((live[n / 64] & (UINT64_C(1) << (n % 64))) != 0) {
+          split[n / 64] |= UINT64_C(1) << (n % 64);
+          live_across = true;
+        }
+      }
+      Placement placement = PlaceCopies(ra, fast, from, to);
+      if (live_across && placement == kPlaceNowhere) {
+        return 0;
+      }
+      any = any || live_across;
+      crossing[num_crossing++] = (CrossingEdge){from, to, placement};
+    }
+  }
+  return any ? num_crossing : 0;
+}
+
+static void SplitAtFastPath(RA* ra) {
+  TargetGenerator* gen = ra->gen;
+  const TargetRegAllocDesc* desc = ra->desc;
+  if (desc->create_location == NULL || desc->create_label == NULL ||
+      desc->create_jump == NULL || gen->entry_block == NULL ||
+      gen->exception_edges.length != 0) {
+    return;
+  }
+  size_t num_blocks = gen->basic_blocks.length;
+  bool* fast = calloc(num_blocks, sizeof(bool));
+  if (!FindFastPath(ra, fast)) {
+    free(fast);
+    return;
+  }
+  CollectInstructions(ra);
+  BuildNodes(ra);
+  ComputeLiveness(ra);
+
+  size_t num_edges = 0;
+  for (size_t b = 0; b < num_blocks; b++) {
+    TargetBasicBlock* block = BlockAt(gen, b);
+    num_edges += block == NULL ? 0 : block->out_edges.length;
+  }
+  uint64_t* split = calloc(ra->words + 1, sizeof(uint64_t));
+  CrossingEdge* crossing = calloc(num_edges + 1, sizeof(CrossingEdge));
+  size_t num_crossing = PlanSplit(ra, fast, split, crossing);
+  int num_nodes = NumNodes(ra);
+  SplitNames* names = calloc((size_t)num_nodes, sizeof(SplitNames));
+  TargetRAIndex positions;
+  IndexPositions(ra, &positions);
+
+  // Name both sides.  A value's reads all move to locations, so that the
+  // side it is made on can be written by copies too.
+  for (int n = TARGET_RA_FIXED_KEYS; num_crossing > 0 && n < num_nodes; n++) {
+    if ((split[n / 64] & (UINT64_C(1) << (n % 64))) == 0) {
+      continue;
+    }
+    TargetInstruction* inst = NodeAt(ra, n)->inst;
+    SplitNames* name = &names[n];
+    if (ra->info->kind(inst) == kTargetRAValue) {
+      int i = TargetRAIndexFind(&positions, inst);
+      name->fast_home = fast[InstAt(ra, i)->block];
+      name->home = desc->create_location(desc->ctx, inst);
+    } else {
+      name->fast_home = true;
+      name->home = inst;
+    }
+    name->other = name->home == NULL
+                      ? NULL
+                      : desc->create_location(desc->ctx, inst);
+    ra->stats.split += name->other != NULL;
+  }
+
+  for (int i = 0; num_crossing > 0 && i < NumInsts(ra); i++) {
+    TargetInstruction* inst = InstOf(ra, i);
+    bool side = fast[InstAt(ra, i)->block];
+    RenameReads(ra, names, num_nodes, inst, side, 0);
+    if (inst->dest != NULL) {
+      TargetInstruction* dest =
+          SplitName(ra, names, num_nodes, inst->dest, side);
+      if (dest != NULL) {
+        inst->dest = dest;
+      }
+    }
+  }
+  for (int n = TARGET_RA_FIXED_KEYS; num_crossing > 0 && n < num_nodes; n++) {
+    TargetInstruction* value = NodeAt(ra, n)->inst;
+    if (names[n].other == NULL || names[n].home == value) {
+      continue;
+    }
+    TargetInstruction* copy = desc->create_copy(desc->ctx, value, names[n].home);
+    int i = TargetRAIndexFind(&positions, value);
+    TargetBasicBlockEmitAfter(gen, InstBlock(ra, i), copy, value);
+    TargetRAIndexInsert(&ra->transparent, copy, 1);
+  }
+
+  bool* start_done = calloc(num_blocks, sizeof(bool));
+  bool* end_done = calloc(num_blocks, sizeof(bool));
+  uint64_t* live = calloc(ra->words + 1, sizeof(uint64_t));
+  for (size_t e = 0; e < num_crossing; e++) {
+    TargetBasicBlock* from = crossing[e].from;
+    TargetBasicBlock* to = crossing[e].to;
+    bool from_fast = fast[from->block_id];
+    const uint64_t* live_in = ra->live_in + to->block_id * ra->words;
+    switch (crossing[e].placement) {
+      case kPlaceAtStart:
+        if (!start_done[to->block_id]) {
+          start_done[to->block_id] = true;
+          EmitSplitCopies(ra, names, num_nodes, live_in, from_fast, to,
+                          /*at_start=*/true);
+        }
+        break;
+      case kPlaceAtEnd:
+        if (!end_done[from->block_id]) {
+          end_done[from->block_id] = true;
+          // Successors that take the copies at their start need none here.
+          memset(live, 0, sizeof(uint64_t) * ra->words);
+          for (size_t c = 0; c < num_crossing; c++) {
+            if (crossing[c].from != from ||
+                crossing[c].placement != kPlaceAtEnd) {
+              continue;
+            }
+            size_t succ = crossing[c].to->block_id;
+            for (size_t w = 0; w < ra->words; w++) {
+              live[w] |= ra->live_in[succ * ra->words + w];
+            }
+          }
+          EmitSplitCopies(ra, names, num_nodes, live, from_fast, from,
+                          /*at_start=*/false);
+        }
+        break;
+      case kPlaceOnEdge: {
+        TargetBasicBlock* edge = SplitEdge(ra, from, to);
+        EmitSplitCopies(ra, names, num_nodes, live_in, from_fast, edge,
+                        /*at_start=*/false);
+        break;
+      }
+      case kPlaceNowhere:
+        break;
+    }
+  }
+  free(live);
+  free(start_done);
+  free(end_done);
+  TargetRAIndexDestruct(&positions);
+  free(names);
+  free(crossing);
+  free(split);
+  free(fast);
+  FreeRound(ra);
 }
 
 bool TargetAllocateRegisters(TargetGenerator* gen,
@@ -1328,10 +1852,12 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
   TargetRAIndexInit(&ra->unspillable, 64);
   TargetRAIndexInit(&ra->spilled_locations, 16);
   TargetRAIndexInit(&ra->transparent, 64);
+  TargetRAIndexInit(&ra->split_copies, 64);
   CountAllReads(ra);
   CopyFixedValues(ra);
   TargetRAIndexDestruct(&ra->reads);
   FreeInstructions(ra);
+  SplitAtFastPath(ra);
 
   for (;;) {
     ra->stats.rounds++;
@@ -1363,9 +1889,9 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
     const TargetRegAllocStats* s = &ra->stats;
     fprintf(stderr,
             "new-ra\t%s\trounds=%d\tnodes=%d\tmoves=%d\tcoalesced=%d\t"
-            "spilled=%d\tcopies=%d\n",
+            "spilled=%d\tcopies=%d\tsplit=%d\n",
             gen->function_name.value, s->rounds, s->nodes, s->moves,
-            s->coalesced, s->spilled, s->copies);
+            s->coalesced, s->spilled, s->copies, s->split);
   }
   if (stats != NULL) {
     *stats = ra->stats;
@@ -1373,6 +1899,7 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
   TargetRAIndexDestruct(&ra->unspillable);
   TargetRAIndexDestruct(&ra->spilled_locations);
   TargetRAIndexDestruct(&ra->transparent);
+  TargetRAIndexDestruct(&ra->split_copies);
   free(ra);
   return true;
 }

@@ -148,6 +148,10 @@ static int RegClass(TargetInstruction* inst) {
   if ((AARCH64Opcode)inst->opcode == AARCH64_OP(reload)) {
     return RegClass(inst->operand[0]->operand[0]);
   }
+  if (AARCH64IsCall(inst)) {
+    return (inst->flags & AARCH64_INST_FP_RETURN) != 0 ? kFloatClass
+                                                       : kIntClass;
+  }
   return AARCH64HasFloatResult(inst) ? kFloatClass : kIntClass;
 }
 
@@ -332,6 +336,35 @@ static TargetInstruction* CreateReload(void* ctx, TargetInstruction* spill) {
   return reload;
 }
 
+// Variable registers are TargetSymbols; this one stands for no variable.
+static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
+  ColoringContext* c = ctx;
+  int size = OperandSize(like);
+  if (size == kSize128Bit) {
+    return NULL;
+  }
+  bool fp = RegClass(like) == kFloatClass;
+  TargetSymbol* location = calloc(1, sizeof(TargetSymbol));
+  TargetInitInstruction(
+      &location->base,
+      (TargetOpcode)(fp ? AARCH64_OP(fvarreg) : AARCH64_OP(ivarreg)));
+  SetInstructionSize(&location->base, size);
+  location->base.flags |= like->flags & AARCH64_INST_AVOID_ARG_REGS;
+  TargetTrackOrphanInstruction(&c->allocator->g->base, &location->base);
+  return &location->base;
+}
+
+static TargetInstruction* CreateLabel(void* ctx) {
+  (void)ctx;
+  return TargetNewInstruction((TargetOpcode)AARCH64_OP(label));
+}
+
+static TargetInstruction* CreateJump(void* ctx, TargetInstruction* label) {
+  ColoringContext* c = ctx;
+  return TargetNewInstruction2((TargetOpcode)AARCH64_OP(b),
+                               AARCH64AlwaysCondition(c->allocator->g), label);
+}
+
 static void Assign(void* ctx, TargetInstruction* inst, int key) {
   ColoringContext* c = ctx;
   AARCH64RegisterAllocator* allocator = c->allocator;
@@ -444,6 +477,12 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
       .create_reload = CreateReload,
       .assign = Assign,
   };
+  // DAVECC_NEW_RA_NO_SPLIT turns splitting off, for comparison.
+  if (getenv("DAVECC_NEW_RA_NO_SPLIT") == NULL) {
+    desc.create_location = CreateLocation;
+    desc.create_label = CreateLabel;
+    desc.create_jump = CreateJump;
+  }
   // Caller-saved registers first, so that only values live across a call
   // cost a save in the prologue.  x8 and x9 are emitter scratch registers,
   // x16 and x17 the linker's and x18 the platform's.
