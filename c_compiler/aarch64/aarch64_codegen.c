@@ -6989,8 +6989,12 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
         // structreturn.
         entry->pooled->data.ivalue = AARCH64_REG_VAR | g->struct_return_reg;
         TargetInstruction* var = IntVariableRegister(g, g->struct_return_reg, entry->value.symbol);
-        Emit(g, NewInstruction2(AARCH64_OP(mov), var,
-                    StructReturnArgumentRegister(g)));
+        TargetInstruction* move = Emit(
+            g, CopyInstructionSize(
+                   NewInstruction1(AARCH64_OP(mov),
+                                   StructReturnArgumentRegister(g)),
+                   0));
+        move->dest = var;
         SetDebugRegisterLocation(entry, g->struct_return_reg);
       } else {
         AlignOffset(entry, var_offset);

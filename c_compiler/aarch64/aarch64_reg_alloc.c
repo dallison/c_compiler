@@ -5021,7 +5021,34 @@ static void FoldPhysicalCopies(AARCH64RegisterAllocator* allocator) {
   }
 }
 
+// DAVECC_NEW_RA selects the coloring allocator.  For bisecting,
+// DAVECC_NEW_RA_FUNC limits it to one function and DAVECC_NEW_RA_LIMIT to
+// the first n functions compiled.
+static bool UseColoringAllocator(AARCH64RegisterAllocator* allocator) {
+  if (getenv("DAVECC_NEW_RA") == NULL) {
+    return false;
+  }
+  const char* only = getenv("DAVECC_NEW_RA_FUNC");
+  if (only != NULL &&
+      strcmp(only, allocator->g->base.function_name.value) != 0) {
+    return false;
+  }
+  const char* limit = getenv("DAVECC_NEW_RA_LIMIT");
+  if (limit != NULL) {
+    static int count;
+    return count++ < atoi(limit);
+  }
+  return true;
+}
+
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
+  if (getenv("DAVECC_RA_CHECK") != NULL) {
+    TargetRACheck(&allocator->g->base, AARCH64RAInfo(), NULL, stderr, 3);
+  }
+  if (UseColoringAllocator(allocator) &&
+      AARCH64AllocateRegistersByColoring(allocator)) {
+    return;
+  }
   // The hidden aggregate-result pointer has an ABI-selected dedicated
   // register. Reserve that physical register before allocating ordinary
   // variable registers; otherwise an incoming argument can be assigned the

@@ -92,6 +92,8 @@ davecc_library(davecc_utils
   c_compiler/util/config.c
   c_compiler/util/cxx_demangle.c
   c_compiler/util/dstring.c
+  c_compiler/util/hashmap.c
+  c_compiler/util/hashset.c
   c_compiler/util/hashtable.c
   c_compiler/util/list.c
   c_compiler/util/map.c
@@ -218,6 +220,7 @@ davecc_library(davecc_compiler
   c_compiler/aarch64/aarch64_object.c
   c_compiler/aarch64/aarch64_program.c
   c_compiler/aarch64/aarch64_optimize.c
+  c_compiler/aarch64/aarch64_ra_info.c
   c_compiler/aarch64/aarch64_reg_alloc.c
   c_compiler/aarch64/aarch64_target.c
   c_compiler/arm/arm_assembler.c
@@ -252,6 +255,8 @@ davecc_library(davecc_compiler
   c_compiler/support/version.c
   c_compiler/backend/target_basic_block.c
   c_compiler/backend/target_generator.c
+  c_compiler/backend/target_ra_ir.c
+  c_compiler/backend/target_reg_alloc.c
   c_compiler/driver/compiler.c
   c_compiler/driver/errors.c
   c_compiler/driver/injection.c

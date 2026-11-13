@@ -16,6 +16,7 @@
 #include "map.h"
 #include "aarch64_machine.h"
 #include "target_generator.h"
+#include "target_ra_ir.h"
 
 struct AARCH64Generator;
 struct AARCH64Instruction;
@@ -96,5 +97,12 @@ const char* AARCH64RegisterName(AARCH64Register* reg, int size, char* buf, size_
 
 // True if the allocator gives |inst|'s result a floating point register.
 bool AARCH64HasFloatResult(TargetInstruction* inst);
+
+// How the shared allocator code reads AArch64 instructions.
+const TargetRAInfo* AARCH64RAInfo(void);
+
+// Allocates the current function with the shared coloring allocator.  Returns
+// false, leaving the function untouched, if it cannot.
+bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator);
 
 #endif /* arm_reg_alloc_h */
