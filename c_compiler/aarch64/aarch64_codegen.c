@@ -901,6 +901,7 @@ void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
   g->struct_return_spill_offset = 0;
+  g->colored = false;
   g->not_leaf = false;
   g->moves_sp = false;
   g->calls_move_sp = false;

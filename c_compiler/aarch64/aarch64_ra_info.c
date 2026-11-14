@@ -397,10 +397,6 @@ static TargetInstruction* NextInBlock(TargetBasicBlock* block,
            inst = NextInBlock(block_, inst))
 
 static const char* Unsupported(AARCH64Generator* g) {
-  if (g->base.exception_edges.length != 0 ||
-      g->exception_ranges.length != 0) {
-    return "exceptions";
-  }
   FOR_EACH_INSTRUCTION(&g->base, inst) {
     AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
     switch (op) {
@@ -517,5 +513,6 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
   }
   allocator->current_spilled_region_size = ctx.spill_size;
   allocator->max_spilled_region_size = ctx.spill_size;
+  g->colored = true;
   return true;
 }

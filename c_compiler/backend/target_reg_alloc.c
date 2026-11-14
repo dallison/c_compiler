@@ -120,6 +120,7 @@ typedef struct {
   size_t words;
   uint64_t* live_in;
   uint64_t* live_out;
+  bool* pads;  // Exception landing pads, by block id.
 
   HashSet edges;  // Interference edges, by EdgeKey.
   Vector moves;  // Move*.
@@ -559,6 +560,45 @@ static void ClearBit(uint64_t* bits, int i) {
   bits[i / 64] &= ~(UINT64_C(1) << (i % 64));
 }
 
+// The unwinder enters a landing pad from a call in a protected region and
+// skips what follows the call on the normal path.  So whatever the pad reads
+// is live on both sides of each call in a block that can reach it, even where
+// the call's result or a copy after it writes the same location.
+
+static void MarkLandingPads(RA* ra) {
+  TargetGenerator* gen = ra->gen;
+  size_t num_blocks = gen->basic_blocks.length;
+  ra->pads = calloc(num_blocks + 1, sizeof(bool));
+  for (size_t e = 0; e < gen->exception_edges.length; e++) {
+    const TargetExceptionEdge* edge = gen->exception_edges.value.p[e];
+    TargetBasicBlock* pad =
+        edge->catch_label == NULL ? NULL : edge->catch_label->block;
+    if (pad != NULL && pad->block_id < num_blocks) {
+      ra->pads[pad->block_id] = true;
+    }
+  }
+}
+
+// Sets |bits| to the nodes live into the landing pads |block| reaches, and
+// returns whether there are any.
+static bool PadLive(RA* ra, TargetBasicBlock* block, uint64_t* bits) {
+  size_t words = ra->words;
+  size_t num_blocks = ra->gen->basic_blocks.length;
+  memset(bits, 0, sizeof(uint64_t) * words);
+  bool any = false;
+  for (size_t s = 0; s < block->out_edges.length; s++) {
+    size_t succ = (size_t)block->out_edges.value.w[s];
+    if (succ < num_blocks && ra->pads[succ]) {
+      const uint64_t* in = ra->live_in + succ * words;
+      for (size_t w = 0; w < words; w++) {
+        bits[w] |= in[w];
+      }
+      any = true;
+    }
+  }
+  return any;
+}
+
 static void ComputeLiveness(RA* ra) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
@@ -566,17 +606,28 @@ static void ComputeLiveness(RA* ra) {
   ra->words = words;
   uint64_t* gen_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
   uint64_t* kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  // Nodes each block writes before its first call.
+  uint64_t* throw_kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  bool* calls = calloc(num_blocks + 1, sizeof(bool));
+  uint64_t* pad_live = calloc(words + 1, sizeof(uint64_t));
   uint64_t* live_in = calloc(num_blocks * words + 1, sizeof(uint64_t));
   ra->live_in = live_in;
   ra->live_out = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  MarkLandingPads(ra);
 
   for (int i = NumInsts(ra) - 1; i >= 0; i--) {
     const InstInfo* info = InstAt(ra, i);
     uint64_t* g = gen_bits + (size_t)info->block * words;
     uint64_t* k = kill_bits + (size_t)info->block * words;
+    uint64_t* tk = throw_kill_bits + (size_t)info->block * words;
+    if (gen->virtuals->is_call(info->inst)) {
+      calls[info->block] = true;
+      memset(tk, 0, sizeof(uint64_t) * words);
+    }
     for (int d = info->first_def; d < info->end_def; d++) {
       int n = IntAt(&ra->defs, (size_t)d);
       SetBit(k, n);
+      SetBit(tk, n);
       ClearBit(g, n);
     }
     for (int u = info->first_use; u < info->end_use; u++) {
@@ -606,8 +657,13 @@ static void ComputeLiveness(RA* ra) {
       uint64_t* in = live_in + bb * words;
       const uint64_t* g = gen_bits + bb * words;
       const uint64_t* k = kill_bits + bb * words;
+      const uint64_t* tk = throw_kill_bits + bb * words;
+      bool throws = calls[bb] && PadLive(ra, block, pad_live);
       for (size_t w = 0; w < words; w++) {
         uint64_t next = g[w] | (out[w] & ~k[w]);
+        if (throws) {
+          next |= pad_live[w] & ~tk[w];
+        }
         if (next != in[w]) {
           in[w] = next;
           changed = true;
@@ -617,6 +673,9 @@ static void ComputeLiveness(RA* ra) {
   }
   free(gen_bits);
   free(kill_bits);
+  free(throw_kill_bits);
+  free(calls);
+  free(pad_live);
 }
 
 // ---------------------------------------------------------------------------
@@ -660,14 +719,20 @@ static void BuildGraph(RA* ra) {
 
   size_t words = ra->words;
   uint64_t* live = malloc(sizeof(uint64_t) * (words + 1));
+  uint64_t* pad_live = malloc(sizeof(uint64_t) * (words + 1));
   int i = NumInsts(ra) - 1;
   for (size_t bb = num_blocks; bb-- > 0;) {
     if (i < 0 || InstAt(ra, i)->block != (int)bb) {
       continue;
     }
     memcpy(live, ra->live_out + bb * words, sizeof(uint64_t) * words);
+    bool reaches_pad = PadLive(ra, InstBlock(ra, i), pad_live);
     for (; i >= 0 && InstAt(ra, i)->block == (int)bb; i--) {
       const InstInfo* info = InstAt(ra, i);
+      bool throws = reaches_pad && gen->virtuals->is_call(info->inst);
+      for (size_t w = 0; throws && w < words; w++) {
+        live[w] |= pad_live[w];
+      }
       for (int d = info->first_def; d < info->end_def; d++) {
         int def = IntAt(&ra->defs, (size_t)d);
         bool grouped = InGroup(info, def);
@@ -693,12 +758,16 @@ static void BuildGraph(RA* ra) {
       for (int d = info->first_def; d < info->end_def; d++) {
         ClearBit(live, IntAt(&ra->defs, (size_t)d));
       }
+      for (size_t w = 0; throws && w < words; w++) {
+        live[w] |= pad_live[w];
+      }
       for (int u = info->first_use; u < info->end_use; u++) {
         SetBit(live, IntAt(&ra->uses, (size_t)u));
       }
     }
   }
   free(live);
+  free(pad_live);
 
   int keys[kMaxKeys];
   for (int v = TARGET_RA_FIXED_KEYS; v < NumNodes(ra); v++) {
@@ -1292,6 +1361,8 @@ static void FreeRound(RA* ra) {
   ra->live_in = NULL;
   free(ra->live_out);
   ra->live_out = NULL;
+  free(ra->pads);
+  ra->pads = NULL;
   HashSetDestruct(&ra->edges);
   VectorDestructWithContents(&ra->moves, NULL, /*free_element=*/true);
   VectorDestruct(&ra->simplify_list);
