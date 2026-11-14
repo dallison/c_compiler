@@ -76,8 +76,8 @@ typedef struct TargetRegAllocDesc {
   // dest.  |value| may also be a location.
   TargetInstruction* (*create_copy)(void* ctx, TargetInstruction* value,
                                     TargetInstruction* dest);
-  // A new stack slot for a value of |reg_class|.
-  int (*new_slot)(void* ctx, int reg_class);
+  // A new stack slot for |value|, which may also be a location.
+  int (*new_slot)(void* ctx, TargetInstruction* value);
   // A new store of |value| to |slot|.  The allocator inserts it.
   TargetInstruction* (*create_spill)(void* ctx, TargetInstruction* value,
                                      int slot);

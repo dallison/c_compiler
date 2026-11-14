@@ -1257,7 +1257,7 @@ static void RewriteSpills(RA* ra, const Vector* spilled) {
   for (size_t s = 0; s < spilled->length; s++) {
     Node* node = NodeAt(ra, IntAt(spilled, s));
     TargetInstruction* inst = node->inst;
-    int slot = ra->desc->new_slot(ra->desc->ctx, node->reg_class);
+    int slot = ra->desc->new_slot(ra->desc->ctx, inst);
     TargetInstruction* handle = NULL;
     if (ra->info->kind(inst) == kTargetRAValue) {
       handle = SpillValue(ra, &positions, inst, slot);

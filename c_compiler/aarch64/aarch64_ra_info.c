@@ -293,8 +293,21 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
   }
 }
 
+static bool IsVector128(TargetInstruction* inst) {
+  return RegClass(inst) == kFloatClass && OperandSize(inst) == kSize128Bit;
+}
+
+// A call preserves only the low 64 bits of v8-v15, so a 128-bit value stays
+// out of them, and one live across a call spills.
 static int ForbiddenKeys(TargetInstruction* inst, int* keys, int max_keys) {
-  return AvoidsArgRegs(inst) ? ArgumentKeys(keys, max_keys) : 0;
+  int n = AvoidsArgRegs(inst) ? ArgumentKeys(keys, max_keys) : 0;
+  if (IsVector128(inst)) {
+    for (int r = AARCH64_FP_SAVED_START;
+         r <= AARCH64_FP_SAVED_END && n < max_keys; r++) {
+      keys[n++] = kFloatKeyBase + r;
+    }
+  }
+  return n;
 }
 
 // These expand to a retry loop that loads the result before the store that
@@ -335,11 +348,23 @@ static TargetInstruction* CreateCopy(void* ctx, TargetInstruction* value,
   return copy;
 }
 
-static int NewSlot(void* ctx, int reg_class) {
-  (void)reg_class;
+static int SlotSize(TargetInstruction* value) {
+  return IsVector128(value) ? kSize128Bit : kSize64Bit;
+}
+
+// The emitter addresses slot |s| 8 + |s| bytes below the top of the spill
+// region, so slot |s| is the 8 bytes at depth |s| and a 16-byte slot at depth
+// |d| is numbered |d| + 8.
+static int NewSlot(void* ctx, TargetInstruction* value) {
   ColoringContext* c = ctx;
-  int slot = c->spill_size;
-  c->spill_size += 8;
+  if (SlotSize(value) != kSize128Bit) {
+    int slot = c->spill_size;
+    c->spill_size += 8;
+    return slot;
+  }
+  c->spill_size = (c->spill_size + 15) & ~15;
+  int slot = c->spill_size + 8;
+  c->spill_size += 16;
   return slot;
 }
 
@@ -350,7 +375,7 @@ static TargetInstruction* CreateSpill(void* ctx, TargetInstruction* value,
       (TargetOpcode)AARCH64_OP(spill), value,
       TargetGetIntConstant(&c->allocator->g->base, NULL, kTargetType32Bit,
                            slot));
-  SetInstructionSize(spill, kSize64Bit);
+  SetInstructionSize(spill, SlotSize(value));
   return spill;
 }
 
@@ -358,7 +383,7 @@ static TargetInstruction* CreateReload(void* ctx, TargetInstruction* spill) {
   (void)ctx;
   TargetInstruction* reload =
       TargetNewInstruction1((TargetOpcode)AARCH64_OP(reload), spill);
-  SetInstructionSize(reload, kSize64Bit);
+  SetInstructionSize(reload, GetRegisterSize(spill));
   if (RegClass(spill->operand[0]) == kFloatClass) {
     reload->flags |= AARCH64_INST_FP;
   }
@@ -450,10 +475,11 @@ static const char* Unsupported(AARCH64Generator* g) {
       default:
         break;
     }
-    if (op >= AARCH64_OP(vadd) && op <= AARCH64_OP(vfdiv)) {
-      return AARCH64OpcodeName((int)op);
-    }
-    if (Kind(inst) != kTargetRANone && GetRegisterSize(inst) == kSize128Bit) {
+    // Neither emitter copies all 128 bits of a register, so a 128-bit value
+    // must be one that never needs a copy.
+    if (Kind(inst) != kTargetRANone && GetRegisterSize(inst) == kSize128Bit &&
+        (!IsVector128(inst) || Kind(inst) != kTargetRAValue ||
+         inst->dest != NULL || IsMoveOpcode(op) || AARCH64IsCall(inst))) {
       return "128-bit";
     }
   }
