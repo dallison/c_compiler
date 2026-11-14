@@ -147,6 +147,29 @@ static void HoistToPreheader(Generator* gen, const LoopInfo* loop,
   BasicBlockMoveInstructionBefore(gen, inst, preheader->end_code);
 }
 
+// GVN keeps identical `base + small constant` nodes apart so that each can
+// fold into the accesses that use it.  The ones hoisted here did not fold, so
+// in the preheader they can share one register.
+static IRNode* FindHoistedTwin(const LoopInfo* loop, Set* moved,
+                               IRNode* inst) {
+  if (inst->opcode != IR_OP(adda) || inst->inputs.length != 2) {
+    return NULL;
+  }
+  BasicBlock* preheader = loop->preheader;
+  for (IRNode* other = BasicBlockBegin(preheader);
+       !BasicBlockIsEmpty(preheader) && other != BasicBlockEnd(preheader);
+       other = IRNext(other)) {
+    if (other->opcode == inst->opcode && other->inputs.length == 2 &&
+        other->inputs.value.p[0] == inst->inputs.value.p[0] &&
+        other->inputs.value.p[1] == inst->inputs.value.p[1] &&
+        other->flags == inst->flags && TypeEqual(other->type, inst->type) &&
+        SetContains(moved, other)) {
+      return other;
+    }
+  }
+  return NULL;
+}
+
 static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
   // Nested loops are eligible: inner preheaders sit inside the parent, so an
   // invariant moved inward can be considered again for the enclosing loop.
@@ -171,8 +194,14 @@ static bool HoistLoopInvariants(Generator* gen, LoopInfo* loop, Set* moved) {
            inst = next) {
         next = IRNext(inst);
         if (IsHoistCandidate(gen, loop, effects, moved, inst)) {
-          HoistToPreheader(gen, loop, inst);
-          SetInsert(moved, inst);
+          IRNode* twin = FindHoistedTwin(loop, moved, inst);
+          if (twin != NULL) {
+            GeneratorReplaceInstruction(gen, inst, twin);
+            BasicBlockRemoveInstruction(gen, block, inst);
+          } else {
+            HoistToPreheader(gen, loop, inst);
+            SetInsert(moved, inst);
+          }
           local_change = true;
           changed = true;
         }

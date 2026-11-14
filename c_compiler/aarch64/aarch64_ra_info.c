@@ -144,6 +144,18 @@ typedef struct {
   int spill_size;
 } ColoringContext;
 
+// The atomic pseudos keep their size and memory orders in the flag bits that
+// other instructions use for their register constraints.  Their results are
+// all integers.
+static bool IsAtomic(TargetInstruction* inst) {
+  AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+  return op >= AARCH64_OP(atomic_load) && op <= AARCH64_OP(atomic_fence);
+}
+
+static bool AvoidsArgRegs(TargetInstruction* inst) {
+  return !IsAtomic(inst) && (inst->flags & AARCH64_INST_AVOID_ARG_REGS) != 0;
+}
+
 static int RegClass(TargetInstruction* inst) {
   if ((AARCH64Opcode)inst->opcode == AARCH64_OP(reload)) {
     return RegClass(inst->operand[0]->operand[0]);
@@ -151,6 +163,9 @@ static int RegClass(TargetInstruction* inst) {
   if (AARCH64IsCall(inst)) {
     return (inst->flags & AARCH64_INST_FP_RETURN) != 0 ? kFloatClass
                                                        : kIntClass;
+  }
+  if (IsAtomic(inst)) {
+    return kIntClass;
   }
   return AARCH64HasFloatResult(inst) ? kFloatClass : kIntClass;
 }
@@ -279,10 +294,24 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
 }
 
 static int ForbiddenKeys(TargetInstruction* inst, int* keys, int max_keys) {
-  if ((inst->flags & AARCH64_INST_AVOID_ARG_REGS) == 0) {
-    return 0;
+  return AvoidsArgRegs(inst) ? ArgumentKeys(keys, max_keys) : 0;
+}
+
+// These expand to a retry loop that loads the result before the store that
+// reads the operands again.
+static bool EarlyClobber(TargetInstruction* inst) {
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(atomic_fetch_add):
+    case AARCH64_OP(atomic_fetch_sub):
+    case AARCH64_OP(atomic_add_fetch):
+    case AARCH64_OP(atomic_sub_fetch):
+    case AARCH64_OP(atomic_compare_exchange_bool):
+    case AARCH64_OP(atomic_compare_exchange_val):
+    case AARCH64_OP(atomic_compare_exchange_n):
+      return true;
+    default:
+      return false;
   }
-  return ArgumentKeys(keys, max_keys);
 }
 
 static TargetInstruction* CreateCopy(void* ctx, TargetInstruction* value,
@@ -349,7 +378,9 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
       &location->base,
       (TargetOpcode)(fp ? AARCH64_OP(fvarreg) : AARCH64_OP(ivarreg)));
   SetInstructionSize(&location->base, size);
-  location->base.flags |= like->flags & AARCH64_INST_AVOID_ARG_REGS;
+  if (AvoidsArgRegs(like)) {
+    location->base.flags |= AARCH64_INST_AVOID_ARG_REGS;
+  }
   TargetTrackOrphanInstruction(&c->allocator->g->base, &location->base);
   return &location->base;
 }
@@ -419,8 +450,7 @@ static const char* Unsupported(AARCH64Generator* g) {
       default:
         break;
     }
-    if ((op >= AARCH64_OP(atomic_load) && op <= AARCH64_OP(atomic_fence)) ||
-        (op >= AARCH64_OP(vadd) && op <= AARCH64_OP(vfdiv))) {
+    if (op >= AARCH64_OP(vadd) && op <= AARCH64_OP(vfdiv)) {
       return AARCH64OpcodeName((int)op);
     }
     if (Kind(inst) != kTargetRANone && GetRegisterSize(inst) == kSize128Bit) {
@@ -467,6 +497,7 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
       .reads_through = ReadsThrough,
       .implicit_uses = ImplicitUses,
       .forbidden_keys = ForbiddenKeys,
+      .early_clobber = EarlyClobber,
       .create_copy = CreateCopy,
       .new_slot = NewSlot,
       .create_spill = CreateSpill,

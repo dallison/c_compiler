@@ -92,6 +92,7 @@ typedef struct {
   // source, the instruction's own result and its dest.
   int group[3];
   bool converting;  // A copy whose two sides must differ.
+  bool early_clobber;  // Its register must differ from its operands'.
 } InstInfo;
 
 typedef struct {
@@ -404,10 +405,26 @@ static const char* Unsupported(RA* ra) {
 // A call's result arrives in a fixed register that the next call clobbers, so
 // it cannot be colored like other values.  Every read of it goes through a
 // copy placed right after it, which coalescing removes when it can.
+//
+// A value that clobbers its operands early writes its dest through a copy
+// too, since the dest may be one of the operands.
+
+static bool EarlyClobber(RA* ra, TargetInstruction* inst) {
+  return ra->desc->early_clobber != NULL && ra->desc->early_clobber(inst);
+}
 
 static void CopyFixedValues(RA* ra) {
   for (int i = 0; i < NumInsts(ra); i++) {
     TargetInstruction* inst = InstOf(ra, i);
+    if (WritesRegister(ra, inst) && inst->dest != NULL &&
+        EarlyClobber(ra, inst)) {
+      TargetInstruction* copy =
+          ra->desc->create_copy(ra->desc->ctx, inst, inst->dest);
+      inst->dest = NULL;
+      TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
+      TargetRAIndexInsert(&ra->transparent, copy, 1);
+      continue;
+    }
     if (!WritesRegister(ra, inst) || ra->desc->fixed_value_key(inst) < 0 ||
         (!IsRead(ra, inst) && inst->dest == NULL)) {
       continue;
@@ -544,6 +561,7 @@ static void BuildNodes(RA* ra) {
         }
       }
       AddMove(ra, own, dest, weight);
+      info->early_clobber = EarlyClobber(ra, inst);
     }
     info->end_def = (int)ra->defs.length;
   }
@@ -753,6 +771,12 @@ static void BuildGraph(RA* ra) {
           if (src >= 0) {
             AddEdge(ra, IntAt(&ra->defs, (size_t)d), src);
           }
+        }
+      }
+      for (int d = info->first_def; info->early_clobber && d < info->end_def;
+           d++) {
+        for (int u = info->first_use; u < info->end_use; u++) {
+          AddEdge(ra, IntAt(&ra->defs, (size_t)d), IntAt(&ra->uses, (size_t)u));
         }
       }
       for (int d = info->first_def; d < info->end_def; d++) {

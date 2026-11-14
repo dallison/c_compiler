@@ -64,6 +64,10 @@ typedef struct TargetRegAllocDesc {
                        int max_keys);
   // Physical keys |inst|'s register must avoid.  Returns how many it stored.
   int (*forbidden_keys)(TargetInstruction* inst, int* keys, int max_keys);
+  // Whether |inst| writes its register before it has finished reading its
+  // operands, as a pseudo that expands to a loop can, so that the register
+  // must differ from all of theirs.  May be NULL.
+  bool (*early_clobber)(TargetInstruction* inst);
 
   // A new copy of |value| that also writes |dest| when it is not NULL.  The
   // allocator inserts it, possibly between a compare and the branch that
