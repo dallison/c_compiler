@@ -389,6 +389,7 @@ davecc_library(davecc_compiler
   c_compiler/risc_v/risc_v_codegen.c
   c_compiler/risc_v/risc_v_emitter.c
   c_compiler/risc_v/risc_v_optimize.c
+  c_compiler/risc_v/risc_v_ra_info.c
   c_compiler/risc_v/risc_v_reg_alloc.c
   c_compiler/risc_v/risc_v_target.c
   c_compiler/risc_v32/risc_v32_assembler.c

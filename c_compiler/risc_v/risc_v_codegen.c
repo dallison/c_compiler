@@ -887,6 +887,8 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   rv->tmp2 = NULL;
   rv->not_leaf = false;
   rv->stages_tail_target = false;
+  rv->try_coloring = false;
+  rv->colored = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
@@ -1485,6 +1487,9 @@ static RVOpcode IR2RV(IROpcode op) {
 }
 
 static int MaxIntRegisterVariables(RVGenerator* rv) {
+  if (rv->try_coloring) {
+    return INT_MAX;
+  }
   bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
   if (is_leaf) {
     return RV_LAST_LEAF_INT_REG_VAR - RV_FIRST_LEAF_INT_REG_VAR + 1;
@@ -1493,6 +1498,9 @@ static int MaxIntRegisterVariables(RVGenerator* rv) {
 }
 
 static int MaxFpRegisterVariables(RVGenerator* rv) {
+  if (rv->try_coloring) {
+    return INT_MAX;
+  }
   bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
   if (is_leaf) {
     return RV_LAST_LEAF_FP_REG_VAR - RV_FIRST_LEAF_FP_REG_VAR + 1;
@@ -1522,8 +1530,8 @@ static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
     return false;
   }
 
-  // Register variables are assigned to a fixed pool of dedicated registers.
-  // If we run out, keep the variable on the stack.
+  // The dominator walk assigns register variables to a fixed pool of
+  // dedicated registers.  If we run out, keep the variable on the stack.
   if (TypeUsesHardwareFloatRegister(var_node->type)) {
     return rv->num_fp_reg_vars < MaxFpRegisterVariables(rv);
   }
@@ -5602,8 +5610,22 @@ static void LowerVariables(RVGenerator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
+// The coloring allocator leaves inline assembly and vector code to the
+// dominator walk.
+static bool ColoringHandlesFunction(Generator* gen) {
+  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
+       node = IRNext(node)) {
+    if (node->opcode == IR_OP(asm) ||
+        (node->opcode >= IR_OP(vadd) && node->opcode <= IR_OP(vcmpgeu))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void RVLower(RVGenerator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
+  rv->try_coloring = RVUseColoringAllocator(rv) && ColoringHandlesFunction(gen);
   
   // If the function returns in memory, allocate the struct result
   // register now.

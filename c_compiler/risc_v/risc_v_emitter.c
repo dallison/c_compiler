@@ -610,7 +610,7 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
   DecrementStackPointer(emitter, StackFrameSize(emitter), fp);
 
   int struct_return_phys = -1;
-  if (emitter->rv->struct_return_reg >= 0) {
+  if (emitter->rv->struct_return_reg >= 0 && !emitter->rv->colored) {
     bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
                    !emitter->rv->not_leaf;
     struct_return_phys =
@@ -683,7 +683,8 @@ static void PrintRmov(RVEmitter* emitter, TargetInstruction* inst, FILE* fp) {
 static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
   TargetInstruction* src = inst->operand[0];
   assert(src != NULL);
-  if (src->block == NULL) {
+  // The variable registers the coloring allocator creates are in no block.
+  if (src->block == NULL && !RVIsVarRegister(src)) {
     return;
   }
   if (src->reg == NULL) {

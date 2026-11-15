@@ -889,7 +889,8 @@ static void PrintExtendedAsm(FILE* fp, AARCH64AsmInstruction* inst,
 static void PrintDestMove(AARCH64Emitter* emitter, TargetInstruction* inst,
                           FILE* fp) {
   TargetInstruction* src = inst->operand[0];
-  if (src == NULL || src->block == NULL) {
+  // The variable registers the coloring allocator creates are in no block.
+  if (src == NULL || (src->block == NULL && !AARCH64IsVarRegister(src))) {
     return;
   }
   int reg_size = GetRegisterSize(inst);

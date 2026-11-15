@@ -9,6 +9,7 @@
 #include "risc_v_reg_alloc.h"
 #include <assert.h>
 #include <limits.h>
+#include <string.h>
 #include "risc_v_codegen.h"
 #include "risc_v_machine.h"
 #include "target_basic_block.h"
@@ -791,6 +792,10 @@ static RVRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
       }
       return kRVRegTypeInt;
   }
+}
+
+RVRegisterType RVResultRegisterType(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst);
 }
 
 // Can we use a temp register?  If not we will have to use a saved one and
@@ -2204,7 +2209,38 @@ static TargetInstruction* CreateCallResultCopy(TargetInstruction* call) {
   return TargetNewInstruction1(move_opcode, call);
 }
 
+// The coloring allocator is the default from -O1; at -O0 the dominator walk is
+// faster and DAVECC_NEW_RA selects coloring anyway.  DAVECC_OLD_RA selects the
+// dominator walk at every level.  For bisecting, DAVECC_NEW_RA_FUNC limits the
+// coloring allocator to one function and DAVECC_NEW_RA_LIMIT to the first n
+// functions compiled.
+bool RVUseColoringAllocator(struct RVGenerator* rv) {
+  if (getenv("DAVECC_OLD_RA") != NULL ||
+      (!OptLevel1() && getenv("DAVECC_NEW_RA") == NULL)) {
+    return false;
+  }
+  const char* only = getenv("DAVECC_NEW_RA_FUNC");
+  if (only != NULL && strcmp(only, rv->base.function_name.value) != 0) {
+    return false;
+  }
+  const char* limit = getenv("DAVECC_NEW_RA_LIMIT");
+  if (limit != NULL) {
+    static int count;
+    return count++ < atoi(limit);
+  }
+  return true;
+}
+
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
+  if (allocator->rv->try_coloring) {
+    if (RVAllocateRegistersByColoring(allocator)) {
+      return;
+    }
+    // RVOptimize leaves the inputs and outputs stale for the coloring
+    // allocator.
+    TargetBuildBasicBlockInputsAndOutputs(&allocator->rv->base);
+  }
+
   // t1 and t2 are required as untracked scratch registers by the atomic
   // emitter, while t2 also stages indirect call targets.  Functions without
   // those hazards can use them for ordinary short-lived values.
