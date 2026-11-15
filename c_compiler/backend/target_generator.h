@@ -99,6 +99,7 @@ typedef struct TargetInstruction {
   TargetOpcode opcode;
   int id;                     // Unique instruction id.
   int call_epoch;             // Scratch epoch for call-crossing analysis.
+  int ra_slot;                // Scratch index for the coloring allocator.
   struct TargetInstruction* dest;  // Optional destination.
   struct TargetRegister* reg;  // Register assigned by register allocator.
   struct TargetInstruction* operand[TARGET_MAX_OPERANDS];

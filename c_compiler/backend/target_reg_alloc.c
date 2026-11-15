@@ -21,9 +21,18 @@ enum {
   kMaxKeys = 96,       // Clobbers, implicit uses or forbidden keys.
   kMaxReadDepth = 32,  // Operands read through, such as an argument chain.
   kMaxRounds = 32,
+  kChunkBits = 8,
+  kChunk = 1 << kChunkBits,
+  kFirstNeighbors = 16,  // Room a node's adjacency list starts with.
+  // Beyond this many nodes, the edges go in a set rather than a bit matrix.
+  kMaxMatrixNodes = 4096,
 };
 
 #define kUnspillableCost 1e30
+
+// The physical registers fill whole words of a live set.
+typedef char FixedKeysFillWords[TARGET_RA_FIXED_KEYS % 64 == 0 ? 1 : -1];
+
 
 static void AppendInt(Vector* vec, int x) {
   VectorAppend(vec, (void*)(intptr_t)x);
@@ -32,6 +41,34 @@ static void AppendInt(Vector* vec, int x) {
 static int IntAt(const Vector* vec, size_t i) { return (int)vec->value.w[i]; }
 
 static int PopInt(Vector* vec) { return (int)vec->value.w[--vec->length]; }
+
+// Elements of one size kept kChunk to a block, so that a pointer to one
+// stays valid as more are added.
+typedef struct {
+  Vector chunks;
+  int length;
+} ChunkArray;
+
+static void* ChunkAt(const ChunkArray* array, int i, size_t size) {
+  char* chunk = array->chunks.value.p[i >> kChunkBits];
+  return chunk + size * (size_t)(i & (kChunk - 1));
+}
+
+// Adds a zeroed element.  An array whose length was reset reuses its chunks.
+static void* ChunkAdd(ChunkArray* array, size_t size) {
+  int i = array->length++;
+  if ((size_t)(i >> kChunkBits) == array->chunks.length) {
+    VectorAppend(&array->chunks, malloc(size * kChunk));
+  }
+  void* p = ChunkAt(array, i, size);
+  memset(p, 0, size);
+  return p;
+}
+
+static void ChunkFree(ChunkArray* array) {
+  VectorDestructWithContents(&array->chunks, NULL, /*free_element=*/true);
+  array->length = 0;
+}
 
 // Interference edges are keyed once, by low << 32 | high.
 static uint64_t EdgeKey(int a, int b) {
@@ -78,6 +115,8 @@ typedef struct {
   double cost;
   Vector adj;    // Neighbors.
   Vector moves;  // Indices of the moves this node takes part in.
+  // The physical registers among its neighbors, by key.
+  uint64_t fixed_adj[TARGET_RA_FIXED_KEYS / 64];
 } Node;
 
 typedef struct {
@@ -91,9 +130,26 @@ typedef struct {
   // Nodes that hold one value just after the instruction executes: the copy
   // source, the instruction's own result and its dest.
   int group[3];
-  bool converting;  // A copy whose two sides must differ.
+  // For a copy whose two sides must differ, its source; otherwise kNoNode.
+  int converted;
   bool early_clobber;  // Its register must differ from its operands'.
 } InstInfo;
+
+// What the allocator keeps about an instruction it has met.  The instruction
+// holds its index in RA::slots, which counts only if the slot names it back,
+// so an index left from another function or copied with the instruction is
+// harmless.
+typedef struct {
+  TargetInstruction* inst;
+  int reads;     // Operand reads, as of the last CountAllReads.
+  int node;      // Its node in the current round, or kNoNode.
+  int position;  // Its index in RA::insts, or -1.
+  TargetInstruction* fixed_copy;  // The copy CopyFixedValues reads it through.
+  bool unspillable;  // A value the spill code gave a short range.
+  bool spilled_location;
+  bool transparent;  // A copy added for a value in a fixed register.
+  bool split_copy;   // A copy joining the two sides of a split.
+} Slot;
 
 typedef struct {
   TargetGenerator* gen;
@@ -103,17 +159,11 @@ typedef struct {
   int key_index[TARGET_RA_FIXED_KEYS];  // Position in its class's regs.
   int k[TARGET_RA_MAX_CLASSES];
 
-  // Kept from one round to the next.
-  TargetRAIndex unspillable;  // Values the spill code gave short ranges.
-  TargetRAIndex spilled_locations;
-  TargetRAIndex transparent;  // Copies added for values in fixed registers.
-  TargetRAIndex split_copies;  // Copies joining the two sides of a split.
-  Vector insts;  // InstInfo*, in block order.
+  ChunkArray slots;  // Slot.
+  ChunkArray insts;  // InstInfo, in block order.
 
-  TargetRAIndex reads;       // Value -> number of operand reads.
-  TargetRAIndex node_index;  // Value or location -> node.
-  // Node*.  The first TARGET_RA_FIXED_KEYS are the physical registers.
-  Vector nodes;
+  // Node.  The first TARGET_RA_FIXED_KEYS are the physical registers.
+  ChunkArray nodes;
   Vector uses;  // Nodes each instruction reads.
   Vector defs;  // Nodes each instruction writes.
 
@@ -123,8 +173,12 @@ typedef struct {
   uint64_t* live_out;
   bool* pads;  // Exception landing pads, by block id.
 
-  HashSet edges;  // Interference edges, by EdgeKey.
-  Vector moves;  // Move*.
+  // Interference edges between nodes that are not physical registers: a
+  // triangular bit matrix by MatrixBit, or for a large function a set by
+  // EdgeKey.  Node::fixed_adj holds the edges to physical registers.
+  uint64_t* matrix;
+  HashSet edges;
+  ChunkArray moves;  // Move.
   Vector simplify_list;
   Vector freeze_list;
   Vector spill_list;
@@ -135,9 +189,45 @@ typedef struct {
   TargetRegAllocStats stats;
 } RA;
 
-static InstInfo* InstAt(RA* ra, int i) { return ra->insts.value.p[i]; }
+static InstInfo* InstAt(RA* ra, int i) {
+  return ChunkAt(&ra->insts, i, sizeof(InstInfo));
+}
 
-static int NumInsts(RA* ra) { return (int)ra->insts.length; }
+static int NumInsts(RA* ra) { return ra->insts.length; }
+
+static Slot* SlotAt(RA* ra, int s) {
+  return ChunkAt(&ra->slots, s, sizeof(Slot));
+}
+
+// The slot of |inst|, or NULL if it has none.
+static Slot* FindSlot(RA* ra, const TargetInstruction* inst) {
+  int s = inst->ra_slot;
+  return s >= 0 && s < ra->slots.length && SlotAt(ra, s)->inst == inst
+             ? SlotAt(ra, s)
+             : NULL;
+}
+
+// The slot of |inst|, made if need be.
+static Slot* GetSlot(RA* ra, TargetInstruction* inst) {
+  Slot* slot = FindSlot(ra, inst);
+  if (slot != NULL) {
+    return slot;
+  }
+  inst->ra_slot = ra->slots.length;
+  slot = ChunkAdd(&ra->slots, sizeof(Slot));
+  *slot = (Slot){.inst = inst, .node = kNoNode, .position = -1};
+  return slot;
+}
+
+static int Position(RA* ra, const TargetInstruction* inst) {
+  const Slot* slot = FindSlot(ra, inst);
+  return slot == NULL ? -1 : slot->position;
+}
+
+static bool IsUnspillable(RA* ra, const TargetInstruction* inst) {
+  const Slot* slot = FindSlot(ra, inst);
+  return slot != NULL && slot->unspillable;
+}
 
 static TargetInstruction* InstOf(RA* ra, int i) { return InstAt(ra, i)->inst; }
 
@@ -145,14 +235,63 @@ static TargetBasicBlock* InstBlock(RA* ra, int i) {
   return ra->gen->basic_blocks.value.p[InstAt(ra, i)->block];
 }
 
-static Node* NodeAt(RA* ra, int n) { return ra->nodes.value.p[n]; }
+static Node* NodeAt(RA* ra, int n) {
+  return ChunkAt(&ra->nodes, n, sizeof(Node));
+}
 
-static int NumNodes(RA* ra) { return (int)ra->nodes.length; }
+static int NumNodes(RA* ra) { return ra->nodes.length; }
 
-static Move* MoveAt(RA* ra, int m) { return ra->moves.value.p[m]; }
+static Move* MoveAt(RA* ra, int m) {
+  return ChunkAt(&ra->moves, m, sizeof(Move));
+}
+
+static bool IsPrecolored(int n) { return n < TARGET_RA_FIXED_KEYS; }
+
+// The bit for the edge between |a| and |b|, which differ and are not physical
+// registers.
+static size_t MatrixBit(int a, int b) {
+  size_t lo = (size_t)((a < b ? a : b) - TARGET_RA_FIXED_KEYS);
+  size_t hi = (size_t)((a < b ? b : a) - TARGET_RA_FIXED_KEYS);
+  return hi * (hi - 1) / 2 + lo;
+}
+
+// Where the edge between |a| and |b|, which differ and are not both physical
+// registers, is kept: a word and a bit in it.
+static uint64_t* EdgeWord(RA* ra, int a, int b, uint64_t* mask) {
+  if (IsPrecolored(a) || IsPrecolored(b)) {
+    int key = IsPrecolored(a) ? a : b;
+    *mask = UINT64_C(1) << (key % 64);
+    return &NodeAt(ra, IsPrecolored(a) ? b : a)->fixed_adj[key / 64];
+  }
+  size_t bit = MatrixBit(a, b);
+  *mask = UINT64_C(1) << (bit % 64);
+  return &ra->matrix[bit / 64];
+}
 
 static bool Interferes(RA* ra, int a, int b) {
-  return HashSetContains(&ra->edges, EdgeKey(a, b));
+  if (a == b || (IsPrecolored(a) && IsPrecolored(b))) {
+    return false;
+  }
+  if (ra->matrix == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
+    return HashSetContains(&ra->edges, EdgeKey(a, b));
+  }
+  uint64_t mask;
+  return (*EdgeWord(ra, a, b, &mask) & mask) != 0;
+}
+
+// Records the edge between |a| and |b|, which differ and are not both
+// physical registers, and returns whether it is new.
+static bool InsertEdge(RA* ra, int a, int b) {
+  if (ra->matrix == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
+    return HashSetInsert(&ra->edges, EdgeKey(a, b));
+  }
+  uint64_t mask;
+  uint64_t* word = EdgeWord(ra, a, b, &mask);
+  if ((*word & mask) != 0) {
+    return false;
+  }
+  *word |= mask;
+  return true;
 }
 
 static TargetBasicBlock* BlockAt(TargetGenerator* gen, size_t b) {
@@ -167,8 +306,6 @@ static TargetInstruction* NextInBlock(TargetBasicBlock* block,
                                       TargetInstruction* inst) {
   return inst == block->end_code ? NULL : TargetNext(inst);
 }
-
-static bool IsPrecolored(int n) { return n < TARGET_RA_FIXED_KEYS; }
 
 static int FixedKey(RA* ra, TargetInstruction* inst) {
   int key = ra->info->location_key(inst);
@@ -186,7 +323,8 @@ static bool IsLocation(RA* ra, TargetInstruction* inst) {
 }
 
 static bool IsSpilledLocation(RA* ra, TargetInstruction* inst) {
-  return TargetRAIndexFind(&ra->spilled_locations, inst) >= 0;
+  const Slot* slot = FindSlot(ra, inst);
+  return slot != NULL && slot->spilled_location;
 }
 
 // A location still held in a register.
@@ -202,7 +340,7 @@ static bool WritesRegister(RA* ra, TargetInstruction* inst) {
 
 static int NewNode(RA* ra, TargetInstruction* inst, int reg_class) {
   int n = NumNodes(ra);
-  Node* node = calloc(1, sizeof(Node));
+  Node* node = ChunkAdd(&ra->nodes, sizeof(Node));
   node->inst = inst;
   node->reg_class = reg_class;
   node->alias = n;
@@ -214,16 +352,15 @@ static int NewNode(RA* ra, TargetInstruction* inst, int reg_class) {
     node->state = kNodeInitial;
     node->color = -1;
   }
-  VectorInit(&node->adj);
-  VectorInit(&node->moves);
-  VectorAppend(&ra->nodes, node);
   return n;
 }
 
-static void DestructNode(void* p) {
-  Node* node = p;
-  VectorDestruct(&node->adj);
-  VectorDestruct(&node->moves);
+static void FreeNodes(RA* ra) {
+  for (int n = 0; n < NumNodes(ra); n++) {
+    VectorDestruct(&NodeAt(ra, n)->adj);
+    VectorDestruct(&NodeAt(ra, n)->moves);
+  }
+  ChunkFree(&ra->nodes);
 }
 
 static int LocationNode(RA* ra, TargetInstruction* location) {
@@ -234,10 +371,10 @@ static int LocationNode(RA* ra, TargetInstruction* location) {
   if (IsSpilledLocation(ra, location)) {
     return kNoNode;
   }
-  int n = TargetRAIndexFind(&ra->node_index, location);
+  int n = GetSlot(ra, location)->node;
   if (n < 0) {
     n = NewNode(ra, location, ra->desc->reg_class(location));
-    TargetRAIndexInsert(&ra->node_index, location, n);
+    GetSlot(ra, location)->node = n;
   }
   return n;
 }
@@ -247,7 +384,8 @@ static int ValueNode(RA* ra, TargetInstruction* value) {
   if (key >= 0) {
     return TrackedKey(ra, key);
   }
-  return TargetRAIndexFind(&ra->node_index, value);
+  const Slot* slot = FindSlot(ra, value);
+  return slot == NULL ? kNoNode : slot->node;
 }
 
 static int OperandNode(RA* ra, TargetInstruction* op) {
@@ -271,21 +409,27 @@ static bool ReadsThrough(RA* ra, TargetInstruction* op, int depth) {
 
 static void CollectInstructions(RA* ra) {
   TargetGenerator* gen = ra->gen;
+  ra->insts.length = 0;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* block = BlockAt(gen, b);
     for (TargetInstruction* inst = block == NULL ? NULL : block->code;
          inst != NULL; inst = NextInBlock(block, inst)) {
-      InstInfo* info = calloc(1, sizeof(InstInfo));
+      GetSlot(ra, inst)->position = NumInsts(ra);
+      InstInfo* info = ChunkAdd(&ra->insts, sizeof(InstInfo));
       info->inst = inst;
       info->block = (int)b;
       info->group[0] = info->group[1] = info->group[2] = kNoNode;
-      VectorAppend(&ra->insts, info);
+      info->converted = kNoNode;
     }
   }
 }
 
+// Ends the use of RA::insts, whose storage is kept for the next round.
 static void FreeInstructions(RA* ra) {
-  VectorDestructWithContents(&ra->insts, NULL, /*free_element=*/true);
+  for (int i = 0; i < NumInsts(ra); i++) {
+    GetSlot(ra, InstOf(ra, i))->position = -1;
+  }
+  ra->insts.length = 0;
 }
 
 static void CountReads(RA* ra, TargetInstruction* op, int depth) {
@@ -293,8 +437,7 @@ static void CountReads(RA* ra, TargetInstruction* op, int depth) {
     return;
   }
   if (ra->info->kind(op) == kTargetRAValue) {
-    int n = TargetRAIndexFind(&ra->reads, op);
-    TargetRAIndexInsert(&ra->reads, op, n < 0 ? 1 : n + 1);
+    GetSlot(ra, op)->reads++;
     return;
   }
   if (ReadsThrough(ra, op, depth)) {
@@ -305,7 +448,9 @@ static void CountReads(RA* ra, TargetInstruction* op, int depth) {
 }
 
 static void CountAllReads(RA* ra) {
-  TargetRAIndexInit(&ra->reads, (size_t)NumInsts(ra));
+  for (int s = 0; s < ra->slots.length; s++) {
+    SlotAt(ra, s)->reads = 0;
+  }
   for (int i = 0; i < NumInsts(ra); i++) {
     for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
       CountReads(ra, InstOf(ra, i)->operand[op], 0);
@@ -314,7 +459,8 @@ static void CountAllReads(RA* ra) {
 }
 
 static bool IsRead(RA* ra, TargetInstruction* value) {
-  return TargetRAIndexFind(&ra->reads, value) > 0;
+  const Slot* slot = FindSlot(ra, value);
+  return slot != NULL && slot->reads > 0;
 }
 
 // Whether a value is read in its own right and so gets its own node, rather
@@ -325,11 +471,13 @@ static bool HasOwnNode(RA* ra, TargetInstruction* inst) {
 }
 
 static bool IsTransparentCopy(RA* ra, TargetInstruction* inst) {
-  return TargetRAIndexFind(&ra->transparent, inst) >= 0;
+  const Slot* slot = FindSlot(ra, inst);
+  return slot != NULL && slot->transparent;
 }
 
 static bool IsSplitCopy(RA* ra, TargetInstruction* inst) {
-  return TargetRAIndexFind(&ra->split_copies, inst) >= 0;
+  const Slot* slot = FindSlot(ra, inst);
+  return slot != NULL && slot->split_copy;
 }
 
 static TargetRACopyKind CopyKind(RA* ra, TargetInstruction* inst) {
@@ -339,28 +487,19 @@ static TargetRACopyKind CopyKind(RA* ra, TargetInstruction* inst) {
   return ra->desc->copy_kind(inst);
 }
 
-// Map from each instruction to its index in RA::insts.
-static void IndexPositions(RA* ra, TargetRAIndex* positions) {
-  TargetRAIndexInit(positions, (size_t)NumInsts(ra));
-  for (int i = 0; i < NumInsts(ra); i++) {
-    TargetRAIndexInsert(positions, InstOf(ra, i), i);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // The IR the allocator accepts.
 
-static bool ReadsOrphan(RA* ra, const TargetRAIndex* positions,
-                        TargetInstruction* op, int depth) {
+static bool ReadsOrphan(RA* ra, TargetInstruction* op, int depth) {
   if (op == NULL) {
     return false;
   }
   if (ra->info->kind(op) == kTargetRAValue) {
-    return WritesRegister(ra, op) && TargetRAIndexFind(positions, op) < 0;
+    return WritesRegister(ra, op) && Position(ra, op) < 0;
   }
   if (ReadsThrough(ra, op, depth)) {
     for (int i = 0; i < TARGET_MAX_OPERANDS; i++) {
-      if (ReadsOrphan(ra, positions, op->operand[i], depth + 1)) {
+      if (ReadsOrphan(ra, op->operand[i], depth + 1)) {
         return true;
       }
     }
@@ -368,7 +507,7 @@ static bool ReadsOrphan(RA* ra, const TargetRAIndex* positions,
   return false;
 }
 
-static const char* FindUnsupported(RA* ra, const TargetRAIndex* positions) {
+static const char* Unsupported(RA* ra) {
   for (int i = 0; i < NumInsts(ra); i++) {
     TargetInstruction* inst = InstOf(ra, i);
     if (ra->info->written_operand(inst) >= 0) {
@@ -383,20 +522,12 @@ static const char* FindUnsupported(RA* ra, const TargetRAIndex* positions) {
       }
     }
     for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
-      if (ReadsOrphan(ra, positions, inst->operand[op], 0)) {
+      if (ReadsOrphan(ra, inst->operand[op], 0)) {
         return "orphaned-read";
       }
     }
   }
   return NULL;
-}
-
-static const char* Unsupported(RA* ra) {
-  TargetRAIndex positions;
-  IndexPositions(ra, &positions);
-  const char* reason = FindUnsupported(ra, &positions);
-  TargetRAIndexDestruct(&positions);
-  return reason;
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +545,7 @@ static bool EarlyClobber(RA* ra, TargetInstruction* inst) {
 }
 
 static void CopyFixedValues(RA* ra) {
+  bool any = false;
   for (int i = 0; i < NumInsts(ra); i++) {
     TargetInstruction* inst = InstOf(ra, i);
     if (WritesRegister(ra, inst) && inst->dest != NULL &&
@@ -422,7 +554,7 @@ static void CopyFixedValues(RA* ra) {
           ra->desc->create_copy(ra->desc->ctx, inst, inst->dest);
       inst->dest = NULL;
       TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
-      TargetRAIndexInsert(&ra->transparent, copy, 1);
+      GetSlot(ra, copy)->transparent = true;
       continue;
     }
     if (!WritesRegister(ra, inst) || ra->desc->fixed_value_key(inst) < 0 ||
@@ -432,16 +564,20 @@ static void CopyFixedValues(RA* ra) {
     TargetInstruction* dest = inst->dest;
     TargetInstruction* copy = ra->desc->create_copy(ra->desc->ctx, inst, dest);
     inst->dest = NULL;
-    for (int u = 0; u < NumInsts(ra); u++) {
-      TargetInstruction* user = InstOf(ra, u);
-      for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
-        if (user->operand[op] == inst) {
-          TargetReplaceOperand(user, op, copy);
-        }
+    GetSlot(ra, inst)->fixed_copy = copy;
+    any = true;
+    TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
+    GetSlot(ra, copy)->transparent = true;
+  }
+  for (int u = 0; any && u < NumInsts(ra); u++) {
+    TargetInstruction* user = InstOf(ra, u);
+    for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
+      const Slot* slot =
+          user->operand[op] == NULL ? NULL : FindSlot(ra, user->operand[op]);
+      if (slot != NULL && slot->fixed_copy != NULL) {
+        TargetReplaceOperand(user, op, slot->fixed_copy);
       }
     }
-    TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
-    TargetRAIndexInsert(&ra->transparent, copy, 1);
   }
 }
 
@@ -480,12 +616,11 @@ static Move* AddMove(RA* ra, int a, int b, int weight) {
       NodeAt(ra, a)->reg_class != NodeAt(ra, b)->reg_class) {
     return NULL;
   }
-  Move* m = malloc(sizeof(Move));
+  Move* m = ChunkAdd(&ra->moves, sizeof(Move));
   m->a = a;
   m->b = b;
   m->weight = weight;
   m->state = kMoveWorklist;
-  VectorAppend(&ra->moves, m);
   return m;
 }
 
@@ -494,12 +629,14 @@ static void BuildNodes(RA* ra) {
     NewNode(ra, NULL, ra->key_class[k]);
   }
   CountAllReads(ra);
-  TargetRAIndexInit(&ra->node_index, (size_t)NumInsts(ra));
+  for (int s = 0; s < ra->slots.length; s++) {
+    SlotAt(ra, s)->node = kNoNode;
+  }
   for (int i = 0; i < NumInsts(ra); i++) {
     TargetInstruction* inst = InstOf(ra, i);
     if (HasOwnNode(ra, inst)) {
       int n = NewNode(ra, inst, ra->desc->reg_class(inst));
-      TargetRAIndexInsert(&ra->node_index, inst, n);
+      GetSlot(ra, inst)->node = n;
     }
   }
 
@@ -553,11 +690,11 @@ static void BuildNodes(RA* ra) {
           // is a reload, or a value stored as soon as it is made, the copy
           // joins a short range instead and may go.
           if (m != NULL && own < 0 && IsSplitCopy(ra, inst) &&
-              TargetRAIndexFind(&ra->unspillable, inst->operand[0]) < 0) {
+              !IsUnspillable(ra, inst->operand[0])) {
             m->state = kMoveFrozen;
           }
         } else {
-          info->converting = true;
+          info->converted = src;
         }
       }
       AddMove(ra, own, dest, weight);
@@ -712,14 +849,20 @@ static void AddEdge(RA* ra, int a, int b) {
   if (pa && pb) {
     return;
   }
-  if (!HashSetInsert(&ra->edges, EdgeKey(a, b))) {
+  if (!InsertEdge(ra, a, b)) {
     return;
   }
   if (!pa) {
+    if (na->adj.capacity == 0) {
+      VectorReserve(&na->adj, kFirstNeighbors);
+    }
     AppendInt(&na->adj, b);
     na->degree++;
   }
   if (!pb) {
+    if (nb->adj.capacity == 0) {
+      VectorReserve(&nb->adj, kFirstNeighbors);
+    }
     AppendInt(&nb->adj, a);
     nb->degree++;
   }
@@ -730,10 +873,63 @@ static bool InGroup(const InstInfo* info, int n) {
                     info->group[2] == n);
 }
 
+// Adds the edges between the nodes in |live| and the run of physical
+// registers that |info| defines from |info|'s def |d|, and returns the end of
+// the run.  An edge to a register changes only the other node, so walking
+// |live| once for the whole run gives each node the edges, in the order, that
+// walking it once for each register would.  A run longer than the buffers
+// ends early, and the caller starts another.
+static int AddRegisterDefEdges(RA* ra, const InstInfo* info,
+                               const uint64_t* live, int d) {
+  // A run is at most the clobbers plus the result.
+  enum { kMaxRun = kMaxKeys + 2 };
+  int keys[TARGET_RA_MAX_CLASSES][kMaxRun];
+  bool grouped[TARGET_RA_MAX_CLASSES][kMaxRun];
+  int num_keys[TARGET_RA_MAX_CLASSES] = {0};
+  int end = d;
+  for (; end < info->end_def && IsPrecolored(IntAt(&ra->defs, (size_t)end));
+       end++) {
+    int key = IntAt(&ra->defs, (size_t)end);
+    int c = NodeAt(ra, key)->reg_class;
+    if (c < 0) {
+      continue;
+    }
+    if (num_keys[c] == kMaxRun) {
+      break;
+    }
+    keys[c][num_keys[c]] = key;
+    grouped[c][num_keys[c]] = InGroup(info, key);
+    num_keys[c]++;
+  }
+  for (size_t w = TARGET_RA_FIXED_KEYS / 64; w < ra->words; w++) {
+    uint64_t bits = live[w];
+    while (bits != 0) {
+      int l = (int)(w * 64) + __builtin_ctzll(bits);
+      bits &= bits - 1;
+      int c = NodeAt(ra, l)->reg_class;
+      if (c < 0) {
+        continue;
+      }
+      bool l_grouped = InGroup(info, l);
+      for (int k = 0; k < num_keys[c]; k++) {
+        if (!(grouped[c][k] && l_grouped)) {
+          AddEdge(ra, keys[c][k], l);
+        }
+      }
+    }
+  }
+  return end;
+}
+
 static void BuildGraph(RA* ra) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
-  HashSetInit(&ra->edges, (size_t)NumNodes(ra) * 8);
+  size_t n = (size_t)NumNodes(ra) - TARGET_RA_FIXED_KEYS;
+  if (n <= kMaxMatrixNodes) {
+    ra->matrix = calloc(n * (n + 1) / 2 / 64 + 1, sizeof(uint64_t));
+  } else {
+    HashSetInit(&ra->edges, n * 4);
+  }
 
   size_t words = ra->words;
   uint64_t* live = malloc(sizeof(uint64_t) * (words + 1));
@@ -751,8 +947,12 @@ static void BuildGraph(RA* ra) {
       for (size_t w = 0; throws && w < words; w++) {
         live[w] |= pad_live[w];
       }
-      for (int d = info->first_def; d < info->end_def; d++) {
+      for (int d = info->first_def; d < info->end_def;) {
         int def = IntAt(&ra->defs, (size_t)d);
+        if (IsPrecolored(def)) {
+          d = AddRegisterDefEdges(ra, info, live, d);
+          continue;
+        }
         bool grouped = InGroup(info, def);
         for (size_t w = 0; w < words; w++) {
           uint64_t bits = live[w];
@@ -764,14 +964,11 @@ static void BuildGraph(RA* ra) {
             }
           }
         }
+        d++;
       }
-      if (info->converting) {
-        int src = OperandNode(ra, info->inst->operand[0]);
-        for (int d = info->first_def; d < info->end_def; d++) {
-          if (src >= 0) {
-            AddEdge(ra, IntAt(&ra->defs, (size_t)d), src);
-          }
-        }
+      for (int d = info->first_def; info->converted >= 0 && d < info->end_def;
+           d++) {
+        AddEdge(ra, IntAt(&ra->defs, (size_t)d), info->converted);
       }
       for (int d = info->first_def; info->early_clobber && d < info->end_def;
            d++) {
@@ -817,12 +1014,12 @@ static void BuildGraph(RA* ra) {
   }
   for (int v = TARGET_RA_FIXED_KEYS; v < NumNodes(ra); v++) {
     Node* node = NodeAt(ra, v);
-    if (TargetRAIndexFind(&ra->unspillable, node->inst) >= 0) {
+    if (IsUnspillable(ra, node->inst)) {
       node->cost = kUnspillableCost;
     }
   }
 
-  for (int m = 0; m < (int)ra->moves.length; m++) {
+  for (int m = 0; m < ra->moves.length; m++) {
     AppendInt(&NodeAt(ra, MoveAt(ra, m)->a)->moves, m);
     AppendInt(&NodeAt(ra, MoveAt(ra, m)->b)->moves, m);
   }
@@ -898,7 +1095,7 @@ static void MakeWorklist(RA* ra) {
   // The worklist pops from the end, so push the most frequently executed
   // moves last to coalesce them first.
   for (int w = 1; w <= 1 << 18; w <<= 3) {
-    for (int m = (int)ra->moves.length; m-- > 0;) {
+    for (int m = ra->moves.length; m-- > 0;) {
       int weight = MoveAt(ra, m)->weight;
       if (weight >= w && weight < (w << 3)) {
         AppendInt(&ra->move_worklist, m);
@@ -943,7 +1140,7 @@ static void Simplify(RA* ra, int n) {
   AppendInt(&ra->select_stack, n);
   for (size_t i = 0; i < node->adj.length; i++) {
     int t = IntAt(&node->adj, i);
-    if (IsAdjacent(ra, t)) {
+    if (!IsPrecolored(t) && IsAdjacent(ra, t)) {
       DecrementDegree(ra, t);
     }
   }
@@ -966,7 +1163,7 @@ static bool AllAdjacentOK(RA* ra, int v, int u) {
   const Vector* adj = &NodeAt(ra, v)->adj;
   for (size_t i = 0; i < adj->length; i++) {
     int t = IntAt(adj, i);
-    if (IsAdjacent(ra, t) && !AdjacentOK(ra, t, u)) {
+    if (!IsPrecolored(t) && IsAdjacent(ra, t) && !AdjacentOK(ra, t, u)) {
       return false;
     }
   }
@@ -974,15 +1171,28 @@ static bool AllAdjacentOK(RA* ra, int v, int u) {
 }
 
 // Briggs's test: the merged node has fewer than K significant neighbors.
+// Precolored neighbors are always significant, so they are counted from the
+// masks.
 static bool Conservative(RA* ra, int u, int v) {
   int gen = ++ra->mark_gen;
   int k = K(ra, u);
   int significant = 0;
   int nodes[2] = {u, v};
+  const Node* nu = NodeAt(ra, u);
+  const Node* nv = NodeAt(ra, v);
+  for (int w = 0; w < TARGET_RA_FIXED_KEYS / 64; w++) {
+    significant += __builtin_popcountll(nu->fixed_adj[w] | nv->fixed_adj[w]);
+  }
+  if (significant >= k) {
+    return false;
+  }
   for (int j = 0; j < 2; j++) {
     const Vector* adj = &NodeAt(ra, nodes[j])->adj;
     for (size_t i = 0; i < adj->length; i++) {
       int t = IntAt(adj, i);
+      if (IsPrecolored(t)) {
+        continue;
+      }
       Node* neighbor = NodeAt(ra, t);
       if (!IsAdjacent(ra, t) || neighbor->mark == gen) {
         continue;
@@ -1132,8 +1342,20 @@ static void AssignColors(RA* ra, Vector* spilled) {
     for (int r = 0; r < rc->num_regs; r++) {
       ok[r] = true;
     }
+    for (int w = 0; w < TARGET_RA_FIXED_KEYS / 64; w++) {
+      for (uint64_t bits = node->fixed_adj[w]; bits != 0; bits &= bits - 1) {
+        int index = ra->key_index[w * 64 + __builtin_ctzll(bits)];
+        if (index >= 0) {
+          ok[index] = false;
+        }
+      }
+    }
     for (size_t i = 0; i < node->adj.length; i++) {
-      int a = Alias(ra, IntAt(&node->adj, i));
+      int t = IntAt(&node->adj, i);
+      if (IsPrecolored(t)) {
+        continue;
+      }
+      int a = Alias(ra, t);
       Node* neighbor = NodeAt(ra, a);
       if (neighbor->state == kNodeColored || IsPrecolored(a)) {
         int index = ra->key_index[neighbor->color];
@@ -1193,12 +1415,12 @@ typedef struct {
   TargetInstruction* to;
 } Reload;
 
-static TargetInstruction* SpillValue(RA* ra, const TargetRAIndex* positions,
-                                     TargetInstruction* value, int slot) {
+static TargetInstruction* SpillValue(RA* ra, TargetInstruction* value,
+                                     int slot) {
   TargetInstruction* spill =
       ra->desc->create_spill(ra->desc->ctx, value, slot);
-  int i = TargetRAIndexFind(positions, value);
-  TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), spill, value);
+  TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, Position(ra, value)), spill,
+                            value);
   return spill;
 }
 
@@ -1236,7 +1458,7 @@ static void ReplaceReads(RA* ra, const TargetRAIndex* handle_index,
                                        VectorGet(handles, (size_t)h));
       TargetBasicBlockEmitBefore(ra->gen, InstBlock(ra, user), reload,
                                  InstOf(ra, user));
-      TargetRAIndexInsert(&ra->unspillable, reload, 1);
+      GetSlot(ra, reload)->unspillable = true;
       if (*num_reloads < 4 * TARGET_MAX_OPERANDS) {
         reloads[(*num_reloads)++] = (Reload){value, reload};
       }
@@ -1251,31 +1473,28 @@ static void RewriteSpills(RA* ra, const Vector* spilled) {
   TargetRAIndexInit(&handle_index, spilled->length);
   Vector handles;
   VectorInit(&handles);
-  TargetRAIndex positions;
-  IndexPositions(ra, &positions);
-
   for (size_t s = 0; s < spilled->length; s++) {
     Node* node = NodeAt(ra, IntAt(spilled, s));
     TargetInstruction* inst = node->inst;
     int slot = ra->desc->new_slot(ra->desc->ctx, inst);
     TargetInstruction* handle = NULL;
     if (ra->info->kind(inst) == kTargetRAValue) {
-      handle = SpillValue(ra, &positions, inst, slot);
-      TargetRAIndexInsert(&ra->unspillable, inst, 1);
+      handle = SpillValue(ra, inst, slot);
+      GetSlot(ra, inst)->unspillable = true;
     } else {
-      TargetRAIndexInsert(&ra->spilled_locations, inst, 1);
+      GetSlot(ra, inst)->spilled_location = true;
       for (int i = 0; i < NumInsts(ra); i++) {
         TargetInstruction* def = InstOf(ra, i);
         if (def->dest != inst) {
           continue;
         }
-        bool had_own_node = TargetRAIndexFind(&ra->node_index, def) >= 0;
-        TargetInstruction* spill = SpillValue(ra, &positions, def, slot);
+        bool had_own_node = ValueNode(ra, def) >= TARGET_RA_FIXED_KEYS;
+        TargetInstruction* spill = SpillValue(ra, def, slot);
         if (handle == NULL) {
           handle = spill;
         }
         if (!had_own_node) {
-          TargetRAIndexInsert(&ra->unspillable, def, 1);
+          GetSlot(ra, def)->unspillable = true;
         }
       }
       if (handle == NULL) {
@@ -1294,7 +1513,6 @@ static void RewriteSpills(RA* ra, const Vector* spilled) {
                  &num_reloads, 0);
   }
   ra->stats.spilled += (int)spilled->length;
-  TargetRAIndexDestruct(&positions);
   TargetRAIndexDestruct(&handle_index);
   VectorDestruct(&handles);
 }
@@ -1309,7 +1527,8 @@ static int LocationColor(RA* ra, TargetInstruction* location) {
   if (key >= 0) {
     return key;
   }
-  int n = TargetRAIndexFind(&ra->node_index, location);
+  const Slot* slot = FindSlot(ra, location);
+  int n = slot == NULL ? kNoNode : slot->node;
   if (n < 0) {
     fprintf(stderr, "register allocation of %s: no node for @%d\n",
             ra->gen->function_name.value, location->id);
@@ -1352,7 +1571,7 @@ static void AssignRegisters(RA* ra) {
     if (own >= 0) {
       ra->desc->assign(ctx, inst, own);
     } else {
-      int node = TargetRAIndexFind(&ra->node_index, inst);
+      int node = ValueNode(ra, inst);
       if (node >= 0) {
         own = NodeColor(ra, node);
       } else {
@@ -1376,9 +1595,7 @@ static void AssignRegisters(RA* ra) {
 // ---------------------------------------------------------------------------
 
 static void FreeRound(RA* ra) {
-  TargetRAIndexDestruct(&ra->reads);
-  TargetRAIndexDestruct(&ra->node_index);
-  VectorDestructWithContents(&ra->nodes, DestructNode, /*free_element=*/true);
+  FreeNodes(ra);
   VectorDestruct(&ra->uses);
   VectorDestruct(&ra->defs);
   free(ra->live_in);
@@ -1387,8 +1604,10 @@ static void FreeRound(RA* ra) {
   ra->live_out = NULL;
   free(ra->pads);
   ra->pads = NULL;
+  free(ra->matrix);
+  ra->matrix = NULL;
   HashSetDestruct(&ra->edges);
-  VectorDestructWithContents(&ra->moves, NULL, /*free_element=*/true);
+  ChunkFree(&ra->moves);
   VectorDestruct(&ra->simplify_list);
   VectorDestruct(&ra->freeze_list);
   VectorDestruct(&ra->spill_list);
@@ -1397,10 +1616,14 @@ static void FreeRound(RA* ra) {
   FreeInstructions(ra);
 }
 
-static void BuildRound(RA* ra) {
-  CollectInstructions(ra);
-  BuildNodes(ra);
-  ComputeLiveness(ra);
+// |analyzed| is set when the instructions, nodes and liveness are already
+// built.
+static void BuildRound(RA* ra, bool analyzed) {
+  if (!analyzed) {
+    CollectInstructions(ra);
+    BuildNodes(ra);
+    ComputeLiveness(ra);
+  }
   BuildGraph(ra);
 }
 
@@ -1737,7 +1960,7 @@ static void EmitSplitCopies(RA* ra, const SplitNames* names, int num_nodes,
     TargetInstruction* from = home_first ? names[n].home : names[n].other;
     TargetInstruction* to = home_first ? names[n].other : names[n].home;
     TargetInstruction* copy = desc->create_copy(desc->ctx, from, to);
-    TargetRAIndexInsert(&ra->split_copies, copy, 1);
+    GetSlot(ra, copy)->split_copy = true;
     if (at_start) {
       EmitAtStart(ra, block, copy);
     } else {
@@ -1781,19 +2004,21 @@ static size_t PlanSplit(RA* ra, const bool* fast, uint64_t* split,
   return any ? num_crossing : 0;
 }
 
-static void SplitAtFastPath(RA* ra) {
+// Returns whether it left the analysis BuildRound would make, having split
+// nothing.
+static bool SplitAtFastPath(RA* ra) {
   TargetGenerator* gen = ra->gen;
   const TargetRegAllocDesc* desc = ra->desc;
   if (desc->create_location == NULL || desc->create_label == NULL ||
       desc->create_jump == NULL || gen->entry_block == NULL ||
       gen->exception_edges.length != 0) {
-    return;
+    return false;
   }
   size_t num_blocks = gen->basic_blocks.length;
   bool* fast = calloc(num_blocks, sizeof(bool));
   if (!FindFastPath(ra, fast)) {
     free(fast);
-    return;
+    return false;
   }
   CollectInstructions(ra);
   BuildNodes(ra);
@@ -1809,9 +2034,6 @@ static void SplitAtFastPath(RA* ra) {
   size_t num_crossing = PlanSplit(ra, fast, split, crossing);
   int num_nodes = NumNodes(ra);
   SplitNames* names = calloc((size_t)num_nodes, sizeof(SplitNames));
-  TargetRAIndex positions;
-  IndexPositions(ra, &positions);
-
   // Name both sides.  A value's reads all move to locations, so that the
   // side it is made on can be written by copies too.
   for (int n = TARGET_RA_FIXED_KEYS; num_crossing > 0 && n < num_nodes; n++) {
@@ -1821,8 +2043,7 @@ static void SplitAtFastPath(RA* ra) {
     TargetInstruction* inst = NodeAt(ra, n)->inst;
     SplitNames* name = &names[n];
     if (ra->info->kind(inst) == kTargetRAValue) {
-      int i = TargetRAIndexFind(&positions, inst);
-      name->fast_home = fast[InstAt(ra, i)->block];
+      name->fast_home = fast[InstAt(ra, Position(ra, inst))->block];
       name->home = desc->create_location(desc->ctx, inst);
     } else {
       name->fast_home = true;
@@ -1852,9 +2073,9 @@ static void SplitAtFastPath(RA* ra) {
       continue;
     }
     TargetInstruction* copy = desc->create_copy(desc->ctx, value, names[n].home);
-    int i = TargetRAIndexFind(&positions, value);
-    TargetBasicBlockEmitAfter(gen, InstBlock(ra, i), copy, value);
-    TargetRAIndexInsert(&ra->transparent, copy, 1);
+    TargetBasicBlockEmitAfter(gen, InstBlock(ra, Position(ra, value)), copy,
+                              value);
+    GetSlot(ra, copy)->transparent = true;
   }
 
   bool* start_done = calloc(num_blocks, sizeof(bool));
@@ -1905,12 +2126,14 @@ static void SplitAtFastPath(RA* ra) {
   free(live);
   free(start_done);
   free(end_done);
-  TargetRAIndexDestruct(&positions);
   free(names);
   free(crossing);
   free(split);
   free(fast);
-  FreeRound(ra);
+  if (num_crossing > 0) {
+    FreeRound(ra);
+  }
+  return num_crossing == 0;
 }
 
 bool TargetAllocateRegisters(TargetGenerator* gen,
@@ -1936,7 +2159,8 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
   CollectInstructions(ra);
   const char* unsupported = Unsupported(ra);
   if (unsupported != NULL) {
-    FreeInstructions(ra);
+    ChunkFree(&ra->insts);
+    ChunkFree(&ra->slots);
     free(ra);
     if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
       fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
@@ -1944,22 +2168,18 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
     }
     return false;
   }
-  TargetRAIndexInit(&ra->unspillable, 64);
-  TargetRAIndexInit(&ra->spilled_locations, 16);
-  TargetRAIndexInit(&ra->transparent, 64);
-  TargetRAIndexInit(&ra->split_copies, 64);
   CountAllReads(ra);
   CopyFixedValues(ra);
-  TargetRAIndexDestruct(&ra->reads);
   FreeInstructions(ra);
-  SplitAtFastPath(ra);
+  bool analyzed = SplitAtFastPath(ra);
 
   for (;;) {
     ra->stats.rounds++;
-    BuildRound(ra);
+    BuildRound(ra, analyzed);
+    analyzed = false;
     if (ra->stats.rounds == 1) {
       ra->stats.nodes = NumNodes(ra) - TARGET_RA_FIXED_KEYS;
-      ra->stats.moves = (int)ra->moves.length;
+      ra->stats.moves = ra->moves.length;
     }
     Vector spilled;
     VectorInit(&spilled);
@@ -1991,10 +2211,8 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
   if (stats != NULL) {
     *stats = ra->stats;
   }
-  TargetRAIndexDestruct(&ra->unspillable);
-  TargetRAIndexDestruct(&ra->spilled_locations);
-  TargetRAIndexDestruct(&ra->transparent);
-  TargetRAIndexDestruct(&ra->split_copies);
+  ChunkFree(&ra->insts);
+  ChunkFree(&ra->slots);
   free(ra);
   return true;
 }
