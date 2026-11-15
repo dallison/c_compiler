@@ -407,6 +407,15 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
     location->base.flags |= AARCH64_INST_AVOID_ARG_REGS;
   }
   TargetTrackOrphanInstruction(&c->allocator->g->base, &location->base);
+  Vector* var_regs = &c->allocator->g->var_regs;
+  if (Kind(like) == kTargetRALocation) {
+    for (size_t i = 0; i < var_regs->length; i++) {
+      RegisterVariable* var = var_regs->value.p[i];
+      if (var->inst == like) {
+        var->split_location = &location->base;
+      }
+    }
+  }
   return &location->base;
 }
 

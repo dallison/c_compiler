@@ -1215,7 +1215,7 @@ static TargetInstruction* IntVariableRegister(AARCH64Generator* g, int varnum, S
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(ivarreg));
@@ -1234,7 +1234,7 @@ static TargetInstruction* FloatingPointVariableRegister(AARCH64Generator* g, int
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(fvarreg));
@@ -6715,8 +6715,56 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 
-static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
+// Marks register variable |inst| as holding the address of its variable, which
+// lives in memory.
+static void SetHoldsAddress(AARCH64Generator* g, TargetInstruction* inst) {
+  for (size_t i = 0; i < g->var_regs.length; i++) {
+    RegisterVariable* var = g->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->holds_address = true;
+    }
+  }
+}
+
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it, it was spilled, or
+// splitting or shrink wrapping moved it over part of the function.
+static int DebugRegister(AARCH64Generator* g, RegisterVariable* var) {
+  AARCH64Register* reg = (AARCH64Register*)var->inst->reg;
+  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
+      (var->split_location != NULL &&
+       var->split_location->reg != &reg->base)) {
+    return -1;
+  }
+  if (reg->type == kAARCH64RegTypeFloat) {
+    return 64 + reg->base.num;  // v0 to v31.
+  }
+  if (reg->base.num > 30 ||
+      ((g->register_allocator.shrink_wrapped_regs >> reg->base.num) & 1) != 0) {
+    return -1;
+  }
+  return reg->base.num;
+}
+
+// Points each register variable's debug information at the register
+// allocation chose for it.
+static void SetDebugRegisterLocations(AARCH64Generator* g) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  for (size_t i = 0; i < g->var_regs.length; i++) {
+    RegisterVariable* var = g->var_regs.value.p[i];
+    Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    int reg = DebugRegister(g, var);
+    if (symbol == NULL || reg < 0) {
+      continue;
+    }
+    if (var->holds_address) {
+      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
+    } else {
+      VariableDIESetRegister(SymbolDIE(symbol), reg);
+    }
+  }
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
@@ -6878,7 +6926,6 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
     if (UseRegisterForVariable(g, entry->pooled)) {
       int reg = g->num_fp_reg_vars++;
       entry->pooled->data.ivalue = AARCH64_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
@@ -7000,7 +7047,7 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
                                    StructReturnArgumentRegister(g)),
                    0));
         move->dest = var;
-        SetDebugRegisterLocation(entry, g->struct_return_reg);
+        SetHoldsAddress(g, var);
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
@@ -7027,7 +7074,6 @@ static void AssignRegisterOrOffset(AARCH64Generator* g, PoolEntry* entry,
     if (UseRegisterForVariable(g, entry->pooled)) {
       int reg = g->num_int_reg_vars++;
       entry->pooled->data.ivalue = AARCH64_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(entry, args);
@@ -7214,6 +7260,7 @@ void AARCH64Lower(AARCH64Generator* g, Generator* gen) {
   }
   // Allocate registers to the instructions.
   AARCH64AllocateRegisters(&g->register_allocator);
+  SetDebugRegisterLocations(g);
 }
 
 void AARCH64Print(AARCH64Generator* g, FILE* fp) {

@@ -91,6 +91,7 @@ void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* allocator,
   BitSetInit(&allocator->shared_varregs);
   MapInitForPointerKeys(&allocator->reassignable_spills);
   MapInitForPointerKeys(&allocator->varreg_values);
+  allocator->shrink_wrapped_regs = 0;
   allocator->spill_after_definition = false;
   allocator->allocating_depth = 0;
 }
@@ -3862,6 +3863,7 @@ static void ShrinkWrapFunction(AARCH64RegisterAllocator* allocator) {
   for (int i = 0; i < num_mapped; i++) {
     int c = saved_list[i];
     int t = temp_list[i];
+    allocator->shrink_wrapped_regs |= UINT32_C(1) << c;
     fast_p32[c] = SWNewRegProxy(gen, &allocator->int_regs[t], kSize32Bit);
     fast_p64[c] = SWNewRegProxy(gen, &allocator->int_regs[t], kSize64Bit);
     slow_p32[c] = SWNewRegProxy(gen, &allocator->int_regs[c], kSize32Bit);

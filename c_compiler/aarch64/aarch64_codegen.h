@@ -441,6 +441,10 @@ typedef struct {
   TargetInstruction* inst;      // Actually a TargetSymbol*.
   int varnum;
   bool is_fp;
+  bool holds_address;           // Holds the variable's address, not its value.
+  // The location splitting gave the variable over part of the function, or
+  // NULL.
+  TargetInstruction* split_location;
 } RegisterVariable;
 
 typedef struct {

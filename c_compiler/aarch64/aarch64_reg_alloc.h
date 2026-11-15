@@ -69,6 +69,10 @@ typedef struct {
   // the value as well.  See SpillInstruction.
   Map varreg_values;
 
+  // The saved registers shrink wrapping replaces on the fast path, one bit
+  // each.
+  uint32_t shrink_wrapped_regs;
+
   // Set when no register could be freed for the value being allocated, so it
   // was given the scratch register instead and has to be written to a spill
   // slot as soon as it is computed.  See AllocateRegisterWithType.

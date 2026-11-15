@@ -6404,6 +6404,7 @@ sh_test(
         ":davecc",
         "tests/dwarf_debug_info_cases.c",
         "tests/dwarf_debug_info_cases.cpp",
+        "tests/dwarf_register_variables.c",
     ],
 )
 

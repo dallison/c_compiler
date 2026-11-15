@@ -388,6 +388,15 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
       &location->base,
       (TargetOpcode)(fp ? RV_OP(fvarreg) : RV_OP(ivarreg)));
   TargetTrackOrphanInstruction(&c->allocator->rv->base, &location->base);
+  Vector* var_regs = &c->allocator->rv->var_regs;
+  if (Kind(like) == kTargetRALocation) {
+    for (size_t i = 0; i < var_regs->length; i++) {
+      RegisterVariable* var = var_regs->value.p[i];
+      if (var->inst == like) {
+        var->split_location = &location->base;
+      }
+    }
+  }
   return &location->base;
 }
 

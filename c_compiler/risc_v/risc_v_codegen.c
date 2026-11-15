@@ -1102,7 +1102,7 @@ static TargetInstruction* IntVariableRegister(RVGenerator* rv, int varnum, Symbo
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(ivarreg));
@@ -1121,7 +1121,7 @@ static TargetInstruction* FloatingPointVariableRegister(RVGenerator* rv, int var
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(fvarreg));
@@ -5149,8 +5149,56 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 
-static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
+// Marks register variable |inst| as holding the address of its variable, which
+// lives in memory.
+static void SetHoldsAddress(RVGenerator* rv, TargetInstruction* inst) {
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->holds_address = true;
+    }
+  }
+}
+
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it, it was spilled, or
+// splitting moved it over part of the function.
+static int DebugRegister(RegisterVariable* var) {
+  RVRegister* reg = (RVRegister*)var->inst->reg;
+  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
+      (var->split_location != NULL &&
+       var->split_location->reg != &reg->base)) {
+    return -1;
+  }
+  switch (reg->type) {
+    case kRVRegTypeInt:
+      return reg->base.num;
+    case kRVRegTypeFloat:
+      return 32 + reg->base.num;  // f0 to f31.
+    default:
+      return -1;
+  }
+}
+
+// Points each register variable's debug information at the register
+// allocation chose for it.
+static void SetDebugRegisterLocations(RVGenerator* rv) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    int reg = DebugRegister(var);
+    if (symbol == NULL || reg < 0) {
+      continue;
+    }
+    if (var->holds_address) {
+      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
+    } else {
+      VariableDIESetRegister(SymbolDIE(symbol), reg);
+    }
+  }
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
@@ -5312,7 +5360,6 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
@@ -5430,8 +5477,8 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
             location.type == kArgLocationRegister) {
           int reg = rv->num_int_reg_vars++;
           entry->pooled->data.ivalue = RV_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
-          LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
+          SetHoldsAddress(rv, LoadIntArgumentIntoRegisterVariable(
+                                  rv, reg, location, entry->pooled));
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
           rv->not_leaf = true;
@@ -5449,7 +5496,7 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
         TargetInstruction* var = IntVariableRegister(rv, rv->struct_return_reg, entry->value.symbol);
         Emit(rv, NewInstruction2(RV_OP(mv), var,
                     IntArgumentRegister(rv, 0)));
-        SetDebugRegisterLocation(entry, rv->struct_return_reg);
+        SetHoldsAddress(rv, var);
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
@@ -5476,7 +5523,6 @@ static void AssignRegisterOrOffset(RVGenerator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = RV_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(entry, args);
@@ -5662,6 +5708,7 @@ void RVLower(RVGenerator* rv, Generator* gen) {
   }
   // Allocate registers to the instructions.
   RVAllocateRegisters(&rv->register_allocator);
+  SetDebugRegisterLocations(rv);
 }
 
 void RVPrint(RVGenerator* rv, FILE* fp) {

@@ -167,6 +167,8 @@ typedef struct {
 typedef enum {
   kLocationUnknown,
   kLocationInRegister,
+  // In memory at the address a register holds.
+  kLocationAddressInRegister,
   kLocationOnStack,
   kLocationStatic,
 } VarLocationType;
@@ -174,7 +176,7 @@ typedef enum {
 typedef struct {
   VarLocationType type;
   union {
-    int reg;
+    int reg;  // A DWARF register number.
     int stack_offset;
     const char* symbol_name;
   } v;
@@ -189,6 +191,7 @@ typedef struct {
 } VariableDIE;
 
 void VariableDIESetRegister(DIE* die, int reg);
+void VariableDIESetAddressInRegister(DIE* die, int reg);
 void VariableDIESetStackOffset(DIE* die, int offset);
 void VariableDIESetStatic(DIE* die, const char* symbol);
 

@@ -10,10 +10,11 @@ ROOT="${TEST_SRCDIR:-$(pwd)}/${TEST_WORKSPACE:-}"
 DAVECC="$ROOT/$1"
 SOURCE="$ROOT/tests/dwarf_debug_info_cases.c"
 CXX_SOURCE="$ROOT/tests/dwarf_debug_info_cases.cpp"
+REGISTER_SOURCE="$ROOT/tests/dwarf_register_variables.c"
 WORK="${TEST_TMPDIR:-/tmp}/dwarf-debug-info"
 mkdir -p "$WORK"
 
-python3 - "$DAVECC" "$SOURCE" "$CXX_SOURCE" "$WORK" <<'PY'
+python3 - "$DAVECC" "$SOURCE" "$CXX_SOURCE" "$REGISTER_SOURCE" "$WORK" <<'PY'
 import os
 import struct
 import subprocess
@@ -336,12 +337,88 @@ def compile_and_check(davecc, source, work, target, extra_args, languages,
     check_object(obj, languages)
 
 
-davecc, source, cxx_source, work = sys.argv[1:]
+# DWARF numbers of the registers a value live across a call can be in.
+CALLEE_SAVED = {
+    "aarch64": {"int": set(range(19, 29)), "fp": set(range(72, 80))},
+    "riscv": {"int": {9} | set(range(18, 28)),
+              "fp": {40, 41} | set(range(50, 60))},
+}
+FP_REGS = {"aarch64": set(range(64, 96)), "riscv": set(range(32, 64))}
+
+
+def decode_location(expr):
+    """Returns ("reg" or "breg", DWARF register) for a register location."""
+    cur = Cursor(expr)
+    op = cur.u8()
+    if 0x50 <= op <= 0x6f:
+        return "reg", op - 0x50
+    if op == 0x90:
+        return "reg", cur.uleb()
+    if 0x70 <= op <= 0x8f:
+        return "breg", op - 0x70
+    if op == 0x92:
+        return "breg", cur.uleb()
+    return "other", op
+
+
+def register_locations(path):
+    """Maps (function, variable) to its decoded location, or None."""
+    with open(path, "rb") as fh:
+        sections = parse_elf_sections(fh.read())
+    abbrevs = parse_abbrevs(sections[".debug_abbrev"])
+    dies, _ = parse_dies(sections[".debug_info"], abbrevs,
+                         sections.get(".debug_str", b""))
+    function = None
+    locations = {}
+    for tag, values in dies:
+        if tag == DW_TAG_subprogram:
+            function = values.get(DW_AT_name)
+        elif tag in (DW_TAG_variable, DW_TAG_formal_parameter):
+            expr = values.get(DW_AT_location)
+            locations[(function, values.get(DW_AT_name))] = (
+                decode_location(expr) if expr else None)
+    return locations
+
+
+def check_register_variables(davecc, source, work, target, opt, allocator_env):
+    obj = os.path.join(work, "registers-%s%s.o" % (target, opt))
+    env = dict(os.environ)
+    env.update(allocator_env)
+    subprocess.check_call([davecc, "-target", target, "-g", opt, "-nostdinc",
+                           "-c", source, "-o", obj], env=env)
+    locations = register_locations(obj)
+    config = "%s %s %s" % (target, opt, allocator_env or "")
+
+    def expect(function, name, kind, regs):
+        location = locations.get((function, name))
+        if location is None or location[0] != kind or location[1] not in regs:
+            raise ValueError("%s: %s in %s is at %s, expected %s in %s" %
+                             (config, name, function, location, kind,
+                              sorted(regs)))
+        return location[1]
+
+    saved = CALLEE_SAVED[target]
+    total = expect("count", "total", "reg", saved["int"])
+    i = expect("count", "i", "reg", saved["int"])
+    if total == i:
+        raise ValueError("%s: total and i share register %d" % (config, i))
+    expect("scale", "x", "reg", saved["fp"])
+    expect("scale", "acc", "reg", FP_REGS[target])
+    expect("make", "r", "breg", set(range(0, 32)))
+    print("ok register variables %s" % config)
+
+
+davecc, source, cxx_source, register_source, work = sys.argv[1:]
 c_langs = {DW_LANG_C, DW_LANG_C89, DW_LANG_C99, DW_LANG_C11}
 cxx_langs = {0x0004, 0x001a, 0x0021, 0x002a, 0x002b, 0x002c}
 compile_and_check(davecc, source, work, "x86_64", [], c_langs)
 compile_and_check(davecc, source, work, "aarch64", [], c_langs)
 compile_and_check(davecc, cxx_source, work, "x86_64", [], cxx_langs,
                   obj_name="x86_64_cxx")
+for target in ("aarch64", "riscv"):
+    for opt in ("-O1", "-O2"):
+        for allocator_env in ({}, {"DAVECC_OLD_RA": "1"}):
+            check_register_variables(davecc, register_source, work, target,
+                                     opt, allocator_env)
 print("ok dwarf -g objects")
 PY

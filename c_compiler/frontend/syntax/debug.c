@@ -1259,6 +1259,15 @@ static DebugAttributeValue* LocationAttribute(VariableDIE* var) {
         WriteUnsignedLEB128(&v->v.block, (uint64_t)var->location.v.reg);
       }
       break;
+    case kLocationAddressInRegister:
+      if (var->location.v.reg >= 0 && var->location.v.reg < 32) {
+        BufferAppendByte(&v->v.block, DW_OP(breg0) + var->location.v.reg);
+      } else {
+        BufferAppendByte(&v->v.block, (char)DW_OP(bregx));
+        WriteUnsignedLEB128(&v->v.block, (uint64_t)var->location.v.reg);
+      }
+      WriteSignedLEB128(&v->v.block, 0);
+      break;
     case kLocationOnStack:
       BufferAppendByte(&v->v.block, (char)DW_OP(fbreg));
       WriteSignedLEB128(&v->v.block, var->location.v.stack_offset);
@@ -1833,6 +1842,9 @@ static void SymbolDIEPrint(DIE* die, int level) {
     case kLocationInRegister:
       printf("reg %d\n", var->location.v.reg);
       break;
+    case kLocationAddressInRegister:
+      printf("at reg %d\n", var->location.v.reg);
+      break;
   }
   DIEPrint(var->type, level + 1);
 }
@@ -1858,6 +1870,15 @@ void VariableDIESetRegister(DIE* die, int reg) {
     return;
   }
   var->location.type = kLocationInRegister;
+  var->location.v.reg = reg;
+}
+
+void VariableDIESetAddressInRegister(DIE* die, int reg) {
+  VariableDIE* var = DIEAsVariable(die);
+  if (var == NULL) {
+    return;
+  }
+  var->location.type = kLocationAddressInRegister;
   var->location.v.reg = reg;
 }
 
