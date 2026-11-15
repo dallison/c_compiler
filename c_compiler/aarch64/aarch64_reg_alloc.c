@@ -5033,12 +5033,14 @@ static void FoldPhysicalCopies(AARCH64RegisterAllocator* allocator) {
   }
 }
 
-// The coloring allocator is the default; DAVECC_OLD_RA selects the dominator
-// walk instead.  For bisecting, DAVECC_NEW_RA_FUNC limits the coloring
-// allocator to one function and DAVECC_NEW_RA_LIMIT to the first n functions
-// compiled.
+// The coloring allocator is the default from -O1; at -O0 the dominator walk is
+// faster and DAVECC_NEW_RA selects coloring anyway.  DAVECC_OLD_RA selects the
+// dominator walk at every level.  For bisecting, DAVECC_NEW_RA_FUNC limits the
+// coloring allocator to one function and DAVECC_NEW_RA_LIMIT to the first n
+// functions compiled.
 static bool UseColoringAllocator(AARCH64RegisterAllocator* allocator) {
-  if (getenv("DAVECC_OLD_RA") != NULL) {
+  if (getenv("DAVECC_OLD_RA") != NULL ||
+      (!OptLevel1() && getenv("DAVECC_NEW_RA") == NULL)) {
     return false;
   }
   const char* only = getenv("DAVECC_NEW_RA_FUNC");
