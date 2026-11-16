@@ -16,8 +16,10 @@
 #include "member_pointer.h"
 #include "type_compare.h"
 
+#include "risc_v_emitter.h"
 #include "risc_v_optimize.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 // RISC-V LP64D uses IEEE binary128 for long double.  Distinct long double
 // values are 16-byte memory objects; arithmetic goes through software helpers.
@@ -5160,14 +5162,11 @@ static void SetHoldsAddress(RVGenerator* rv, TargetInstruction* inst) {
   }
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it, it was spilled, or
-// splitting moved it over part of the function.
-static int DebugRegister(RegisterVariable* var) {
-  RVRegister* reg = (RVRegister*)var->inst->reg;
-  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
-      (var->split_location != NULL &&
-       var->split_location->reg != &reg->base)) {
+// The DWARF number of |r|, or -1.
+static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
+  (void)gen;
+  RVRegister* reg = (RVRegister*)r;
+  if (reg == NULL) {
     return -1;
   }
   switch (reg->type) {
@@ -5180,17 +5179,59 @@ static int DebugRegister(RegisterVariable* var) {
   }
 }
 
-// Points each register variable's debug information at the register
-// allocation chose for it.
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it, it was spilled, or
+// splitting moved it over part of the function.
+static int DebugRegister(RegisterVariable* var) {
+  TargetRegister* reg = var->inst->reg;
+  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
+      (var->split_location != NULL && var->split_location->reg != reg)) {
+    return -1;
+  }
+  return DwarfRegister(NULL, reg);
+}
+
+// The frame base offset of spill slot |slot|, which the emitter addresses
+// 8 + |slot| bytes below the local variables.
+static int SpillSlotFrameOffset(RVGenerator* rv, int slot) {
+  return -(rv->base.stack_frame_size + RV_STACK_FRAME_HEADER_SIZE + 8 + slot);
+}
+
+// Points each register variable's debug information at the registers or spill
+// slot allocation chose for it.
 static void SetDebugRegisterLocations(RVGenerator* rv) {
   if (!compiler->debug_output) {
     return;
   }
+  TargetDebugVariable* colored =
+      malloc((rv->var_regs.length + 1) * sizeof(TargetDebugVariable));
+  int num_colored = 0;
   for (size_t i = 0; i < rv->var_regs.length; i++) {
     RegisterVariable* var = rv->var_regs.value.p[i];
     Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    if (symbol == NULL) {
+      continue;
+    }
+    // Every assignment of a spilled variable stores it, so its slot holds it
+    // throughout, unless splitting gave it a register over part of the
+    // function.
+    if (var->spilled) {
+      if (var->spill_slot >= 0 && !var->holds_address &&
+          var->split_location == NULL) {
+        VariableDIESetStackOffset(SymbolDIE(symbol),
+                                  SpillSlotFrameOffset(rv, var->spill_slot));
+      }
+      continue;
+    }
+    // The coloring allocator reuses a variable's register where the variable
+    // is dead.
+    if (rv->colored) {
+      colored[num_colored++] = (TargetDebugVariable){
+          symbol, {var->inst, var->split_location}, var->holds_address};
+      continue;
+    }
     int reg = DebugRegister(var);
-    if (symbol == NULL || reg < 0) {
+    if (reg < 0) {
       continue;
     }
     if (var->holds_address) {
@@ -5199,6 +5240,11 @@ static void SetDebugRegisterLocations(RVGenerator* rv) {
       VariableDIESetRegister(SymbolDIE(symbol), reg);
     }
   }
+  if (num_colored != 0) {
+    TargetSetDebugLocationLists(&rv->base, RVRAInfo(), colored, num_colored,
+                                DwarfRegister, RVInstructionEmitsCode);
+  }
+  free(colored);
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {

@@ -36,6 +36,15 @@ typedef enum {
   kTargetRALocation,  // Storage written through other instructions' dest.
 } TargetRAKind;
 
+typedef enum {
+  kTargetRANotCopy,
+  // A copy the allocator may delete by giving both sides one register.
+  kTargetRACopy,
+  // A copy that also changes the value, such as a 32-bit move that clears
+  // the upper half.  Both sides must stay in different registers.
+  kTargetRAConvertingCopy,
+} TargetRACopyKind;
+
 // Locations that name a physical register have a key below this.  Every
 // other location is its own storage.
 #define TARGET_RA_FIXED_KEYS 128
@@ -50,6 +59,11 @@ typedef struct {
   // Physical register keys |inst| overwrites as a side effect, such as a
   // call's caller-saved registers.  Returns how many it stored in |keys|.
   int (*clobbers)(TargetInstruction* inst, int* keys, int max_keys);
+  // Whether reading |operand| reads its own operands, as a chain of
+  // argument holders does at the call.
+  bool (*reads_through)(TargetInstruction* operand);
+  // Whether |inst| copies operand 0 into its result, and how.
+  TargetRACopyKind (*copy_kind)(TargetInstruction* inst);
 } TargetRAInfo;
 
 enum {

@@ -1124,6 +1124,7 @@ cc_library(
         "c_compiler/frontend/syntax/syntax_vptr.c",
         "c_compiler/backend/target_basic_block.c",
         "c_compiler/backend/target_generator.c",
+        "c_compiler/backend/target_debug_ranges.c",
         "c_compiler/backend/target_ra_ir.c",
         "c_compiler/backend/target_reg_alloc.c",
         "c_compiler/frontend/lexical/tokens.c",

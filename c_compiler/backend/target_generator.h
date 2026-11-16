@@ -10,6 +10,7 @@
 #define target_generator_h
 
 #include "codegen.h"
+#include "hashmap.h"
 #include "hashtable.h"
 #include "list.h"
 
@@ -243,6 +244,10 @@ typedef struct TargetGenerator {
   // TargetExceptionEdge* pairing each protected region with its landing pad, so
   // the CFG can model the unwinder's entry into the pad.
   Vector exception_edges;
+
+  // The debug label to emit before each instruction that has one, or NULL
+  // when none do.  See target_debug_ranges.h.
+  HashMap* debug_labels;
 } TargetGenerator;
 
 // The unwinder reaches a landing pad from inside a protected region.  Recording

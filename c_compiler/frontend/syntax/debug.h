@@ -24,7 +24,8 @@ typedef struct {
   DW_AT id;
   DW_FORM form;
   int size;
-  // If set, a DW_FORM(exprloc) is DW_OP_addr followed by this symbol.
+  // If set, a DW_FORM(exprloc) is DW_OP_addr followed by this symbol, and a
+  // DW_FORM(sec_offset) is the symbol's offset in its section.
   const char* addr_symbol;
   
   union {
@@ -70,6 +71,9 @@ typedef struct DebugBuilder {
   const char* producer;
   String dir;
   
+  // Variables with a location list, in the order of the lists in .debug_loc.
+  Vector location_lists;
+
   // Output handler.
   FILE* fp;
   struct AsmModule* module;
@@ -171,7 +175,26 @@ typedef enum {
   kLocationAddressInRegister,
   kLocationOnStack,
   kLocationStatic,
+  // In registers over parts of its function's code.
+  kLocationList,
 } VarLocationType;
+
+// A register that holds a variable over a stretch of its function's code.
+typedef struct {
+  char* begin;         // Label at the first instruction of the stretch.
+  char* end;           // Label just past the last.
+  int reg;             // A DWARF register number.
+  bool holds_address;  // |reg| holds the variable's address.
+} VariableLocationRange;
+
+VariableLocationRange* NewVariableLocationRange(const char* begin,
+                                                const char* end, int reg,
+                                                bool holds_address);
+
+typedef struct {
+  char* label;     // Of the list in .debug_loc, once it has one.
+  Vector ranges;   // VariableLocationRange*.
+} VariableLocationList;
 
 typedef struct {
   VarLocationType type;
@@ -179,6 +202,7 @@ typedef struct {
     int reg;  // A DWARF register number.
     int stack_offset;
     const char* symbol_name;
+    VariableLocationList* list;
   } v;
 } VariableLocation;
 
@@ -194,6 +218,9 @@ void VariableDIESetRegister(DIE* die, int reg);
 void VariableDIESetAddressInRegister(DIE* die, int reg);
 void VariableDIESetStackOffset(DIE* die, int offset);
 void VariableDIESetStatic(DIE* die, const char* symbol);
+// Gives the variable the VariableLocationRange* in |ranges|, which the DIE
+// takes over, leaving |ranges| empty.
+void VariableDIESetLocationList(DIE* die, Vector* ranges);
 
 typedef struct {
   NamedDIE die;

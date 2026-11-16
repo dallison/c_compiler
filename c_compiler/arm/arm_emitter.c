@@ -1719,6 +1719,8 @@ static void PrintRegMemOffset(FILE* fp, ARMOpcode opcode, const char* reg,
   fprintf(fp, "\t%-12s%s, [ip]\n", mnemonic, reg);
 }
 
+// A 128-bit spill slot is the 8 bytes at |offset| below fp and the 8 below
+// them, which the allocator reserves with it.
 static void PrintFpPairMem(FILE* fp, bool load, ARMRegister* reg, int offset) {
   char lo[8];
   char hi[8];
@@ -1736,7 +1738,7 @@ static void PrintFpPairMem(FILE* fp, bool load, ARMRegister* reg, int offset) {
     }
     fprintf(fp, "\tsub ip, fp, ip\n");
     fprintf(fp, "\t%s %s, [ip]\n", mnemonic, lo);
-    fprintf(fp, "\t%s %s, [ip, #8]", mnemonic, hi);
+    fprintf(fp, "\t%s %s, [ip, #-8]", mnemonic, hi);
   }
 }
 

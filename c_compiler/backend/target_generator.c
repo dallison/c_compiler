@@ -330,6 +330,7 @@ void TargetGeneratorInit(TargetGenerator* target, Generator* gen, TargetVirtuals
   target->symbol_index_count = 0;
   VectorInit(&target->fixups);
   VectorInit(&target->exception_edges);
+  target->debug_labels = NULL;
   target->frame_pointer = NULL;
   target->stack_pointer = NULL;
   target->thread_pointer = NULL;
@@ -415,6 +416,11 @@ void TargetGeneratorDestruct(TargetGenerator* gen) {
   // no nested allocations); free them together with the vector backing.
   VectorDestructWithContents(&gen->fixups, NULL, /*free_element=*/true);
   VectorDestructWithContents(&gen->exception_edges, NULL, /*free_element=*/true);
+  if (gen->debug_labels != NULL) {
+    HashMapDestruct(gen->debug_labels);
+    free(gen->debug_labels);
+    gen->debug_labels = NULL;
+  }
 
   // Delete the basic blocks.
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {

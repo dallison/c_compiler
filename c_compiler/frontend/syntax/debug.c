@@ -52,6 +52,7 @@ void DebugBuilderInit(DebugBuilder* builder,
   builder->next_abbrev_number = 1;
   VectorInit(&builder->all_dies);
   VectorInit(&builder->top_dies);
+  VectorInit(&builder->location_lists);
   BufferInit(&builder->bytes);
   builder->fp = NULL;
   builder->module = NULL;
@@ -82,6 +83,7 @@ void DebugBuilderDestruct(DebugBuilder* builder) {
   VectorDestructWithContents(&builder->all_dies,
                              (VectorElementDestructor)DIEDestruct, /*free_element=*/true);
   VectorDestruct(&builder->top_dies);
+  VectorDestruct(&builder->location_lists);
   BufferDestruct(&builder->bytes);
 }
 
@@ -819,11 +821,12 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
   return die;
 }
 
+static void SymbolDIEDestruct(DIE* die);
 static void SymbolDIEBuild(DebugBuilder* builder, DIE* die);
 static void SymbolDIEPrint(DIE* die, int level);
 static void SymbolDIEEmit(DebugBuilder* builder, DIE* die);
 
-static DIEVirtuals symbol_virtuals = {NamedDIEDestruct, SymbolDIEBuild,
+static DIEVirtuals symbol_virtuals = {SymbolDIEDestruct, SymbolDIEBuild,
                                       SymbolDIEPrint, SymbolDIEEmit};
 
 static DIE* NewSymbolDIE(DebugBuilder* builder, Symbol* symbol, DW_TAG tag) {
@@ -1247,26 +1250,46 @@ static void DebugEmitAddress(DebugBuilder* builder, const char* symbol) {
   }
 }
 
-static DebugAttributeValue* LocationAttribute(VariableDIE* var) {
+// Appends the expression for a variable in DWARF register |reg|, or at the
+// address it holds.
+static void AppendRegisterLocation(Buffer* expr, int reg, bool holds_address) {
+  if (reg >= 0 && reg < 32) {
+    BufferAppendByte(expr, (holds_address ? DW_OP(breg0) : DW_OP(reg0)) + reg);
+  } else {
+    BufferAppendByte(expr, (char)(holds_address ? DW_OP(bregx) : DW_OP(regx)));
+    WriteUnsignedLEB128(expr, (uint64_t)reg);
+  }
+  if (holds_address) {
+    WriteSignedLEB128(expr, 0);
+  }
+}
+
+static DebugAttributeValue* LocationAttribute(DebugBuilder* builder,
+                                              VariableDIE* var) {
+  if (var->location.type == kLocationList) {
+    VariableLocationList* list = var->location.v.list;
+    if (list->ranges.length == 0) {
+      return NULL;
+    }
+    char label[32];
+    snprintf(label, sizeof(label), "__DW_LOC%d", var->die.die.id);
+    free(list->label);
+    list->label = strdup(label);
+    VectorAppend(&builder->location_lists, var);
+    DebugAttributeValue* v =
+        NewDebugAttributeValue(DW_AT(location), DW_FORM(sec_offset));
+    v->addr_symbol = list->label;
+    v->size = 4;
+    return v;
+  }
   DebugAttributeValue* v =
       NewDebugAttributeValue(DW_AT(location), DW_FORM(exprloc));
   switch (var->location.type) {
     case kLocationInRegister:
-      if (var->location.v.reg >= 0 && var->location.v.reg < 32) {
-        BufferAppendByte(&v->v.block, DW_OP(reg0) + var->location.v.reg);
-      } else {
-        BufferAppendByte(&v->v.block, (char)DW_OP(regx));
-        WriteUnsignedLEB128(&v->v.block, (uint64_t)var->location.v.reg);
-      }
+      AppendRegisterLocation(&v->v.block, var->location.v.reg, false);
       break;
     case kLocationAddressInRegister:
-      if (var->location.v.reg >= 0 && var->location.v.reg < 32) {
-        BufferAppendByte(&v->v.block, DW_OP(breg0) + var->location.v.reg);
-      } else {
-        BufferAppendByte(&v->v.block, (char)DW_OP(bregx));
-        WriteUnsignedLEB128(&v->v.block, (uint64_t)var->location.v.reg);
-      }
-      WriteSignedLEB128(&v->v.block, 0);
+      AppendRegisterLocation(&v->v.block, var->location.v.reg, true);
       break;
     case kLocationOnStack:
       BufferAppendByte(&v->v.block, (char)DW_OP(fbreg));
@@ -1279,11 +1302,48 @@ static DebugAttributeValue* LocationAttribute(VariableDIE* var) {
       }
       v->addr_symbol = var->location.v.symbol_name;
       break;
+    case kLocationList:
     case kLocationUnknown:
       DebugAttributeValueDelete(v);
       return NULL;
   }
   return v;
+}
+
+// Emits the location lists of the variables built with one.  Each list
+// starts by setting its base address to 0, so its addresses are absolute
+// whatever section the function is in.
+static void EmitLocationLists(DebugBuilder* builder) {
+  if (builder->location_lists.length == 0) {
+    return;
+  }
+  if (builder->module != NULL) {
+    AsmModuleSection(builder->module, ".debug_loc", SHT(progbits), 0, 1);
+  } else {
+    fprintf(builder->fp, "\n\t.section .debug_loc,\"\",@progbits,1\n");
+  }
+  int address_size = compiler->pointer_size;
+  for (size_t i = 0; i < builder->location_lists.length; i++) {
+    VariableDIE* var = builder->location_lists.value.p[i];
+    VariableLocationList* list = var->location.v.list;
+    DebugEmitLabel(builder, list->label);
+    DebugEmitConstant(builder, address_size, -1);
+    DebugEmitConstant(builder, address_size, 0);
+    for (size_t r = 0; r < list->ranges.length; r++) {
+      VariableLocationRange* range = list->ranges.value.p[r];
+      DebugEmitAddress(builder, range->begin);
+      DebugEmitAddress(builder, range->end);
+      Buffer expr;
+      BufferInit(&expr);
+      AppendRegisterLocation(&expr, range->reg, range->holds_address);
+      DebugEmitConstant(builder, 2, (int64_t)expr.length);
+      BufferAppend(&builder->bytes, expr.value, expr.length);
+      BufferDestruct(&expr);
+    }
+    DebugEmitConstant(builder, address_size, 0);
+    DebugEmitConstant(builder, address_size, 0);
+  }
+  FlushAccumulator(builder);
 }
 
 static DebugAttributeValue* FrameBaseAttribute(int dwarf_reg) {
@@ -1308,8 +1368,18 @@ static void DebugAttributeValueEmit(DebugBuilder* builder, DebugAttributeValue* 
       WriteByte(buffer, attr->v.data2 & 0xff);
       WriteByte(buffer, (attr->v.data2 >> 8) & 0xff);
       break;
-    case DW_FORM(data4):
     case DW_FORM(sec_offset):
+      if (attr->addr_symbol != NULL) {
+        FlushAccumulator(builder);
+        if (builder->module != NULL) {
+          DebugModuleInteger(builder, 4, attr->addr_symbol);
+        } else {
+          fprintf(builder->fp, "\t.4byte %s\n", attr->addr_symbol);
+        }
+        break;
+      }
+      // Fall through.
+    case DW_FORM(data4):
       WriteByte(buffer, attr->v.data4 & 0xff);
       WriteByte(buffer, (attr->v.data4 >> 8) & 0xff);
       WriteByte(buffer, (attr->v.data4 >> 16) & 0xff);
@@ -1816,7 +1886,7 @@ static void SymbolDIEBuild(DebugBuilder* builder, DIE* die) {
 
   AddAttributeAndValue(builder, die, DIEReference(DW_AT(type), var->type));
   AddAttributeAndValue(builder, die, Flag(DW_AT(external), var->is_external));
-  DebugAttributeValue* location = LocationAttribute(var);
+  DebugAttributeValue* location = LocationAttribute(builder, var);
   if (location != NULL) {
     AddAttributeAndValue(builder, die, location);
   }
@@ -1845,6 +1915,9 @@ static void SymbolDIEPrint(DIE* die, int level) {
     case kLocationAddressInRegister:
       printf("at reg %d\n", var->location.v.reg);
       break;
+    case kLocationList:
+      printf("%zu ranges\n", var->location.v.list->ranges.length);
+      break;
   }
   DIEPrint(var->type, level + 1);
 }
@@ -1853,6 +1926,43 @@ static void SymbolDIEEmit(DebugBuilder* builder, DIE* die) {
   DIEBaseEmit(builder, die);
   VariableDIE* var = (VariableDIE*)die;
   DIEEmit(builder, var->type);
+}
+
+VariableLocationRange* NewVariableLocationRange(const char* begin,
+                                                const char* end, int reg,
+                                                bool holds_address) {
+  VariableLocationRange* range = malloc(sizeof(VariableLocationRange));
+  range->begin = strdup(begin);
+  range->end = strdup(end);
+  range->reg = reg;
+  range->holds_address = holds_address;
+  return range;
+}
+
+static void VariableLocationRangeDelete(void* p) {
+  VariableLocationRange* range = p;
+  free(range->begin);
+  free(range->end);
+  free(range);
+}
+
+// Frees a location list the variable has, leaving its location unknown.
+static void ClearLocation(VariableDIE* var) {
+  if (var->location.type == kLocationList) {
+    VariableLocationList* list = var->location.v.list;
+    for (size_t i = 0; i < list->ranges.length; i++) {
+      VariableLocationRangeDelete(list->ranges.value.p[i]);
+    }
+    VectorDestruct(&list->ranges);
+    free(list->label);
+    free(list);
+  }
+  var->location.type = kLocationUnknown;
+}
+
+static void SymbolDIEDestruct(DIE* die) {
+  ClearLocation((VariableDIE*)die);
+  NamedDIEDestruct(die);
 }
 
 // Only variables and parameters have a location; a symbol's DIE can also be a
@@ -1864,8 +1974,19 @@ static VariableDIE* DIEAsVariable(DIE* die) {
              : NULL;
 }
 
-void VariableDIESetRegister(DIE* die, int reg) {
+// DIEAsVariable(die) with its location cleared, or NULL once the DIE is built,
+// which fixes its location.
+static VariableDIE* ResetLocation(DIE* die) {
   VariableDIE* var = DIEAsVariable(die);
+  if (var == NULL || die->abbrev != NULL) {
+    return NULL;
+  }
+  ClearLocation(var);
+  return var;
+}
+
+void VariableDIESetRegister(DIE* die, int reg) {
+  VariableDIE* var = ResetLocation(die);
   if (var == NULL) {
     return;
   }
@@ -1874,7 +1995,7 @@ void VariableDIESetRegister(DIE* die, int reg) {
 }
 
 void VariableDIESetAddressInRegister(DIE* die, int reg) {
-  VariableDIE* var = DIEAsVariable(die);
+  VariableDIE* var = ResetLocation(die);
   if (var == NULL) {
     return;
   }
@@ -1883,7 +2004,7 @@ void VariableDIESetAddressInRegister(DIE* die, int reg) {
 }
 
 void VariableDIESetStackOffset(DIE* die, int offset) {
-  VariableDIE* var = DIEAsVariable(die);
+  VariableDIE* var = ResetLocation(die);
   if (var == NULL) {
     return;
   }
@@ -1892,12 +2013,29 @@ void VariableDIESetStackOffset(DIE* die, int offset) {
 }
 
 void VariableDIESetStatic(DIE* die, const char* symbol) {
-  VariableDIE* var = DIEAsVariable(die);
+  VariableDIE* var = ResetLocation(die);
   if (var == NULL) {
     return;
   }
   var->location.type = kLocationStatic;
   var->location.v.symbol_name = symbol;
+}
+
+void VariableDIESetLocationList(DIE* die, Vector* ranges) {
+  VariableDIE* var = ResetLocation(die);
+  if (var == NULL) {
+    for (size_t i = 0; i < ranges->length; i++) {
+      VariableLocationRangeDelete(ranges->value.p[i]);
+    }
+    VectorClear(ranges);
+    return;
+  }
+  VariableLocationList* list = malloc(sizeof(VariableLocationList));
+  list->label = NULL;
+  list->ranges = *ranges;
+  VectorInit(ranges);
+  var->location.type = kLocationList;
+  var->location.v.list = list;
 }
 
 static void MemberDIEBuild(DebugBuilder* builder, DIE* die) {
@@ -2109,4 +2247,5 @@ void DebugBuilderEmitDebugInfo(DebugBuilder* builder) {
       }
       index += strlen(&strtab->value[index]) + 1;
     }
+  EmitLocationLists(builder);
 }

@@ -1001,6 +1001,18 @@ static bool ReadGuaranteedBeforeHandover(AARCH64RegisterAllocator* allocator,
   return ok;
 }
 
+// Records that |inst|, if it is a register variable, is spilled to |slot|.
+static void NoteSpilledVariable(AARCH64Generator* g, TargetInstruction* inst,
+                                int slot) {
+  for (size_t i = 0; i < g->var_regs.length; i++) {
+    RegisterVariable* var = g->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->spill_slot = var->spilled && var->spill_slot != slot ? -1 : slot;
+      var->spilled = true;
+    }
+  }
+}
+
 static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, TargetInstruction* inst) {
   AARCH64Register* reg = (AARCH64Register*)inst->reg;    // Current register.
 
@@ -1035,12 +1047,16 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
     allocator->current_spilled_region_size =
         (allocator->current_spilled_region_size + 15) & ~15;
   }
+  // The emitter addresses slot |s| 8 + |s| bytes below the top of the spill
+  // region, so a 16-byte slot at depth |d| is numbered |d| + 8; numbered |d|,
+  // its upper half would overlap the previous slot or the locals.
   TargetInstruction* spill = TargetNewInstruction2(
       (TargetOpcode)AARCH64_OP(spill), NULL,
       remat_only ? NULL
                  : TargetGetIntConstant(&allocator->g->base, NULL,
                                         kTargetType32Bit,
-                                        allocator->current_spilled_region_size));
+                                        allocator->current_spilled_region_size +
+                                            spill_bytes - 8));
   SetInstructionSize(spill, GetRegisterSize(inst) == 0 ? kSize64Bit
                                                        : GetRegisterSize(inst));
   if (!remat_only) {
@@ -1061,6 +1077,8 @@ static AARCH64Register* SpillInstruction(AARCH64RegisterAllocator* allocator, Ta
     MapKeyValue kv = {.key.p = inst, .value.p = spill};
     MapInsert(&allocator->reassignable_spills, kv);
     InsertReassignableStoreBacks(allocator, inst, spill);
+    NoteSpilledVariable(allocator->g, inst,
+                        (int)TargetIntValue(spill->operand[1]));
   } else {
     // Emit spill instruction just after spilled instruction.
     TargetBasicBlockEmitAfter(&allocator->g->base, inst->block, spill, inst);

@@ -23,6 +23,7 @@
 #include "risc_v_codegen.h"
 #include "risc_v_reg_alloc.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 // Is the given instruction printable?  Some instructions do not
 // produce any output as they are used for information for other
@@ -71,6 +72,22 @@ static bool IsPrintable(TargetInstruction* inst) {
       break;
   }
   return true;
+}
+
+bool RVInstructionEmitsCode(TargetInstruction* inst) {
+  if (inst->block == NULL || inst->observable_checkpoint) {
+    return false;
+  }
+  switch ((RVOpcode)inst->opcode) {
+    case RV_OP(label):
+      return (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0;
+    case RV_OP(named_label):
+    case RV_OP(loc):
+    case RV_OP(symbol):
+      return false;
+    default:
+      return IsPrintable(inst);
+  }
 }
 
 static const char* SymbolName(TargetSymbol* sym, char* buf, size_t len) {
@@ -1798,6 +1815,12 @@ void RVPrintFunction(RVEmitter* emitter, FILE* fp) {
   DaveEHPrintFuncTextLabel(fp, func_name);
   TargetInstruction* inst = TargetFirstInstruction(&emitter->rv->base);
   while (inst != NULL) {
+    int label = TargetDebugLabel(&emitter->rv->base, inst);
+    if (label >= 0) {
+      char name[32];
+      TargetDebugLabelName(label, name, sizeof(name));
+      fprintf(fp, "%s:\n", name);
+    }
     PrintInstruction(emitter, inst, func_name, fp);
     inst = TargetNext(inst);
   }

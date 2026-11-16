@@ -7,6 +7,7 @@
 //
 
 #include "aarch64_codegen.h"
+#include "aarch64_emitter.h"
 #include "aarch64_optimize.h"
 #include <assert.h>
 #include <limits.h>
@@ -18,6 +19,7 @@
 #include "type_special_member.h"
 
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 static void LowerVariables(AARCH64Generator* g, Generator* gen);
 
@@ -6726,37 +6728,79 @@ static void SetHoldsAddress(AARCH64Generator* g, TargetInstruction* inst) {
   }
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it, it was spilled, or
-// splitting or shrink wrapping moved it over part of the function.
-static int DebugRegister(AARCH64Generator* g, RegisterVariable* var) {
-  AARCH64Register* reg = (AARCH64Register*)var->inst->reg;
-  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
-      (var->split_location != NULL &&
-       var->split_location->reg != &reg->base)) {
+// The DWARF number of |r|, or -1 if a location in it does not stay there:
+// shrink wrapping moves some callee-saved registers on the fast path.
+static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
+  AARCH64Register* reg = (AARCH64Register*)r;
+  if (reg == NULL) {
     return -1;
   }
   if (reg->type == kAARCH64RegTypeFloat) {
     return 64 + reg->base.num;  // v0 to v31.
   }
-  if (reg->base.num > 30 ||
-      ((g->register_allocator.shrink_wrapped_regs >> reg->base.num) & 1) != 0) {
+  uint32_t shrink_wrapped =
+      ((AARCH64Generator*)gen)->register_allocator.shrink_wrapped_regs;
+  if (reg->base.num > 30 || ((shrink_wrapped >> reg->base.num) & 1) != 0) {
     return -1;
   }
   return reg->base.num;
 }
 
-// Points each register variable's debug information at the register
-// allocation chose for it.
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it, it was spilled, or
+// splitting or shrink wrapping moved it over part of the function.
+static int DebugRegister(AARCH64Generator* g, RegisterVariable* var) {
+  TargetRegister* reg = var->inst->reg;
+  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
+      (var->split_location != NULL && var->split_location->reg != reg)) {
+    return -1;
+  }
+  return DwarfRegister(&g->base, reg);
+}
+
+// The frame base offset of spill slot |slot|, which the emitter addresses
+// 8 + |slot| bytes below the local variables.
+static int SpillSlotFrameOffset(AARCH64Generator* g, int slot) {
+  return -(g->base.stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE + 8 +
+           slot);
+}
+
+// Points each register variable's debug information at the registers or spill
+// slot allocation chose for it.
 static void SetDebugRegisterLocations(AARCH64Generator* g) {
   if (!compiler->debug_output) {
     return;
   }
+  TargetDebugVariable* colored =
+      malloc((g->var_regs.length + 1) * sizeof(TargetDebugVariable));
+  int num_colored = 0;
   for (size_t i = 0; i < g->var_regs.length; i++) {
     RegisterVariable* var = g->var_regs.value.p[i];
     Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    if (symbol == NULL) {
+      continue;
+    }
+    // Every assignment of a spilled variable stores it, so its slot holds it
+    // throughout, unless splitting gave it a register over part of the
+    // function or shrink wrapping moved its stores off the fast path.
+    if (var->spilled) {
+      if (var->spill_slot >= 0 && !var->holds_address &&
+          var->split_location == NULL &&
+          g->register_allocator.shrink_wrapped_regs == 0) {
+        VariableDIESetStackOffset(SymbolDIE(symbol),
+                                  SpillSlotFrameOffset(g, var->spill_slot));
+      }
+      continue;
+    }
+    // The coloring allocator reuses a variable's register where the variable
+    // is dead.
+    if (g->colored) {
+      colored[num_colored++] = (TargetDebugVariable){
+          symbol, {var->inst, var->split_location}, var->holds_address};
+      continue;
+    }
     int reg = DebugRegister(g, var);
-    if (symbol == NULL || reg < 0) {
+    if (reg < 0) {
       continue;
     }
     if (var->holds_address) {
@@ -6765,6 +6809,12 @@ static void SetDebugRegisterLocations(AARCH64Generator* g) {
       VariableDIESetRegister(SymbolDIE(symbol), reg);
     }
   }
+  if (num_colored != 0) {
+    TargetSetDebugLocationLists(&g->base, AARCH64RAInfo(), colored,
+                                num_colored, DwarfRegister,
+                                AARCH64InstructionEmitsCode);
+  }
+  free(colored);
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {

@@ -255,6 +255,7 @@ davecc_library(davecc_compiler
   c_compiler/support/version.c
   c_compiler/backend/target_basic_block.c
   c_compiler/backend/target_generator.c
+  c_compiler/backend/target_debug_ranges.c
   c_compiler/backend/target_ra_ir.c
   c_compiler/backend/target_reg_alloc.c
   c_compiler/driver/compiler.c

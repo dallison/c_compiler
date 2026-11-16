@@ -125,11 +125,19 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   return n;
 }
 
+static bool ReadsThrough(TargetInstruction* operand) {
+  return (AARCH64Opcode)operand->opcode == AARCH64_OP(regarg);
+}
+
+static TargetRACopyKind CopyKind(TargetInstruction* inst);
+
 static const TargetRAInfo kInfo = {
     .kind = Kind,
     .location_key = LocationKey,
     .written_operand = WrittenOperand,
     .clobbers = Clobbers,
+    .reads_through = ReadsThrough,
+    .copy_kind = CopyKind,
 };
 
 const TargetRAInfo* AARCH64RAInfo(void) { return &kInfo; }
@@ -257,10 +265,6 @@ static TargetRACopyKind CopyKind(TargetInstruction* inst) {
   return kTargetRAConvertingCopy;
 }
 
-static bool ReadsThrough(TargetInstruction* operand) {
-  return (AARCH64Opcode)operand->opcode == AARCH64_OP(regarg);
-}
-
 static int ArgumentKeys(int* keys, int max_keys) {
   int n = 0;
   for (int r = 0; r < AARCH64_NUM_INT_ARGS && n < max_keys; r++) {
@@ -352,19 +356,41 @@ static int SlotSize(TargetInstruction* value) {
   return IsVector128(value) ? kSize128Bit : kSize64Bit;
 }
 
+// The register variable whose location is |inst|, or NULL.
+static RegisterVariable* FindVariable(ColoringContext* c,
+                                      TargetInstruction* inst) {
+  if (Kind(inst) != kTargetRALocation) {
+    return NULL;
+  }
+  Vector* var_regs = &c->allocator->g->var_regs;
+  for (size_t i = 0; i < var_regs->length; i++) {
+    RegisterVariable* var = var_regs->value.p[i];
+    if (var->inst == inst) {
+      return var;
+    }
+  }
+  return NULL;
+}
+
 // The emitter addresses slot |s| 8 + |s| bytes below the top of the spill
 // region, so slot |s| is the 8 bytes at depth |s| and a 16-byte slot at depth
 // |d| is numbered |d| + 8.
 static int NewSlot(void* ctx, TargetInstruction* value) {
   ColoringContext* c = ctx;
+  int slot;
   if (SlotSize(value) != kSize128Bit) {
-    int slot = c->spill_size;
+    slot = c->spill_size;
     c->spill_size += 8;
-    return slot;
+  } else {
+    c->spill_size = (c->spill_size + 15) & ~15;
+    slot = c->spill_size + 8;
+    c->spill_size += 16;
   }
-  c->spill_size = (c->spill_size + 15) & ~15;
-  int slot = c->spill_size + 8;
-  c->spill_size += 16;
+  RegisterVariable* var = FindVariable(c, value);
+  if (var != NULL) {
+    var->spill_slot = var->spilled && var->spill_slot != slot ? -1 : slot;
+    var->spilled = true;
+  }
   return slot;
 }
 
@@ -407,14 +433,9 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
     location->base.flags |= AARCH64_INST_AVOID_ARG_REGS;
   }
   TargetTrackOrphanInstruction(&c->allocator->g->base, &location->base);
-  Vector* var_regs = &c->allocator->g->var_regs;
-  if (Kind(like) == kTargetRALocation) {
-    for (size_t i = 0; i < var_regs->length; i++) {
-      RegisterVariable* var = var_regs->value.p[i];
-      if (var->inst == like) {
-        var->split_location = &location->base;
-      }
-    }
+  RegisterVariable* var = FindVariable(c, like);
+  if (var != NULL) {
+    var->split_location = &location->base;
   }
   return &location->base;
 }
@@ -528,8 +549,6 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
       .reg_class = RegClass,
       .fixed_value_key = FixedValueKey,
       .defines_register = DefinesRegister,
-      .copy_kind = CopyKind,
-      .reads_through = ReadsThrough,
       .implicit_uses = ImplicitUses,
       .forbidden_keys = ForbiddenKeys,
       .early_clobber = EarlyClobber,

@@ -21,6 +21,7 @@
 #include "aarch64_program.h"
 #include "aarch64_reg_alloc.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 static void Trap() {}
 
@@ -2779,7 +2780,6 @@ static bool EmitsCode(TargetInstruction* inst) {
          inst->opcode != (TargetOpcode)AARCH64_OP(loc) && IsPrintable(inst) &&
          !inst->observable_checkpoint;
 }
-
 static bool IsUnconditionalBranch(TargetInstruction* inst) {
   return inst->opcode == (TargetOpcode)AARCH64_OP(b) &&
          ProgramCondition(inst->operand[0]) == AARCH64_ASM_COND_AL;
@@ -2805,6 +2805,27 @@ static bool BranchesToNextInstruction(TargetInstruction* inst) {
     }
   }
   return false;
+}
+
+bool AARCH64InstructionEmitsCode(TargetInstruction* inst) {
+  if (inst->block != NULL &&
+      inst->opcode == (TargetOpcode)AARCH64_OP(label)) {
+    return (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0;
+  }
+  if (!EmitsCode(inst) || inst->opcode == (TargetOpcode)AARCH64_OP(symbol) ||
+      BranchesToNextInstruction(inst)) {
+    return false;
+  }
+  // ProgramAddSubImmediate drops an addition of zero to the same register.
+  if ((inst->opcode == (TargetOpcode)AARCH64_OP(add) ||
+       inst->opcode == (TargetOpcode)AARCH64_OP(sub)) &&
+      inst->reg != NULL && inst->operand[0] != NULL &&
+      inst->operand[0]->reg == inst->reg && inst->operand[1] != NULL &&
+      TargetIsConst(inst->operand[1]) &&
+      TargetIntValue(inst->operand[1]) == 0) {
+    return false;
+  }
+  return true;
 }
 
 static void ProgramEmitInstruction(AARCH64Emitter* emitter,
@@ -4021,6 +4042,12 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   }
   TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
   while (inst != NULL) {
+    int label = TargetDebugLabel(&emitter->g->base, inst);
+    if (label >= 0) {
+      char name[32];
+      TargetDebugLabelName(label, name, sizeof(name));
+      fprintf(fp, "%s:\n", name);
+    }
     PrintInstruction(emitter, inst, func_name, fp);
     inst = TargetNext(inst);
   }
@@ -4058,6 +4085,12 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
       } else if (!IsUnconditionalBranch(inst)) {
         in_jump_table = false;
       }
+    }
+    int label = TargetDebugLabel(&emitter->g->base, inst);
+    if (label >= 0) {
+      char name[32];
+      TargetDebugLabelName(label, name, sizeof(name));
+      AsmModuleLabel(module, name);
     }
     if (!in_jump_table && BranchesToNextInstruction(inst)) {
       continue;

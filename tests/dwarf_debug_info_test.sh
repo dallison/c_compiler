@@ -108,13 +108,41 @@ class Cursor:
                 return result
             shift += 7
 
+    def sleb(self):
+        result = 0
+        shift = 0
+        while True:
+            byte = self.u8()
+            result |= (byte & 0x7F) << shift
+            shift += 7
+            if (byte & 0x80) == 0:
+                if byte & 0x40:
+                    result -= 1 << shift
+                return result
 
-def parse_elf_sections(blob):
+
+SHT_RELA = 4
+EM_AARCH64 = 183
+# The relocations in debug sections, by type: the bytes they write, and
+# whether they set the value there or add to or subtract from it.
+RELOCATIONS = {
+    "aarch64": {257: (8, "set"), 258: (4, "set")},  # R_AARCH64_ABS64, ABS32
+    # R_RISCV_32, R_RISCV_64, ADD32, ADD64, SUB32, SUB64.
+    "riscv": {1: (4, "set"), 2: (8, "set"), 35: (4, "add"), 36: (8, "add"),
+              39: (4, "sub"), 40: (8, "sub")},
+}
+
+
+def parse_elf_sections(blob, relocate=False):
+    """Maps section names to their contents.  With |relocate|, applies the
+    relocations of the sections of an AArch64 or RISC-V object, taking every
+    section's address as 0."""
     if blob[:4] != b"\x7fELF":
         raise ValueError("not an ELF file")
     elf64 = blob[4] == 2
     if blob[5] != 1:
         raise ValueError("ELF file is not little-endian")
+    machine, = struct.unpack_from("<H", blob, 18)
     if elf64:
         e_shoff, = struct.unpack_from("<Q", blob, 40)
         e_shentsize, e_shnum, e_shstrndx = struct.unpack_from("<HHH", blob, 58)
@@ -131,19 +159,44 @@ def parse_elf_sections(blob):
     for i in range(e_shnum):
         off = e_shoff + i * e_shentsize
         fields = struct.unpack_from(sh_fmt, blob, off)
-        if elf64:
-            name, sh_type, flags, addr, offset, size = fields[:6]
-        else:
-            name, sh_type, flags, addr, offset, size = fields[:6]
-        sections.append((name, sh_type, offset, size))
-    strtab_name, _, str_off, str_size = sections[e_shstrndx]
+        name, sh_type, flags, addr, offset, size, link, info = fields[:8]
+        sections.append((name, sh_type, offset, size, link, info))
+    str_off, str_size = sections[e_shstrndx][2:4]
     strtab = blob[str_off:str_off + str_size]
-    result = {}
-    for name_off, sh_type, offset, size in sections:
+    names = []
+    contents = []
+    for name_off, sh_type, offset, size, link, info in sections:
         end = strtab.find(b"\0", name_off)
-        name = strtab[name_off:end].decode("utf-8", "replace")
-        result[name] = blob[offset:offset + size]
-    return result
+        names.append(strtab[name_off:end].decode("utf-8", "replace"))
+        contents.append(bytearray(blob[offset:offset + size]))
+    if relocate:
+        if not elf64:
+            raise ValueError("relocating a 32-bit object")
+        kinds = RELOCATIONS["aarch64" if machine == EM_AARCH64 else "riscv"]
+        for name_off, sh_type, offset, size, link, info in sections:
+            if sh_type != SHT_RELA:
+                continue
+            symtab = contents[link]
+            target = contents[info]
+            for r in range(0, size, 24):
+                r_offset, r_info, r_addend = struct.unpack_from(
+                    "<QQq", blob, offset + r)
+                kind = kinds.get(r_info & 0xffffffff)
+                if kind is None:
+                    continue
+                width, op = kind
+                st_value, = struct.unpack_from("<Q", symtab,
+                                               (r_info >> 32) * 24 + 8)
+                fmt = "<Q" if width == 8 else "<I"
+                value = st_value + r_addend
+                old, = struct.unpack_from(fmt, target, r_offset)
+                if op == "add":
+                    value = old + value
+                elif op == "sub":
+                    value = old - value
+                struct.pack_into(fmt, target, r_offset,
+                                 value & ((1 << (8 * width)) - 1))
+    return {name: bytes(data) for name, data in zip(names, contents)}
 
 
 def parse_abbrevs(blob):
@@ -168,8 +221,7 @@ def parse_abbrevs(blob):
 
 def skip_form(cur, form, address_size, debug_str):
     if form == DW_FORM_addr:
-        cur.offset += address_size
-        return None
+        return int.from_bytes(cur.bytes(address_size), "little")
     if form == DW_FORM_data1 or form == DW_FORM_flag:
         return cur.u8()
     if form == DW_FORM_data2:
@@ -347,7 +399,8 @@ FP_REGS = {"aarch64": set(range(64, 96)), "riscv": set(range(32, 64))}
 
 
 def decode_location(expr):
-    """Returns ("reg" or "breg", DWARF register) for a register location."""
+    """Returns ("reg" or "breg", DWARF register) for a register location, or
+    ("fbreg", offset) for one in the frame."""
     cur = Cursor(expr)
     op = cur.u8()
     if 0x50 <= op <= 0x6f:
@@ -358,26 +411,100 @@ def decode_location(expr):
         return "breg", op - 0x70
     if op == 0x92:
         return "breg", cur.uleb()
+    if op == 0x91:
+        return "fbreg", cur.sleb()
     return "other", op
 
 
-def register_locations(path):
-    """Maps (function, variable) to its decoded location, or None."""
+def parse_location_list(debug_loc, offset):
+    """Returns the (low, high, kind, register) entries of the location list at
+    |offset|, for an address size of 8."""
+    cur = Cursor(debug_loc, offset)
+    base = 0
+    entries = []
+    while True:
+        begin = cur.u64()
+        end = cur.u64()
+        if begin == 0 and end == 0:
+            return entries
+        if begin == (1 << 64) - 1:
+            base = end
+            continue
+        kind, reg = decode_location(cur.bytes(cur.u16()))
+        entries.append((base + begin, base + end, kind, reg))
+
+
+def call_addresses(text, low, high, target):
+    """The addresses of the calls between |low| and |high| in |text|."""
+    calls = []
+    for pc in range(low, high, 4):
+        word, = struct.unpack_from("<I", text, pc)
+        if target == "aarch64":
+            # bl, blr.
+            is_call = ((word & 0xfc000000) == 0x94000000 or
+                       (word & 0xfffffc1f) == 0xd63f0000)
+        else:
+            # jal ra and jalr ra.
+            is_call = (word & 0x7f) in (0x6f, 0x67) and (word >> 7) & 0x1f == 1
+        if is_call:
+            calls.append(pc)
+    return calls
+
+
+def register_locations(path, target):
+    """Maps (function, variable) to its location: None, ("fbreg", offset), or
+    (entries, listed).  Each entry is (low, high, kind, register): a register
+    that holds the variable, or its address for kind "breg", and the code over
+    which it does.  |listed| is whether that came from a location list rather
+    than one location for the whole function.  Also maps each function to the
+    addresses of its calls."""
     with open(path, "rb") as fh:
-        sections = parse_elf_sections(fh.read())
+        sections = parse_elf_sections(fh.read(), relocate=True)
+    debug_loc = sections.get(".debug_loc", b"")
+    cur = Cursor(debug_loc, 0)
+    while cur.offset < len(debug_loc):
+        begin = cur.u64()
+        end = cur.u64()
+        if (begin == 0 and end == 0) or begin == (1 << 64) - 1:
+            continue
+        if begin == end:
+            raise ValueError("%s: empty .debug_loc range at 0x%x" %
+                             (path, begin))
+        cur.bytes(cur.u16())
     abbrevs = parse_abbrevs(sections[".debug_abbrev"])
     dies, _ = parse_dies(sections[".debug_info"], abbrevs,
                          sections.get(".debug_str", b""))
     function = None
+    low = high = 0
     locations = {}
+    calls = {}
     for tag, values in dies:
         if tag == DW_TAG_subprogram:
             function = values.get(DW_AT_name)
+            low = values.get(DW_AT_low_pc)
+            high = low + values.get(DW_AT_high_pc)
+            calls[function] = call_addresses(sections[".text"], low, high,
+                                             target)
         elif tag in (DW_TAG_variable, DW_TAG_formal_parameter):
-            expr = values.get(DW_AT_location)
-            locations[(function, values.get(DW_AT_name))] = (
-                decode_location(expr) if expr else None)
-    return locations
+            location = values.get(DW_AT_location)
+            if location is None:
+                decoded = None
+            elif isinstance(location, int):
+                entries = parse_location_list(sections[".debug_loc"], location)
+                for entry in entries:
+                    if not low <= entry[0] <= entry[1] <= high:
+                        raise ValueError(
+                            "%s: %s in %s is in a register at 0x%x-0x%x, "
+                            "outside the function at 0x%x-0x%x" %
+                            ((path, values.get(DW_AT_name), function) +
+                             entry[:2] + (low, high)))
+                decoded = (entries, True)
+            else:
+                kind, value = decode_location(location)
+                decoded = ((kind, value) if kind == "fbreg" else
+                           ([(low, high, kind, value)], False))
+            locations[(function, values.get(DW_AT_name))] = decoded
+    return locations, calls
 
 
 def check_register_variables(davecc, source, work, target, opt, allocator_env):
@@ -386,25 +513,76 @@ def check_register_variables(davecc, source, work, target, opt, allocator_env):
     env.update(allocator_env)
     subprocess.check_call([davecc, "-target", target, "-g", opt, "-nostdinc",
                            "-c", source, "-o", obj], env=env)
-    locations = register_locations(obj)
+    locations, calls = register_locations(obj, target)
     config = "%s %s %s" % (target, opt, allocator_env or "")
+    saved = CALLEE_SAVED[target]
+
+    # A call overwrites the registers it does not save, so a location list
+    # cannot claim one of them holds a variable once the call returns.
+    for (function, name), location in locations.items():
+        if location is None or location[0] == "fbreg" or not location[1]:
+            continue
+        for low, high, kind, reg in location[0]:
+            if reg in saved["int"] or reg in saved["fp"]:
+                continue
+            for call in calls.get(function, []):
+                if low <= call and call + 4 < high:
+                    raise ValueError(
+                        "%s: %s in %s is in register %d at 0x%x-0x%x, across "
+                        "the call at 0x%x" %
+                        (config, name, function, reg, low, high, call))
 
     def expect(function, name, kind, regs):
+        """Checks that each register holding the variable is a |kind|
+        location in |regs|, and returns the entries."""
         location = locations.get((function, name))
-        if location is None or location[0] != kind or location[1] not in regs:
+        if (location is None or location[0] == "fbreg" or
+                not any(entry[0] < entry[1] for entry in location[0]) or
+                any(entry[2] != kind or entry[3] not in regs
+                    for entry in location[0])):
             raise ValueError("%s: %s in %s is at %s, expected %s in %s" %
                              (config, name, function, location, kind,
                               sorted(regs)))
-        return location[1]
+        return location[0]
 
-    saved = CALLEE_SAVED[target]
+    def shared(a, b):
+        """A register two variables' entries both claim at once, or None."""
+        for low, high, _, reg in a:
+            for other_low, other_high, _, other_reg in b:
+                if reg == other_reg and low < other_high and other_low < high:
+                    return reg
+        return None
+
     total = expect("count", "total", "reg", saved["int"])
     i = expect("count", "i", "reg", saved["int"])
-    if total == i:
-        raise ValueError("%s: total and i share register %d" % (config, i))
+    if shared(total, i) is not None:
+        raise ValueError("%s: total and i share register %d" %
+                         (config, shared(total, i)))
     expect("scale", "x", "reg", saved["fp"])
     expect("scale", "acc", "reg", FP_REGS[target])
     expect("make", "r", "breg", set(range(0, 32)))
+
+    # More accumulators are live across the calls than there are saved
+    # registers, so some are in the frame.
+    in_frame = []
+    in_registers = []
+    for name in "abcdefghijklmo":
+        location = locations.get(("many", name))
+        if location is not None and location[0] == "fbreg":
+            if location[1] >= 0 or location[1] in in_frame:
+                raise ValueError("%s: %s in many is at %s" %
+                                 (config, name, location))
+            in_frame.append(location[1])
+            continue
+        entries = expect("many", name, "reg", saved["int"])
+        for other in in_registers:
+            if shared(entries, other) is not None:
+                raise ValueError("%s: accumulators in many share register %d" %
+                                 (config, shared(entries, other)))
+        in_registers.append(entries)
+    if not in_frame:
+        raise ValueError("%s: no accumulator in many is in the frame" %
+                         config)
     print("ok register variables %s" % config)
 
 

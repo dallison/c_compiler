@@ -32,15 +32,6 @@ typedef struct {
   int regs[TARGET_RA_MAX_CLASS_REGS];
 } TargetRAClass;
 
-typedef enum {
-  kTargetRANotCopy,
-  // A copy the allocator may delete by giving both sides one register.
-  kTargetRACopy,
-  // A copy that also changes the value, such as a 32-bit move that clears
-  // the upper half.  Both sides must stay in different registers.
-  kTargetRAConvertingCopy,
-} TargetRACopyKind;
-
 typedef struct TargetRegAllocDesc {
   const TargetRAInfo* info;
   void* ctx;
@@ -53,11 +44,6 @@ typedef struct TargetRegAllocDesc {
   int (*fixed_value_key)(TargetInstruction* inst);
   // False for a value that only sets flags or memory.
   bool (*defines_register)(TargetInstruction* inst);
-  // Whether |inst| copies operand 0 into its result, and how.
-  TargetRACopyKind (*copy_kind)(TargetInstruction* inst);
-  // Whether reading |operand| reads its own operands, as a chain of
-  // argument holders does at the call.
-  bool (*reads_through)(TargetInstruction* operand);
   // Physical keys |inst| reads without naming them, such as the result
   // registers at a return.  Returns how many it stored.
   int (*implicit_uses)(void* ctx, TargetInstruction* inst, int* keys,

@@ -578,13 +578,18 @@ static RVRegister* SpillInstruction(RVRegisterAllocator* allocator, TargetInstru
   // We don't set the spilled instruction yet because TargetRetargetInstruction
   // will see it and retarget it to the spill.
   TrapSpill(inst);
+  // The emitter addresses slot |s| 8 + |s| bytes below the top of the spill
+  // region, so a 16-byte slot at depth |d| is numbered |d| + 8; numbered |d|,
+  // its upper half would overlap the previous slot or the locals.
+  int spill_bytes =
+      ((RVRegister*)inst->reg)->type == kRVRegTypeVector ? 16 : 8;
   TargetInstruction* spill = TargetNewInstruction2((TargetOpcode)RV_OP(spill), NULL,
                                                    TargetGetIntConstant(&allocator->rv->base,
                                                                         NULL,
                                                                         kTargetType32Bit,
-                                                                        allocator->current_spilled_region_size));
-  allocator->current_spilled_region_size +=
-      (((RVRegister*)inst->reg)->type == kRVRegTypeVector) ? 16 : 8;
+                                                                        allocator->current_spilled_region_size +
+                                                                            spill_bytes - 8));
+  allocator->current_spilled_region_size += spill_bytes;
   if (allocator->current_spilled_region_size > allocator->max_spilled_region_size) {
     allocator->max_spilled_region_size = allocator->current_spilled_region_size;
   }

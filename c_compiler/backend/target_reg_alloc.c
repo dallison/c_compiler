@@ -404,7 +404,7 @@ static int OperandNode(RA* ra, TargetInstruction* op) {
 
 static bool ReadsThrough(RA* ra, TargetInstruction* op, int depth) {
   return depth < kMaxReadDepth && ra->info->kind(op) == kTargetRANone &&
-         ra->desc->reads_through(op);
+         ra->info->reads_through(op);
 }
 
 static void CollectInstructions(RA* ra) {
@@ -484,7 +484,7 @@ static TargetRACopyKind CopyKind(RA* ra, TargetInstruction* inst) {
   if (IsTransparentCopy(ra, inst) || IsSplitCopy(ra, inst)) {
     return kTargetRACopy;
   }
-  return ra->desc->copy_kind(inst);
+  return ra->info->copy_kind(inst);
 }
 
 // ---------------------------------------------------------------------------

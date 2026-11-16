@@ -35,4 +35,9 @@ void AARCH64EmitCXXAdjustorThunksToModule(AsmModule* module);
 void AARCH64EmitFunction(AARCH64Emitter* emitter, FILE* text_out);
 void AARCH64PrintCXXAdjustorThunks(FILE* fp);
 
+// False when |inst| changes no register a variable can be in: the emitters
+// print no machine code for it, or it adds zero to a register or branches to
+// the code that follows.
+bool AARCH64InstructionEmitsCode(TargetInstruction* inst);
+
 #endif /* aarch64_emitter_h */

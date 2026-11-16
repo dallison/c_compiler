@@ -31,4 +31,7 @@ void RVEmitterDelete(RVEmitter* emitter);
 void RVPrintFunction(RVEmitter* emitter, FILE* fp);
 void RVPrintCXXAdjustorThunks(FILE* fp);
 
+// False when the emitter prints no machine code for |inst|.
+bool RVInstructionEmitsCode(TargetInstruction* inst);
+
 #endif /* risc_v_emitter_h */
