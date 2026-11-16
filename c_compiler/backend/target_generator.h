@@ -379,6 +379,10 @@ TargetInstruction* TargetGetFloatingPointConstant(TargetGenerator* target,
 
 TargetInstruction* TargetNewLocation(IRLocation* loc);
 TargetInstruction* TargetNewNamedLabel(const char* name);
+// A label -g emits to bound a block's debug address range (see
+// NewPCLabelASTNode).  Passes that weigh code should not count it, so that -g
+// does not change the code.
+bool TargetIsDebugRangeLabel(const TargetInstruction* inst);
 
 TargetInstruction* NewTargetSymbol(Symbol* symbol);
 

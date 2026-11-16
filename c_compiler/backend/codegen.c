@@ -258,8 +258,39 @@ void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func) {
   gen->source_pointer_size =
       compiler->target != NULL ? compiler->target->pointer_size : SizeofPointer();
   gen->int128_word = NULL;
+  VectorInit(&gen->debug_ranges);
+  VectorInit(&gen->debug_range_labels);
+  gen->debug_range_anchors = NULL;
 
   IRResetNodeId();
+}
+
+typedef struct DebugRangeLabel {
+  IRNode* label;
+  // The loc it goes before, or with |after_anchor|, the loc whose code it goes
+  // after.  NULL puts it at the end of the code.
+  IRNode* anchor;
+  bool after_anchor;
+  // The last loc before it in the code, for the end of a range to compare.
+  IRNode* last_loc;
+  // For the end of a range, the entry for its start.
+  struct DebugRangeLabel* start;
+} DebugRangeLabel;
+
+void GeneratorAddDebugRange(Generator* gen, IRNode* start, IRNode* end) {
+  VectorAppend(&gen->debug_ranges, start);
+  VectorAppend(&gen->debug_ranges, end);
+}
+
+static void FreeDebugRangeLabels(Generator* gen) {
+  VectorDestructWithContents(&gen->debug_range_labels, NULL,
+                             /*free_element=*/true);
+  VectorInit(&gen->debug_range_labels);
+  if (gen->debug_range_anchors != NULL) {
+    HashMapDestruct(gen->debug_range_anchors);
+    free(gen->debug_range_anchors);
+    gen->debug_range_anchors = NULL;
+  }
 }
 
 static void PrintIR(ListElement* hdr, void* fp) {
@@ -289,6 +320,13 @@ void GeneratorDestruct(Generator* gen) {
   // Delete all IR nodes.
   ListTraverse(&gen->code, DestructIRNode, NULL);
   ListDestruct(&gen->code);
+  for (size_t i = 0; i < gen->debug_range_labels.length; i++) {
+    DebugRangeLabel* entry = gen->debug_range_labels.value.p[i];
+    IRDestruct(entry->label);
+    free(entry->label);
+  }
+  FreeDebugRangeLabels(gen);
+  VectorDestruct(&gen->debug_ranges);
 
   // The pools own the PoolEntry wrappers (the pooled IR nodes themselves live
   // in gen->code and were destructed above), so free the entries here.
@@ -644,7 +682,59 @@ IRNode* GeneratorEmitVariable(Generator* gen, IRNode* inst) {
   return inst;
 }
 
+// The first loc at or after |inst|, or NULL.
+static IRNode* NextLocation(IRNode* inst) {
+  for (; inst != NULL; inst = IRNext(inst)) {
+    if (inst->opcode == IR_OP(loc)) {
+      return inst;
+    }
+  }
+  return NULL;
+}
+
+// The last loc at or before |inst|, or NULL.
+static IRNode* PrevLocation(IRNode* inst) {
+  for (; inst != NULL; inst = IRPrev(inst)) {
+    if (inst->opcode == IR_OP(loc)) {
+      return inst;
+    }
+  }
+  return NULL;
+}
+
+static void SetDebugRangeAnchor(Generator* gen, DebugRangeLabel* entry,
+                                IRNode* anchor, bool after_anchor) {
+  entry->anchor = anchor;
+  entry->after_anchor = after_anchor;
+  if (anchor != NULL) {
+    HashMapInsert(gen->debug_range_anchors, (uint64_t)(uintptr_t)anchor, 1);
+  }
+}
+
+// Moves the debug range labels placed by |loc|, which is going away: one that
+// goes before it to the next loc, and one that goes after its code to the
+// previous loc.
+static void MoveDebugRangeLabels(Generator* gen, IRNode* loc) {
+  IRNode* next = NextLocation(IRNext(loc));
+  IRNode* prev = PrevLocation(IRPrev(loc));
+  for (size_t i = 0; i < gen->debug_range_labels.length; i++) {
+    DebugRangeLabel* entry = gen->debug_range_labels.value.p[i];
+    if (entry->anchor != loc) {
+      continue;
+    }
+    if (entry->after_anchor && prev != NULL) {
+      SetDebugRangeAnchor(gen, entry, prev, /*after_anchor=*/true);
+    } else {
+      SetDebugRangeAnchor(gen, entry, next, /*after_anchor=*/false);
+    }
+  }
+}
+
 void GeneratorRemoveInstruction(Generator* gen, IRNode* inst) {
+  if (gen->debug_range_anchors != NULL && inst->opcode == IR_OP(loc) &&
+      HashMapContains(gen->debug_range_anchors, (uint64_t)(uintptr_t)inst)) {
+    MoveDebugRangeLabels(gen, inst);
+  }
   ListDeleteElement(&gen->code, &inst->header);
   IRRemoveNode(inst);
   // IRRemoveNode only unlinks the def-use edges; release the node's own
@@ -2233,7 +2323,140 @@ static void ScalarizeVectorOperations(Generator* gen) {
   }
 }
 
+// A label that -g puts at the start or end of a block to bound its debug
+// address range (see NewPCLabelASTNode).
+static bool IsDebugRangeLabel(IRNode* inst) {
+  return inst->opcode == IR_OP(named_label) &&
+         strncmp(((IRNamedLabel*)inst)->name, ".PC.", 4) == 0;
+}
+
+static uint64_t NodeKey(const void* node) { return (uint64_t)(uintptr_t)node; }
+
+// Takes the debug range labels out of the code, so that they cannot make -g
+// change it: the optimizer would see each as an instruction that separates the
+// ones around it, and one after a return or branch as the start of a block.
+// ReattachDebugRangeLabels puts each back by a loc: the start of a range before
+// the block's first statement, and the end after the code of its last one, so
+// that both follow the block's code when the optimizer moves it.
+static void DetachDebugRangeLabels(Generator* gen) {
+  HashMap starts;  // End label -> start label.
+  HashMapInit(&starts, gen->debug_ranges.length / 2);
+  for (size_t i = 0; i + 1 < gen->debug_ranges.length; i += 2) {
+    HashMapInsert(&starts, NodeKey(gen->debug_ranges.value.p[i + 1]),
+                  (int64_t)NodeKey(gen->debug_ranges.value.p[i]));
+  }
+  VectorClear(&gen->debug_ranges);
+  HashMap entries;  // Start label -> its DebugRangeLabel.
+  HashMapInit(&entries, 64);
+  IRNode* last_loc = NULL;
+  IRNode* next;
+  for (IRNode* inst = GeneratorFirstInstruction(gen); inst != NULL;
+       inst = next) {
+    next = IRNext(inst);
+    if (inst->opcode == IR_OP(loc)) {
+      last_loc = inst;
+      continue;
+    }
+    if (!IsDebugRangeLabel(inst)) {
+      continue;
+    }
+    ListDeleteElement(&gen->code, &inst->header);
+    inst->header.next = NULL;
+    inst->header.prev = NULL;
+    // The optimizer can free the block.
+    inst->block = NULL;
+    if (gen->debug_range_anchors == NULL) {
+      gen->debug_range_anchors = malloc(sizeof(HashMap));
+      HashMapInit(gen->debug_range_anchors, 64);
+    }
+    DebugRangeLabel* entry = malloc(sizeof(DebugRangeLabel));
+    entry->label = inst;
+    entry->last_loc = last_loc;
+    uint64_t start_label = (uint64_t)HashMapFind(&starts, NodeKey(inst), 0);
+    entry->start = start_label == 0 ? NULL
+                                    : (DebugRangeLabel*)(uintptr_t)HashMapFind(
+                                          &entries, start_label, 0);
+    if (entry->start != NULL && entry->start->last_loc != last_loc) {
+      SetDebugRangeAnchor(gen, entry, last_loc, /*after_anchor=*/true);
+    } else {
+      SetDebugRangeAnchor(gen, entry, NextLocation(next),
+                          /*after_anchor=*/false);
+    }
+    HashMapInsert(&entries, NodeKey(inst), (int64_t)NodeKey(entry));
+    VectorAppend(&gen->debug_range_labels, entry);
+  }
+  HashMapDestruct(&entries);
+  HashMapDestruct(&starts);
+}
+
+// Puts |label| before |pos|, in its block, or at the end of the code, in no
+// block, if |pos| is NULL.
+static void PlaceDebugRangeLabel(Generator* gen, IRNode* label, IRNode* pos) {
+  if (pos == NULL) {
+    GeneratorEmit(gen, label);
+    return;
+  }
+  GeneratorEmitBefore(gen, label, pos);
+  BasicBlock* block = pos->block;
+  label->block = block;
+  if (block != NULL && block->code == pos) {
+    block->code = label;
+  }
+}
+
+// Moves |label|, which ReattachDebugRangeLabels placed, to just after |pos|.
+static void MoveDebugRangeLabelAfter(Generator* gen, IRNode* label,
+                                     IRNode* pos) {
+  BasicBlock* block = label->block;
+  if (block != NULL && block->code == label) {
+    block->code = block->end_code == label ? NULL : IRNext(label);
+  }
+  if (block != NULL && block->end_code == label) {
+    block->end_code = block->code == NULL ? NULL : IRPrev(label);
+  }
+  GeneratorMoveInstructionAfter(gen, label, pos);
+  block = pos->block;
+  label->block = block;
+  if (block != NULL && block->end_code == pos) {
+    block->end_code = label;
+  }
+}
+
+static void ReattachDebugRangeLabels(Generator* gen) {
+  for (size_t i = 0; i < gen->debug_range_labels.length; i++) {
+    DebugRangeLabel* entry = gen->debug_range_labels.value.p[i];
+    IRNode* pos = entry->anchor;
+    if (pos != NULL && entry->after_anchor) {
+      pos = NextLocation(IRNext(pos));
+    }
+    PlaceDebugRangeLabel(gen, entry->label, pos);
+  }
+  // The optimizer can still have moved a block's last statement before its
+  // first, and an end before its start is not a range.  Such a block gets an
+  // empty one.
+  HashMap order;  // Label -> 1 + its index among the debug range labels.
+  HashMapInit(&order, gen->debug_range_labels.length);
+  int64_t index = 0;
+  for (IRNode* inst = GeneratorFirstInstruction(gen); inst != NULL;
+       inst = IRNext(inst)) {
+    if (IsDebugRangeLabel(inst)) {
+      HashMapInsert(&order, NodeKey(inst), ++index);
+    }
+  }
+  for (size_t i = 0; i < gen->debug_range_labels.length; i++) {
+    DebugRangeLabel* entry = gen->debug_range_labels.value.p[i];
+    if (entry->start != NULL &&
+        HashMapFind(&order, NodeKey(entry->label), 0) <
+            HashMapFind(&order, NodeKey(entry->start->label), 0)) {
+      MoveDebugRangeLabelAfter(gen, entry->label, entry->start->label);
+    }
+  }
+  HashMapDestruct(&order);
+  FreeDebugRangeLabels(gen);
+}
+
 void OptimizeFunctionIR(Generator* gen) {
+  DetachDebugRangeLabels(gen);
   MarkVariablesWhoseAddressEscapes(gen);
 
   if (OptLevel2()) {
@@ -2372,6 +2595,7 @@ void OptimizeFunctionIR(Generator* gen) {
   }
 
   ScalarizeVectorOperations(gen);
+  ReattachDebugRangeLabels(gen);
   TrapFunctionAfterCodegen(gen);
 }
 
@@ -2396,7 +2620,7 @@ static void GenerateFunctionIRImpl(Generator* gen) {
   // An empty `main` still returns 0, which the full path below emits.
   bool is_main =
       strcmp(gen->func->info.function.symbol->name.value, "main") == 0;
-  if (body->statements->length == 0 && body->low_pc == NULL &&
+  if (body->statements->length == 0 &&
       FunctionExtraOf(&gen->func->info.function)->contract_assertions.length ==
           0 &&
       !marks_constructed_object && !is_main) {

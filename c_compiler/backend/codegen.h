@@ -15,6 +15,7 @@
 #include "ast.h"
 #include "basic_block.h"
 #include "buffer.h"
+#include "hashmap.h"
 #include "ir.h"
 #include "list.h"
 #include "syntax.h"
@@ -121,6 +122,14 @@ typedef struct Generator {
   // Type of the 64-bit words of __int128 values, created on first use.  The
   // generator holds one reference.
   TypeRecord* int128_word;
+
+  // The labels bounding blocks' debug address ranges: the start and end label
+  // of each block, in pairs, as codegen emits them; and while
+  // OptimizeFunctionIR keeps them out of the code, DebugRangeLabel* entries in
+  // code order and a map whose keys include every loc they are placed by.
+  Vector debug_ranges;
+  Vector debug_range_labels;
+  HashMap* debug_range_anchors;
 } Generator;
 
 void GeneratorInit(Generator* gen, Syntax* syntax, TypeRecord* func);
@@ -139,6 +148,9 @@ IRNode* GeneratorEmitAfter(Generator* gen, IRNode* inst, IRNode* pos);
 IRNode* GeneratorEmitConstant(Generator* gen, IRNode* inst);
 IRNode* GeneratorEmitVariable(Generator* gen, IRNode* inst);
 void GeneratorRemoveInstruction(Generator* gen, IRNode* inst);
+// Notes that the named labels |start| and |end| bound a block's debug address
+// range, so that optimizing the code cannot put |end| before |start|.
+void GeneratorAddDebugRange(Generator* gen, IRNode* start, IRNode* end);
 void GeneratorMoveInstructionBefore(Generator* gen, IRNode* inst, IRNode* pos);
 void GeneratorMoveInstructionAfter(Generator* gen, IRNode* inst, IRNode* pos);
 void GeneratorReplaceInstruction(Generator* gen, IRNode* old, IRNode* new);

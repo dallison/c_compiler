@@ -1718,7 +1718,7 @@ static bool FindFastPath(RA* ra, bool* fast) {
          inst != NULL; inst = NextInBlock(block, inst)) {
       calls[b] = calls[b] || gen->virtuals->is_call(inst);
       returns[b] = returns[b] || gen->virtuals->is_return(inst);
-      sizes[b]++;
+      sizes[b] += !TargetIsDebugRangeLabel(inst);
     }
   }
   bool useful = false;

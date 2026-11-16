@@ -961,6 +961,11 @@ TargetInstruction* TargetNewNamedLabel(const char* name) {
   return (TargetInstruction*)l;
 }
 
+bool TargetIsDebugRangeLabel(const TargetInstruction* inst) {
+  return inst->opcode == TARGET_OP(named_label) &&
+         strncmp(((const TargetNamedLabel*)inst)->name, ".PC.", 4) == 0;
+}
+
 TargetInstruction* TargetGetIntConstant(TargetGenerator* target, IRNode* node,
                                         TargetType type, int64_t value) {
   TargetInstruction* inst = TargetFirstInstruction(target);

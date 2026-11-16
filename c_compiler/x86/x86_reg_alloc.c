@@ -2099,6 +2099,7 @@ static void AllocateRegisterOnce(X86RegisterAllocator* allocator,
     case X86_OP(jae):
     case X86_OP(jmp):
     case X86_OP(label):
+    case X86_OP(named_label):
     case X86_OP(ret):
     case X86_OP(save):
     case X86_OP(restore):

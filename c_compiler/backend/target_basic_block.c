@@ -618,13 +618,37 @@ static void AddExceptionHandlerEdges(TargetGenerator* gen) {
   VectorDestruct(&inner);
 }
 
+// A kept instruction other than a debug range label, such as an asm goto target
+// that no branch names, may start code that runs.  Only a debug range label's
+// address matters, so dead code after it can stay dead.
+static bool HasKeptCode(TargetBasicBlock* b) {
+  if (b->code == NULL) {
+    return false;
+  }
+  for (TargetInstruction* inst = b->code; inst != NULL; inst = TargetNext(inst)) {
+    if ((inst->flags & TARGET_INST_KEEP_UNREACHABLE) != 0 &&
+        !TargetIsDebugRangeLabel(inst)) {
+      return true;
+    }
+    if (inst == b->end_code) {
+      break;
+    }
+  }
+  return false;
+}
+
+// A block with no predecessor that only debug range labels keep stays
+// unreachable, so RemoveUnreachableBlocks keeps just its labels.  An edge from
+// the entry would let -g change the code: a block after it that is also reached
+// from a loop would no longer be dominated by the loop header, and values it
+// reads would be live from the entry on.
 static void AddKeptBlockLinks(TargetGenerator* gen) {
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[i];
     if (b == gen->entry_block || b == gen->exit_block) {
       continue;
     }
-    if (b->in_edges.length == 0 && TargetBasicBlockHasKeptInstruction(b)) {
+    if (b->in_edges.length == 0 && HasKeptCode(b)) {
       TargetBasicBlockAddEdge(gen->entry_block, b);
     }
   }
