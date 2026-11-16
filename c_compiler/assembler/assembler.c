@@ -1274,6 +1274,9 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
   int additive_terms = 1;
   int subtractive_terms = 0;
   int64_t constant_addend = 0;
+  // The labels' values with their signs.  Some targets give additions and
+  // subtractions the same relocation type, so the sign is kept here.
+  int64_t label_sum = left->value;
 
   while (LexLookingAt(&assembler->lex, TOK(plus)) ||
          LexLookingAt(&assembler->lex, TOK(minus))) {
@@ -1306,25 +1309,17 @@ static int64_t SimpleSymbolExpression(Assembler* assembler, int bits) {
                     right->section == left->section;
     if (tok == TOK(plus)) {
       additive_terms++;
+      label_sum += right->value;
     } else {
       subtractive_terms++;
+      label_sum -= right->value;
     }
     VectorAppend(&relocations, reloc);
   }
   ((AssemblerRelocation*)relocations.value.p[0])->addend += constant_addend;
   int64_t value = constant_addend;
   if (known_values && additive_terms == subtractive_terms) {
-    value += left->value;
-    for (size_t i = 1; i < relocations.length; i++) {
-      AssemblerRelocation* reloc = relocations.value.p[i];
-      if (reloc->type == assembler->object.reloc_types[kRelocAdd64] ||
-          reloc->type == assembler->object.reloc_types[kRelocAdd32] ||
-          reloc->type == assembler->object.reloc_types[kRelocAdd16]) {
-        value += reloc->symbol->value;
-      } else {
-        value -= reloc->symbol->value;
-      }
-    }
+    value += label_sum;
     VectorDestructWithContents(&relocations,
                                (VectorElementDestructor)AssemblerRelocationDestruct, /*free_element=*/true);
   } else if (relocations.length == 2 && additive_terms == 1 &&
