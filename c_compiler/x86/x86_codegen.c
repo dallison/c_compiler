@@ -642,6 +642,8 @@ void X86GeneratorInitWithProfile(X86Generator* rv, Generator* gen,
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->not_leaf = false;
+  rv->try_coloring = false;
+  rv->colored = false;
   rv->has_incoming_stack_args = false;
   rv->named_stack_arg_end = 0;
   rv->incoming_stack_arg_bytes = 0;
@@ -1357,6 +1359,9 @@ static X86Opcode IR2X86(IROpcode op) {
 #define X86_MAX_NONLEAF_INT_REG_VARS 4
 
 static bool X86HasFreeIntRegVar(X86Generator* rv) {
+  if (rv->try_coloring) {
+    return true;
+  }
   bool is_leaf = rv->base.num_calls == 0 && compiler->optimize;
   int limit = is_leaf ? X86_MAX_LEAF_INT_REG_VARS
                       : X86_MAX_NONLEAF_INT_REG_VARS;
@@ -5265,7 +5270,10 @@ static TargetInstruction* LowerBuiltinVaArgAMD64(X86Generator* rv, IRNode* node)
   // this pre-branch block so it is live through the join, and the reg-save arm
   // builds on it (addr += gp_offset) so the initial definition is a real use
   // rather than dead code.
-  TargetInstruction* addr = Emit(rv, NewInstruction1(X86_OP(mv), reg_save));
+  TargetInstruction* addr = Emit(rv, NewInstruction(X86_OP(tmp)));
+  TargetInstruction* init = NewInstruction1(X86_OP(mv), reg_save);
+  init->dest = addr;
+  Emit(rv, init);
 
   // Take the overflow arm once the offset reaches the end of its part of the
   // save area.  This is the same two-operand branch the rest of the backend
@@ -6581,11 +6589,39 @@ static void LowerVariables(X86Generator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
+// The coloring allocator leaves inline assembly, vector code and the
+// read-modify-write atomics to the dominator walk.
+static bool ColoringHandlesFunction(Generator* gen) {
+  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
+       node = IRNext(node)) {
+    switch (node->opcode) {
+      case IR_OP(asm):
+      case IR_OP(atomic_fetch_add):
+      case IR_OP(atomic_fetch_sub):
+      case IR_OP(atomic_add_fetch):
+      case IR_OP(atomic_sub_fetch):
+      case IR_OP(atomic_compare_exchange_bool):
+      case IR_OP(atomic_compare_exchange_val):
+      case IR_OP(atomic_compare_exchange_n):
+        return false;
+      default:
+        break;
+    }
+    if ((node->opcode >= IR_OP(vadd) && node->opcode <= IR_OP(vcmpgeu)) ||
+        (node->type != NULL && TypeIsVector(node->type))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void X86Lower(X86Generator* rv, Generator* gen) {
   if (!X86_IS_64BIT(rv) && !X86I386ValidateFunction(rv, gen)) {
     return;
   }
   TrapLower(&gen->func->info.function.symbol->name);
+  rv->try_coloring = X86_IS_64BIT(rv) && X86UseColoringAllocator(rv) &&
+                     ColoringHandlesFunction(gen);
   
   // If the function returns in memory, allocate the struct result
   // register now.

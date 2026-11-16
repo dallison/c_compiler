@@ -421,6 +421,7 @@ davecc_library(davecc_compiler
   c_compiler/x86/x86_emitter.c
   c_compiler/x86/x86_optimize.c
   c_compiler/x86/x86_profile.c
+  c_compiler/x86/x86_ra_info.c
   c_compiler/x86/x86_reg_alloc.c
   c_compiler/x86/x86_target.c
 )

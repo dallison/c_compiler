@@ -463,11 +463,24 @@ static bool IsRead(RA* ra, TargetInstruction* value) {
   return slot != NULL && slot->reads > 0;
 }
 
-// Whether a value is read in its own right and so gets its own node, rather
-// than its result going straight into its dest.
+// The class of the registers that |location| can be given, or -1 if none.
+static int LocationClass(RA* ra, TargetInstruction* location) {
+  int key = FixedKey(ra, location);
+  return key >= 0 ? ra->key_class[key] : ra->desc->reg_class(location);
+}
+
+// Whether a value is read in its own right, or belongs in a different class
+// from its dest, and so gets its own node, rather than its result going
+// straight into its dest.
 static bool HasOwnNode(RA* ra, TargetInstruction* inst) {
-  return WritesRegister(ra, inst) && ra->desc->fixed_value_key(inst) < 0 &&
-         (IsRead(ra, inst) || !IsRegisterLocation(ra, inst->dest));
+  if (!WritesRegister(ra, inst) || ra->desc->fixed_value_key(inst) >= 0) {
+    return false;
+  }
+  if (IsRead(ra, inst) || !IsRegisterLocation(ra, inst->dest)) {
+    return true;
+  }
+  int dest_class = LocationClass(ra, inst->dest);
+  return dest_class >= 0 && dest_class != ra->desc->reg_class(inst);
 }
 
 static bool IsTransparentCopy(RA* ra, TargetInstruction* inst) {

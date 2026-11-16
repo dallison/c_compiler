@@ -1812,6 +1812,14 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
     case X86_OP(movq_xmm):
     case X86_OP(fmv_s):
     case X86_OP(fmv_d):
+      if ((X86Opcode)opcode != X86_OP(movq_xmm) &&
+          inst->operand[0] != NULL && inst->operand[1] == NULL &&
+          inst->operand[0]->reg != NULL &&
+          inst->operand[0]->reg ==
+              (inst->dest != NULL && inst->dest->reg != NULL ? inst->dest->reg
+                                                             : inst->reg)) {
+        return;
+      }
       if (((X86Opcode)opcode == X86_OP(fmv_s) ||
            (X86Opcode)opcode == X86_OP(fmv_d)) &&
           TargetIsConst(inst->operand[0]) &&
@@ -2046,7 +2054,9 @@ static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
     fprintf(fp, "\n");
     return;
   }
-  if (src->block == NULL) {
+  // The coloring allocator's split locations are variable registers in no
+  // block.
+  if (src->block == NULL && !X86IsVarRegister(src)) {
     return;
   }
   if (src->reg == NULL) {
@@ -3387,7 +3397,9 @@ static void ReloadStructReturnRegisterAtLandingPad(X86Emitter* emitter,
     ReloadStructReturnRegisterAtLandingPadI386(emitter, fp);
     return;
   }
-  if (emitter->rv->struct_return_reg < 0) {
+  // The coloring allocator does not keep the struct return pointer in its
+  // conventional register.
+  if (emitter->rv->struct_return_reg < 0 || emitter->rv->colored) {
     return;
   }
 

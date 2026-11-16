@@ -14,6 +14,7 @@
 #include "x86_machine.h"
 #include "x86_profile.h"
 #include "target_generator.h"
+#include "target_ra_ir.h"
 
 struct X86Generator;
 struct X86Instruction;
@@ -76,5 +77,16 @@ const char* X86RegisterName(X86Register* reg, char* buf, size_t len);
 
 // True if the allocator gives |inst|'s result a floating point register.
 bool X86HasFloatResult(TargetInstruction* inst);
+
+// How the shared allocator code reads x86-64 instructions.
+const TargetRAInfo* X86RAInfo(void);
+
+// Whether to try the coloring allocator on the function |rv| is starting.
+// Call once per function.
+bool X86UseColoringAllocator(struct X86Generator* rv);
+
+// Allocates the current function with the shared coloring allocator.  Returns
+// false, leaving the function untouched, if it cannot.
+bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator);
 
 #endif /* x86_reg_alloc_h */
