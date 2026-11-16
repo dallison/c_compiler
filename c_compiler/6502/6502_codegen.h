@@ -723,6 +723,14 @@ const char* W65C02OpcodeName(int op);
 bool W65C02IsSignedLoad(TargetInstruction* inst);
 bool W65C02IsExpression(TargetInstruction* inst);
 
+// The call that returns its result in the cell |inst|, or NULL.  The cell
+// follows the call, which leaves the result in it.
+TargetInstruction* W65C02ResultCall(TargetInstruction* inst);
+// The cell |call| returns its result in, or NULL.
+TargetInstruction* W65C02CallResultCell(TargetInstruction* call);
+// The cell |inst| starts as a copy of, or NULL.
+TargetInstruction* W65C02CopySource(TargetInstruction* inst);
+
 #define W65C02_CMP_EXPR 0x10000      // Compare instruction is an expression.
 
 bool W65C02IsBranch(TargetInstruction* inst);

@@ -22,7 +22,7 @@
 #include "target_generator.h"
 #include "target_ra_ir.h"
 
-#define TARGET_RA_MAX_CLASSES 3
+#define TARGET_RA_MAX_CLASSES 5
 #define TARGET_RA_MAX_CLASS_REGS 64
 
 typedef struct {
@@ -62,13 +62,32 @@ typedef struct TargetRegAllocDesc {
   // dest.  |value| may also be a location.
   TargetInstruction* (*create_copy)(void* ctx, TargetInstruction* value,
                                     TargetInstruction* dest);
-  // A new stack slot for |value|, which may also be a location.
+  // A new stack slot for |value|, which may also be a location.  When neither
+  // create_spill nor rewrite_spill is set the allocator gives up instead of
+  // spilling, which it can only do while it has not changed the IR: without
+  // fixed value keys, early-clobber values with a dest, or splitting.
   int (*new_slot)(void* ctx, TargetInstruction* value);
   // A new store of |value| to |slot|.  The allocator inserts it.
   TargetInstruction* (*create_spill)(void* ctx, TargetInstruction* value,
                                      int slot);
   // A new load from the slot |spill| stores to.  The allocator inserts it.
   TargetInstruction* (*create_reload)(void* ctx, TargetInstruction* spill);
+  // In place of the three above, for a target whose values are written after
+  // their definition: rewrites the IR so that |value| is kept in a stack slot,
+  // or reloaded from one more often.  Returns false, with the IR untouched,
+  // when it cannot.  The allocator does not spill |value| again, and asks
+  // can_spill about the values the rewrite creates.
+  bool (*rewrite_spill)(void* ctx, TargetInstruction* value);
+  // Whether |value| can be spilled at all; NULL when all can.  The allocator
+  // spills the others last, and gives up when it must.
+  bool (*can_spill)(void* ctx, TargetInstruction* value);
+  // Whether, once |value| is spilled, it is back in a register from the
+  // previous instruction naming it to |user|, as where rewrite_spill reloads
+  // at a mark before a run of reads.  NULL when each read reloads in place.
+  // The allocator spills first the values that would leave a register free
+  // where it has too few.
+  bool (*held_since_previous)(void* ctx, TargetInstruction* user,
+                              TargetInstruction* value);
   // Gives |inst| the physical register |key|.
   void (*assign)(void* ctx, TargetInstruction* inst, int key);
 

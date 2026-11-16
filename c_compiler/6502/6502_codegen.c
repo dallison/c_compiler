@@ -1901,6 +1901,26 @@ static TargetInstruction* TempRegister(W65C02Generator* g, TypeRecord* type, int
   }
 }
 
+// The cell |call| returns a scalar result in.  The callee writes it through the
+// address the emitter loads into X,Y before |call|, as its last act, so the
+// cell holds the result from here on.
+static TargetInstruction* CallResultCell(W65C02Generator* g,
+                                         TargetInstruction* call,
+                                         TypeRecord* type, int size) {
+  TargetInstruction* cell = TempRegister(g, type, size);
+  TargetReplaceOperand(cell, 0, call);
+  cell->flags |= k6502ExprIsCallResult;
+  return cell;
+}
+
+// A new cell that starts as a copy of |src|.  The copy is made after register
+// allocation, unless the two cells share a register.
+static TargetInstruction* CopyRegister(W65C02Generator* g,
+                                       TargetInstruction* src) {
+  return Emit(g, NewInstruction1((W65C02Opcode)src->opcode, src,
+                                 kAddrModeZeroPage));
+}
+
 // Temp expression in zero page containing address of something.
 static TargetInstruction* TempExpressionAddress(W65C02Generator* g, AddressingMode mode) {
   return Emit(g, NewInstruction(W65C02_OP(expr2), mode));
@@ -6306,12 +6326,14 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
   }
 
   
-  // Load return address into X,Y,
   TargetInstruction* result = NULL;
   // When the result destination is a zero-page register we don't let the
   // callee write into it directly: it returns the value through a temp buffer
   // that we copy into `result` after the call (see below).
   TargetInstruction* result_buf = NULL;
+  // Whether the callee writes the result into a new cell, whose address the
+  // emitter loads into X,Y before the call.
+  bool result_in_cell = false;
   int result_size = 0;
   // If the function returns a struct/union its result is in address specified
   // by first arg.
@@ -6319,6 +6341,7 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
     IRNode* push = node->inputs.value.p[1];   // pusharg instruction.
     result = GetLoweredNode(push->inputs.value.p[0]);   // Arg value.
   } else if (!TypeIsVoid(node->type)) {
+    result_size = Sizeof(node->type);
     if (node->dest != NULL) {
       LowerIRNode(g, node->dest);
       result = GetLoweredNode(node->dest);
@@ -6331,31 +6354,24 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
         // registers are always free at this point; route the value through a
         // temp buffer -- which is necessarily caller-saved and so never touched
         // by the callee's restore -- and copy it into `result` after the call.
-        result_size = Sizeof(node->type);
-        result_buf = TempRegister(g, node->type, result_size);
-        result_buf->flags |= k6502ExprIsCallResult;
-        ldxzi(g, result_buf, 0);
-        ldyi(g, 0);
+        result_in_cell = true;
       } else {
         // Not an expression, get address in X,Y
         GetAddressXY(g, node->dest);
       }
     } else {
-      result = TempRegister(g, node->type, Sizeof(node->type));
-      ldxzi(g, result, 0);
-      ldyi(g, 0);
-    }
-    if (result != NULL && result_buf == NULL) {
-      result->flags |= k6502ExprIsCallResult;
+      result_in_cell = true;
     }
   }
   // TargetInstruction* addr = GetLoweredNode(callee);
   TargetInstruction* addr = Materialize(g, callee, 2, false);
   TargetInstruction* call = NULL;
+  TargetInstruction* jsr_inst = NULL;
   if (TargetOpcodeEq(addr->opcode, W65C02_OP(symbol)) &&
       TypeIsFunction(callee->type)) {
     call = Emit(g, NewInstruction1(W65C02_OP(jsr), addr, kAddrModeAbsolute));
     call->flags |= k6502ProcedureCall;
+    jsr_inst = call;
   } else {
     // Calling an expression.
     addr = Materialize(g, node->inputs.value.p[0], -1, true);     // Address to call.
@@ -6365,10 +6381,26 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
         NewInstruction(W65C02_OP(label), kAddrModeImplied);
     call = Emit(g, NewInstruction1(W65C02_OP(jsr), call_label, kAddrModeAbsolute));
     call->flags |= k6502ProcedureCall;
+    jsr_inst = call;
     Emit(g, NewInstruction1(Is65c02() ? W65C02_OP(bra) : W65C02_OP(jmp), end_label, kAddrModeAbsolute));
     Emit(g, call_label);
     Emit(g, NewInstruction1(W65C02_OP(jmp), addr, kAddrModeIndirect));
     call = Emit(g, end_label);
+  }
+  if (result_in_cell) {
+    TargetInstruction* cell = CallResultCell(g, jsr_inst, node->type,
+                                             result_size);
+    if (result != NULL) {
+      result_buf = cell;
+    } else if (node->outputs.length == 0) {
+      result = cell;
+    } else {
+      // The cell must be caller-saved, so the result is read through a copy
+      // that can live across later calls.
+      result = CopyRegister(g, cell);
+      result->flags |= k6502ExprIsCallResult;
+    }
+    call = TargetLastInstruction(&g->base);
   }
   if (args_size > 0 && !callee_pops_args) {
     if (TypeIsStructOrUnion(node->type)) {
@@ -8529,6 +8561,41 @@ bool W65C02IsExpression(TargetInstruction* inst) {
   ((W65C02Opcode)inst->opcode >= W65C02_OP(ivarreg) &&
          (W65C02Opcode)inst->opcode <= W65C02_OP(dvarreg)) ||
   TargetOpcodeEq(inst->opcode, W65C02_OP(structreturn));
+}
+
+TargetInstruction* W65C02ResultCall(TargetInstruction* inst) {
+  TargetInstruction* call = inst->operand[0];
+  if (!IsExpression(inst) || call == NULL) {
+    return NULL;
+  }
+  // The optimizer turns a jsr followed by rts into a jmp.
+  return TargetOpcodeEq(call->opcode, W65C02_OP(jsr)) ||
+                 TargetOpcodeEq(call->opcode, W65C02_OP(jmp))
+             ? call
+             : NULL;
+}
+
+TargetInstruction* W65C02CallResultCell(TargetInstruction* call) {
+  for (size_t i = 0; i < call->users.length; i++) {
+    TargetInstruction* user = call->users.value.p[i];
+    if (W65C02ResultCall(user) == call) {
+      return user;
+    }
+  }
+  return NULL;
+}
+
+TargetInstruction* W65C02CopySource(TargetInstruction* inst) {
+  TargetInstruction* src = inst->operand[0];
+  if (!IsExpression(inst) || src == NULL) {
+    return NULL;
+  }
+  // The register allocator replaces a spilled source with its reload.
+  W65C02Opcode op = (W65C02Opcode)src->opcode;
+  return W65C02IsExpression(src) ||
+                 (op >= W65C02_OP(reload1) && op <= W65C02_OP(reload8))
+             ? src
+             : NULL;
 }
 
 bool W65C02IsSignedLoad(TargetInstruction* inst) {

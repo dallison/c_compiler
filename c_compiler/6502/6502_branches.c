@@ -222,7 +222,8 @@ static int BytesInInstruction(W65C02Generator* g, TargetInstruction* inst) {
 
     case W65C02_OP(jsr):
     case W65C02_OP(jmp):
-      return 3;
+      // LDX #result; LDY #0 when the callee returns a result.
+      return W65C02CallResultCell(inst) != NULL ? 7 : 3;
     case W65C02_OP(rti):
     case W65C02_OP(rts):
       return 1;

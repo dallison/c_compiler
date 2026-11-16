@@ -84,6 +84,12 @@ uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc);
 const char* W65C02RegisterAllocatorPrintRegMask(uint32_t mask, char* buf);
 
 void W65C02AllocateRegisters(W65C02RegisterAllocator* emitter);
+W65C02RegisterType W65C02InstructionRegisterType(TargetInstruction* inst);
+
+// The coloring allocator in 6502_ra_info.c.  It returns false, leaving the IR
+// unchanged, for a function it cannot handle.
+bool W65C02UseColoringAllocator(struct W65C02Generator* g);
+bool W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator);
 const char* W65C02RegisterAsString(W65C02Register* reg, int byte, char* buf, size_t len);
 void W65C02RegisterAllocatorAddSpillPoint(W65C02RegisterAllocator* alloc,
                                             int expr, TargetInstruction* spill_point);

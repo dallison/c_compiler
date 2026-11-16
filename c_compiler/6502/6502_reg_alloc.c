@@ -1194,11 +1194,58 @@ static void ProcessBasicBlock(W65C02RegisterAllocator* allocator,
                           kTraversePreOrder, allocator);
 }
 
+W65C02RegisterType W65C02InstructionRegisterType(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst);
+}
+
+// Makes the copies that cells start as, now that they have registers.
+static void ExpandCopies(W65C02RegisterAllocator* allocator) {
+  TargetGenerator* gen = &allocator->g->base;
+  for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
+       inst = TargetNext(inst)) {
+    TargetInstruction* src = W65C02CopySource(inst);
+    if (src == NULL) {
+      continue;
+    }
+    W65C02Register* to = (W65C02Register*)inst->reg;
+    W65C02Register* from = (W65C02Register*)src->reg;
+    // The old allocator counts uses down to zero as it frees registers.
+    src->uses = (int)src->users.length;
+    TargetReplaceOperand(inst, 0, NULL);
+    if (to == from || inst->users.length == 0) {
+      continue;
+    }
+    TargetInstruction* pos = inst;
+    for (int i = 0; i < RegisterSize(to); i++) {
+      TargetInstruction* byte =
+          TargetGetIntConstant(gen, NULL, kTargetType8Bit, i);
+      TargetInstruction* load =
+          TargetNewInstruction2((TargetOpcode)W65C02_OP(lda), src, byte);
+      load->flags |= (int)kAddrModeZeroPage << 16;
+      TargetInstruction* store =
+          TargetNewInstruction2((TargetOpcode)W65C02_OP(sta), inst, byte);
+      store->flags |= (int)kAddrModeZeroPage << 16;
+      if (inst->block != NULL) {
+        TargetBasicBlockEmitAfter(gen, inst->block, load, pos);
+        TargetBasicBlockEmitAfter(gen, inst->block, store, load);
+      } else {
+        TargetEmitAfter(gen, load, pos);
+        TargetEmitAfter(gen, store, load);
+      }
+      pos = store;
+    }
+  }
+}
+
 void W65C02AllocateRegisters(W65C02RegisterAllocator* allocator) {
-  TargetTraverseDominatorTree(&allocator->g->base, BuildPreservedInstructionsSet,
-                          kTraversePreOrder, allocator);
-  
-  ProcessBasicBlock(allocator, allocator->g->base.entry_block);
+  if (!W65C02UseColoringAllocator(allocator->g) ||
+      !W65C02AllocateRegistersByColoring(allocator)) {
+    TargetTraverseDominatorTree(&allocator->g->base,
+                                BuildPreservedInstructionsSet,
+                                kTraversePreOrder, allocator);
+    ProcessBasicBlock(allocator, allocator->g->base.entry_block);
+  }
+  ExpandCopies(allocator);
 }
 
 uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {

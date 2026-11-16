@@ -273,7 +273,8 @@ static TargetInstruction* PrevInstruction(TargetInstruction* inst) {
   TargetInstruction* prev = inst;
   do {
     prev = TargetPrev(prev);
-  } while (prev != NULL && !(TargetOpcodeNe(prev->opcode, W65C02_OP(reloadpoint)) &&
+  } while (prev != NULL && W65C02CopySource(prev) == NULL &&
+           !(TargetOpcodeNe(prev->opcode, W65C02_OP(reloadpoint)) &&
            TargetOpcodeNe(prev->opcode, TARGET_OP(loc)) &&
            TargetOpcodeNe(prev->opcode, W65C02_OP(expr1)) &&
            TargetOpcodeNe(prev->opcode, W65C02_OP(expr2)) &&
@@ -284,6 +285,10 @@ static TargetInstruction* PrevInstruction(TargetInstruction* inst) {
 
 // Does the given instruction change the value of A?
 static bool ModifiesA(TargetInstruction* inst) {
+  // A copy is made through A after register allocation.
+  if (W65C02CopySource(inst) != NULL) {
+    return true;
+  }
   switch ((W65C02Opcode)inst->opcode) {
     case W65C02_OP(lda):
     case W65C02_OP(adc):
@@ -358,6 +363,9 @@ static bool ModifiesA(TargetInstruction* inst) {
 }
 
 static bool ModifiesFlags(TargetInstruction* inst) {
+  if (W65C02CopySource(inst) != NULL) {
+    return true;
+  }
   switch ((W65C02Opcode)inst->opcode) {
     case W65C02_OP(lda):
     case W65C02_OP(ldx):
@@ -588,7 +596,8 @@ static TargetInstruction* PreviousUserOfA(TargetInstruction* inst) {
 static bool IsTrackingMetadata(TargetInstruction* inst) {
   return TargetOpcodeEq(inst->opcode, W65C02_OP(reloadpoint)) ||
          TargetOpcodeEq(inst->opcode, TARGET_OP(loc)) ||
-         W65C02IsExpression(inst) || (inst->flags & k6502DontEmit) != 0;
+         (W65C02IsExpression(inst) && W65C02CopySource(inst) == NULL) ||
+         (inst->flags & k6502DontEmit) != 0;
 }
 
 // The byte-load helpers return with the loaded byte in A and N/Z set from it.
@@ -1273,6 +1282,10 @@ static void OptimizeBlock(TargetBasicBlock* block, void* data) {
       case W65C02_OP(expr8):
       case W65C02_OP(exprf):
       case W65C02_OP(exprd):
+        if (W65C02CopySource(inst) != NULL) {
+          trackers->A.type = kRegUnknown;
+        }
+        break;
       case W65C02_OP(clc):
       case W65C02_OP(sec):
       case W65C02_OP(fake_bra):
@@ -1656,7 +1669,7 @@ static bool IsImmediateY(TargetInstruction* inst, int value) {
 
 static bool IsIndirectCopyMetadata(TargetInstruction* inst) {
   return TargetOpcodeEq(inst->opcode, W65C02_OP(reloadpoint)) ||
-         W65C02IsExpression(inst);
+         (W65C02IsExpression(inst) && W65C02CopySource(inst) == NULL);
 }
 
 static TargetInstruction* NextInBlock(TargetInstruction* inst,

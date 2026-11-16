@@ -731,13 +731,25 @@ static void PrintInstruction(W65C02Emitter* emitter, TargetInstruction* inst,
     fprintf(fp, "/* @%d */ ", inst->id);
   }
 
+  // Buffers for register name printing.
+  static char buf[4096];
+
+  if (TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) ||
+      TargetOpcodeEq(inst->opcode, W65C02_OP(jmp))) {
+    // The callee stores its result through the address in X,Y.
+    TargetInstruction* result = W65C02CallResultCell(inst);
+    if (result != NULL) {
+      fprintf(fp, "\t%-12s#%s\n", "ldx",
+              W65C02RegisterAsString((W65C02Register*)result->reg, 0, buf,
+                                     sizeof(buf)));
+      fprintf(fp, "\t%-12s #0\n", "ldy");
+    }
+  }
+
   if (TargetOpcodeEq(inst->opcode, W65C02_OP(jsr)) &&
       EmitIndirectCallTrampoline(emitter, inst, fp)) {
     return;
   }
-
-  // Buffers for register name printing.
-  static char buf[4096];
   W65C02Opcode opcode = (W65C02Opcode)inst->opcode;
   PullRegisterMatch pulled;
   bool has_pulled = FindPullRegisterMatch(emitter, inst, &pulled);

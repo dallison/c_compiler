@@ -210,6 +210,7 @@ davecc_library(davecc_compiler
   c_compiler/6502/6502_codegen.c
   c_compiler/6502/6502_emitter.c
   c_compiler/6502/6502_optimize.c
+  c_compiler/6502/6502_ra_info.c
   c_compiler/6502/6502_reg_alloc.c
   c_compiler/6502/6502_spiller.c
   c_compiler/6502/6502_target.c

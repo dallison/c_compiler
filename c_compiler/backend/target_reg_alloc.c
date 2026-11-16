@@ -114,6 +114,9 @@ typedef struct {
   int degree;
   int mark;
   double cost;
+  // The instructions where its class has more values live than registers
+  // and spilling it would free its register.
+  int relief;
   Vector adj;    // Neighbors.
   Vector moves;  // Indices of the moves this node takes part in.
   // The physical registers among its neighbors, by key.
@@ -186,6 +189,7 @@ typedef struct {
   Vector move_worklist;
   Vector select_stack;
   int mark_gen;
+  bool changed_ir;  // By fixed copies, splitting or spilling.
 
   TargetRegAllocStats stats;
 } RA;
@@ -228,6 +232,12 @@ static int Position(RA* ra, const TargetInstruction* inst) {
 static bool IsUnspillable(RA* ra, const TargetInstruction* inst) {
   const Slot* slot = FindSlot(ra, inst);
   return slot != NULL && slot->unspillable;
+}
+
+static bool CanSpill(RA* ra, TargetInstruction* inst) {
+  return !IsUnspillable(ra, inst) &&
+         (ra->desc->can_spill == NULL ||
+          ra->desc->can_spill(ra->desc->ctx, inst));
 }
 
 static TargetInstruction* InstOf(RA* ra, int i) { return InstAt(ra, i)->inst; }
@@ -569,6 +579,7 @@ static void CopyFixedValues(RA* ra) {
       inst->dest = NULL;
       TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
       GetSlot(ra, copy)->transparent = true;
+      ra->changed_ir = true;
       continue;
     }
     if (!WritesRegister(ra, inst) || ra->desc->fixed_value_key(inst) < 0 ||
@@ -580,6 +591,7 @@ static void CopyFixedValues(RA* ra) {
     inst->dest = NULL;
     GetSlot(ra, inst)->fixed_copy = copy;
     any = true;
+    ra->changed_ir = true;
     TargetBasicBlockEmitAfter(ra->gen, InstBlock(ra, i), copy, inst);
     GetSlot(ra, copy)->transparent = true;
   }
@@ -935,6 +947,85 @@ static int AddRegisterDefEdges(RA* ra, const InstInfo* info,
   return end;
 }
 
+static bool Names(RA* ra, const InstInfo* info, int n) {
+  for (int u = info->first_use; u < info->end_use; u++) {
+    if (IntAt(&ra->uses, (size_t)u) == n) {
+      return true;
+    }
+  }
+  for (int d = info->first_def; d < info->end_def; d++) {
+    if (IntAt(&ra->defs, (size_t)d) == n) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Counts |info| toward the relief of the values in |live|, the set after
+// |info|, that are neither named by |info| nor in |held|, in the classes it
+// leaves with more values than registers.
+static void CountRelief(RA* ra, const InstInfo* info, const uint64_t* live,
+                        const uint64_t* held) {
+  int pressure[TARGET_RA_MAX_CLASSES] = {0};
+  for (size_t w = 0; w < ra->words; w++) {
+    for (uint64_t bits = live[w]; bits != 0; bits &= bits - 1) {
+      int c = NodeAt(ra, (int)(w * 64) + __builtin_ctzll(bits))->reg_class;
+      if (c >= 0) {
+        pressure[c]++;
+      }
+    }
+  }
+  for (int d = info->first_def; d < info->end_def; d++) {
+    int def = IntAt(&ra->defs, (size_t)d);
+    int c = NodeAt(ra, def)->reg_class;
+    if (c >= 0 && (live[def / 64] & (UINT64_C(1) << (def % 64))) == 0) {
+      pressure[c]++;
+    }
+  }
+  bool short_of_registers = false;
+  for (int c = 0; c < ra->desc->num_classes; c++) {
+    short_of_registers |= pressure[c] > ra->desc->classes[c].num_regs;
+  }
+  if (!short_of_registers) {
+    return;
+  }
+  for (size_t w = TARGET_RA_FIXED_KEYS / 64; w < ra->words; w++) {
+    for (uint64_t bits = live[w] & ~held[w]; bits != 0; bits &= bits - 1) {
+      int l = (int)(w * 64) + __builtin_ctzll(bits);
+      Node* node = NodeAt(ra, l);
+      if (node->reg_class >= 0 &&
+          pressure[node->reg_class] >
+              ra->desc->classes[node->reg_class].num_regs &&
+          !Names(ra, info, l)) {
+        node->relief++;
+      }
+    }
+  }
+}
+
+// Records in |held| which values |info| names that held_since_previous says
+// are kept in a register back to the previous instruction naming them.
+static void UpdateHeld(RA* ra, const InstInfo* info, uint64_t* held) {
+  const TargetRegAllocDesc* desc = ra->desc;
+  for (int d = info->first_def; d < info->end_def; d++) {
+    int n = IntAt(&ra->defs, (size_t)d);
+    if (!IsPrecolored(n)) {
+      ClearBit(held, n);
+    }
+  }
+  for (int u = info->first_use; u < info->end_use; u++) {
+    int n = IntAt(&ra->uses, (size_t)u);
+    if (!IsPrecolored(n)) {
+      if (desc->held_since_previous(desc->ctx, info->inst,
+                                    NodeAt(ra, n)->inst)) {
+        SetBit(held, n);
+      } else {
+        ClearBit(held, n);
+      }
+    }
+  }
+}
+
 static void BuildGraph(RA* ra) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
@@ -948,18 +1039,26 @@ static void BuildGraph(RA* ra) {
   size_t words = ra->words;
   uint64_t* live = malloc(sizeof(uint64_t) * (words + 1));
   uint64_t* pad_live = malloc(sizeof(uint64_t) * (words + 1));
+  // The values that the instructions after this one, in its block, keep in a
+  // register back to here even when spilled.
+  uint64_t* held = calloc(words + 1, sizeof(uint64_t));
   int i = NumInsts(ra) - 1;
   for (size_t bb = num_blocks; bb-- > 0;) {
     if (i < 0 || InstAt(ra, i)->block != (int)bb) {
       continue;
     }
     memcpy(live, ra->live_out + bb * words, sizeof(uint64_t) * words);
+    memset(held, 0, sizeof(uint64_t) * words);
     bool reaches_pad = PadLive(ra, InstBlock(ra, i), pad_live);
     for (; i >= 0 && InstAt(ra, i)->block == (int)bb; i--) {
       const InstInfo* info = InstAt(ra, i);
       bool throws = reaches_pad && gen->virtuals->is_call(info->inst);
       for (size_t w = 0; throws && w < words; w++) {
         live[w] |= pad_live[w];
+      }
+      CountRelief(ra, info, live, held);
+      if (ra->desc->held_since_previous != NULL) {
+        UpdateHeld(ra, info, held);
       }
       for (int d = info->first_def; d < info->end_def;) {
         int def = IntAt(&ra->defs, (size_t)d);
@@ -1003,6 +1102,7 @@ static void BuildGraph(RA* ra) {
   }
   free(live);
   free(pad_live);
+  free(held);
 
   int keys[kMaxKeys];
   for (int v = TARGET_RA_FIXED_KEYS; v < NumNodes(ra); v++) {
@@ -1028,7 +1128,7 @@ static void BuildGraph(RA* ra) {
   }
   for (int v = TARGET_RA_FIXED_KEYS; v < NumNodes(ra); v++) {
     Node* node = NodeAt(ra, v);
-    if (IsUnspillable(ra, node->inst)) {
+    if (!CanSpill(ra, node->inst)) {
       node->cost = kUnspillableCost;
     }
   }
@@ -1237,6 +1337,7 @@ static void Combine(RA* ra, int u, int v) {
   }
   if (!IsPrecolored(u)) {
     nu->cost += nv->cost;
+    nu->relief += nv->relief;
     if (nu->degree >= K(ra, u) && nu->state == kNodeFreeze) {
       SetState(ra, u, kNodeSpill);
     }
@@ -1298,9 +1399,13 @@ static int PopMove(RA* ra) {
   return -1;
 }
 
+// Prefers the nodes whose spill would free a register where their class has
+// too few, by how many such places: spilling one that is in a register
+// wherever its class runs short only leads to spilling what it leaves.
 static int SelectSpill(RA* ra) {
   Vector* list = &ra->spill_list;
   int best = kNoNode;
+  bool best_relieves = false;
   double best_cost = 0;
   size_t kept = 0;
   for (size_t i = 0; i < list->length; i++) {
@@ -1311,8 +1416,14 @@ static int SelectSpill(RA* ra) {
     }
     list->value.w[kept++] = n;
     double cost = node->cost / (double)(node->degree + 1);
-    if (best == kNoNode || cost < best_cost) {
+    bool relieves = node->relief > 0 && node->cost < kUnspillableCost;
+    if (relieves) {
+      cost /= node->relief;
+    }
+    if (best == kNoNode || (relieves && !best_relieves) ||
+        (relieves == best_relieves && cost < best_cost)) {
       best = n;
+      best_relieves = relieves;
       best_cost = cost;
     }
   }
@@ -1520,6 +1631,7 @@ static void RewriteSpills(RA* ra, const Vector* spilled) {
     VectorAppend(&handles, handle);
   }
 
+  ra->changed_ir = true;
   Reload reloads[4 * TARGET_MAX_OPERANDS];
   for (int u = 0; u < NumInsts(ra); u++) {
     int num_reloads = 0;
@@ -1529,6 +1641,25 @@ static void RewriteSpills(RA* ra, const Vector* spilled) {
   ra->stats.spilled += (int)spilled->length;
   TargetRAIndexDestruct(&handle_index);
   VectorDestruct(&handles);
+}
+
+// Has the target spill each value it can.  Returns whether that changed
+// anything for the next round: a value spilled or found unspillable.
+static bool RewriteSpillsByTarget(RA* ra, const Vector* spilled) {
+  bool changed = false;
+  for (size_t s = 0; s < spilled->length; s++) {
+    TargetInstruction* inst = NodeAt(ra, IntAt(spilled, s))->inst;
+    if (!CanSpill(ra, inst)) {
+      continue;
+    }
+    changed = true;
+    GetSlot(ra, inst)->unspillable = true;
+    if (ra->desc->rewrite_spill(ra->desc->ctx, inst)) {
+      ra->changed_ir = true;
+      ra->stats.spilled++;
+    }
+  }
+  return changed;
 }
 
 // ---------------------------------------------------------------------------
@@ -2145,9 +2276,21 @@ static bool SplitAtFastPath(RA* ra) {
   free(split);
   free(fast);
   if (num_crossing > 0) {
+    ra->changed_ir = true;
     FreeRound(ra);
   }
   return num_crossing == 0;
+}
+
+static bool GiveUp(RA* ra, const char* reason) {
+  if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
+    fprintf(stderr, "new-ra-fallback\t%s\t%s\n", ra->gen->function_name.value,
+            reason);
+  }
+  ChunkFree(&ra->insts);
+  ChunkFree(&ra->slots);
+  free(ra);
+  return false;
 }
 
 bool TargetAllocateRegisters(TargetGenerator* gen,
@@ -2173,14 +2316,7 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
   CollectInstructions(ra);
   const char* unsupported = Unsupported(ra);
   if (unsupported != NULL) {
-    ChunkFree(&ra->insts);
-    ChunkFree(&ra->slots);
-    free(ra);
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              unsupported);
-    }
-    return false;
+    return GiveUp(ra, unsupported);
   }
   CountAllReads(ra);
   CopyFixedValues(ra);
@@ -2204,14 +2340,30 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
       FreeRound(ra);
       break;
     }
-    if (ra->stats.rounds >= kMaxRounds) {
-      fprintf(stderr, "register allocation of %s did not converge\n",
-              gen->function_name.value);
-      abort();
+    const char* stuck = NULL;
+    if (desc->create_spill == NULL && desc->rewrite_spill == NULL) {
+      stuck = "spill";
+    } else if (ra->stats.rounds >= kMaxRounds) {
+      stuck = "rounds";
+    } else if (desc->rewrite_spill != NULL) {
+      if (!RewriteSpillsByTarget(ra, &spilled)) {
+        stuck = "spill";
+      }
+    } else {
+      RewriteSpills(ra, &spilled);
     }
-    RewriteSpills(ra, &spilled);
     VectorDestruct(&spilled);
     FreeRound(ra);
+    if (stuck != NULL) {
+      if (ra->changed_ir) {
+        fprintf(stderr, "register allocation of %s %s\n",
+                gen->function_name.value,
+                strcmp(stuck, "rounds") == 0 ? "did not converge"
+                                             : "needs to spill");
+        abort();
+      }
+      return GiveUp(ra, stuck);
+    }
   }
 
   if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
