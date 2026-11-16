@@ -108,6 +108,22 @@ if command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(gtimeout "$TIMEOUT")
 elif command -v timeout >/dev/null 2>&1; then
   TIMEOUT_CMD=(timeout "$TIMEOUT")
+elif command -v python3 >/dev/null 2>&1; then
+  # macOS does not provide timeout(1).  Without a limit a test that loops
+  # keeps its interpreter running after the suite is cancelled.
+  TIMEOUT_CMD=(
+    python3 -c
+    'import subprocess, sys
+try:
+    result = subprocess.run(sys.argv[2:], timeout=float(sys.argv[1]))
+    sys.exit(result.returncode if result.returncode >= 0 else 128 - result.returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)'
+    "$TIMEOUT"
+  )
+elif command -v perl >/dev/null 2>&1; then
+  # Preserve the alarm across exec as a final portable fallback.
+  TIMEOUT_CMD=(perl -e 'alarm shift @ARGV; exec @ARGV' "$TIMEOUT")
 else
   TIMEOUT_CMD=()
 fi
