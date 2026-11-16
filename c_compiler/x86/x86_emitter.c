@@ -26,6 +26,7 @@
 #include "x86_machine.h"
 #include "x86_reg_alloc.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 // In assembler mode, $ introduces a hexadecimal immediate (see CollectHex in
 // lex.c), not a decimal value as in GNU as AT&T syntax.
@@ -98,6 +99,22 @@ static bool IsPrintable(TargetInstruction* inst) {
       break;
   }
   return true;
+}
+
+bool X86InstructionEmitsCode(TargetInstruction* inst) {
+  if (inst->block == NULL || inst->observable_checkpoint) {
+    return false;
+  }
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(label):
+      return (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0;
+    case X86_OP(named_label):
+    case X86_OP(loc):
+    case X86_OP(symbol):
+      return false;
+    default:
+      return IsPrintable(inst);
+  }
 }
 
 // The stack frame looks like this:
@@ -6615,6 +6632,12 @@ void X86PrintFunction(X86Emitter* emitter, FILE* fp) {
   DaveEHPrintFuncTextLabel(fp, func_name);
   TargetInstruction* inst = TargetFirstInstruction(&emitter->rv->base);
   while (inst != NULL) {
+    int label = TargetDebugLabel(&emitter->rv->base, inst);
+    if (label >= 0) {
+      char name[32];
+      TargetDebugLabelName(label, name, sizeof(name));
+      fprintf(fp, "%s:\n", name);
+    }
     PrintInstruction(emitter, inst, func_name, fp);
     inst = TargetNext(inst);
   }

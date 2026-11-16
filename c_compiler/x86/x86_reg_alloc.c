@@ -189,6 +189,26 @@ static int X86FloatPhysical(X86RegisterAllocator* allocator, int slot) {
   return slot & 15;
 }
 
+int X86RegisterDwarfNumber(X86RegisterAllocator* allocator,
+                           TargetRegister* r) {
+  X86Register* reg = (X86Register*)r;
+  if (reg == NULL) {
+    return -1;
+  }
+  bool is_64bit = allocator->rv->profile->is_64bit;
+  if (reg->type == kX86RegTypeFloat) {
+    // xmm0 is 17 on x86-64 and 21 on i386.
+    return (is_64bit ? 17 : 21) + X86FloatPhysical(allocator, reg->base.num);
+  }
+  int phys = X86IntPhysical(allocator, reg->base.num);
+  if (phys < 0 || !is_64bit) {
+    return phys;  // i386 numbers them as the hardware does.
+  }
+  // x86-64 numbers the first eight rax, rdx, rcx, rbx, rsi, rdi, rbp, rsp.
+  static const int kDwarf[8] = {0, 2, 1, 3, 7, 6, 4, 5};
+  return phys < 8 ? kDwarf[phys] : phys;
+}
+
 // Physical registers the emitter uses implicitly as scratch and which therefore
 // must never hold an allocator-managed value: r11 (spill-address / general
 // scratch in several emit paths) and xmm15/xmm14 (used to shuttle integer

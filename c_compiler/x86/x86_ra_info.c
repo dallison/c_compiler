@@ -344,11 +344,31 @@ static TargetInstruction* CreateCopy(void* ctx, TargetInstruction* value,
   return copy;
 }
 
+// The register variable whose location is |inst|, or NULL.
+static RegisterVariable* FindVariable(ColoringContext* c,
+                                      TargetInstruction* inst) {
+  if (Kind(inst) != kTargetRALocation) {
+    return NULL;
+  }
+  Vector* var_regs = &c->allocator->rv->var_regs;
+  for (size_t i = 0; i < var_regs->length; i++) {
+    RegisterVariable* var = var_regs->value.p[i];
+    if (var->inst == inst) {
+      return var;
+    }
+  }
+  return NULL;
+}
+
 static int NewSlot(void* ctx, TargetInstruction* value) {
-  (void)value;
   ColoringContext* c = ctx;
   int slot = c->spill_size;
   c->spill_size += 8;
+  RegisterVariable* var = FindVariable(c, value);
+  if (var != NULL) {
+    var->spill_slot = var->spilled && var->spill_slot != slot ? -1 : slot;
+    var->spilled = true;
+  }
   return slot;
 }
 
@@ -375,6 +395,10 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
       &location->base,
       (TargetOpcode)(fp ? X86_OP(fvarreg) : X86_OP(ivarreg)));
   TargetTrackOrphanInstruction(&c->allocator->rv->base, &location->base);
+  RegisterVariable* var = FindVariable(c, like);
+  if (var != NULL) {
+    var->split_location = &location->base;
+  }
   return &location->base;
 }
 

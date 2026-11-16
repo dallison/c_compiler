@@ -34,4 +34,7 @@ void X86EmitterDelete(X86Emitter* emitter);
 void X86PrintFunction(X86Emitter* emitter, FILE* fp);
 void X86PrintCXXAdjustorThunks(FILE* fp);
 
+// False when the emitter prints no machine code for |inst|.
+bool X86InstructionEmitsCode(TargetInstruction* inst);
+
 #endif /* x86_emitter_h */

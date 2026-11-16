@@ -78,6 +78,10 @@ const char* X86RegisterName(X86Register* reg, char* buf, size_t len);
 // True if the allocator gives |inst|'s result a floating point register.
 bool X86HasFloatResult(TargetInstruction* inst);
 
+// The DWARF number of |reg|, or -1 if it is none.
+int X86RegisterDwarfNumber(X86RegisterAllocator* allocator,
+                           TargetRegister* reg);
+
 // How the shared allocator code reads x86-64 instructions.
 const TargetRAInfo* X86RAInfo(void);
 

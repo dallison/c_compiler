@@ -122,7 +122,7 @@ class Cursor:
 
 
 SHT_RELA = 4
-EM_AARCH64 = 183
+MACHINES = {62: "x86_64", 183: "aarch64", 243: "riscv"}
 # The relocations in debug sections, by type: the bytes they write, and
 # whether they set the value there or add to or subtract from it.
 RELOCATIONS = {
@@ -130,13 +130,16 @@ RELOCATIONS = {
     # R_RISCV_32, R_RISCV_64, ADD32, ADD64, SUB32, SUB64.
     "riscv": {1: (4, "set"), 2: (8, "set"), 35: (4, "add"), 36: (8, "add"),
               39: (4, "sub"), 40: (8, "sub")},
+    "x86_64": {1: (8, "set"), 10: (4, "set"), 11: (4, "set")},  # 64, 32, 32S
 }
+R_X86_64_PC32 = 2
+R_X86_64_PLT32 = 4
 
 
 def parse_elf_sections(blob, relocate=False):
     """Maps section names to their contents.  With |relocate|, applies the
-    relocations of the sections of an AArch64 or RISC-V object, taking every
-    section's address as 0."""
+    relocations of the sections of an AArch64, RISC-V or x86-64 object, taking
+    every section's address as 0."""
     if blob[:4] != b"\x7fELF":
         raise ValueError("not an ELF file")
     elf64 = blob[4] == 2
@@ -172,7 +175,7 @@ def parse_elf_sections(blob, relocate=False):
     if relocate:
         if not elf64:
             raise ValueError("relocating a 32-bit object")
-        kinds = RELOCATIONS["aarch64" if machine == EM_AARCH64 else "riscv"]
+        kinds = RELOCATIONS[MACHINES[machine]]
         for name_off, sh_type, offset, size, link, info in sections:
             if sh_type != SHT_RELA:
                 continue
@@ -394,8 +397,19 @@ CALLEE_SAVED = {
     "aarch64": {"int": set(range(19, 29)), "fp": set(range(72, 80))},
     "riscv": {"int": {9} | set(range(18, 28)),
               "fp": {40, 41} | set(range(50, 60))},
+    # rbx and r12-r15.  SysV saves no xmm register.
+    "x86_64": {"int": {3, 12, 13, 14, 15}, "fp": set()},
 }
-FP_REGS = {"aarch64": set(range(64, 96)), "riscv": set(range(32, 64))}
+FP_REGS = {"aarch64": set(range(64, 96)), "riscv": set(range(32, 64)),
+           "x86_64": set(range(17, 33))}
+
+
+def saved_registers(target, allocator_env):
+    if target == "x86_64" and "DAVECC_OLD_RA" in allocator_env:
+        # The dominator walk keeps values in xmm8-xmm15 across calls, and
+        # saves them for its callers.
+        return {"int": CALLEE_SAVED[target]["int"], "fp": set(range(25, 33))}
+    return CALLEE_SAVED[target]
 
 
 def decode_location(expr):
@@ -434,9 +448,20 @@ def parse_location_list(debug_loc, offset):
         entries.append((base + begin, base + end, kind, reg))
 
 
-def call_addresses(text, low, high, target):
-    """The addresses of the calls between |low| and |high| in |text|."""
+def call_addresses(sections, low, high, target):
+    """The (address, return address) of each call between |low| and |high| in
+    the text.  On x86-64 these are the calls to other functions' symbols."""
+    text = sections[".text"]
     calls = []
+    if target == "x86_64":
+        rela = sections.get(".rela.text", b"")
+        for r in range(0, len(rela), 24):
+            r_offset, r_info, _ = struct.unpack_from("<QQq", rela, r)
+            pc = r_offset - 1
+            if ((r_info & 0xffffffff) in (R_X86_64_PC32, R_X86_64_PLT32) and
+                    low <= pc < high and text[pc] == 0xe8):
+                calls.append((pc, r_offset + 4))
+        return calls
     for pc in range(low, high, 4):
         word, = struct.unpack_from("<I", text, pc)
         if target == "aarch64":
@@ -447,7 +472,7 @@ def call_addresses(text, low, high, target):
             # jal ra and jalr ra.
             is_call = (word & 0x7f) in (0x6f, 0x67) and (word >> 7) & 0x1f == 1
         if is_call:
-            calls.append(pc)
+            calls.append((pc, pc + 4))
     return calls
 
 
@@ -483,8 +508,7 @@ def register_locations(path, target):
             function = values.get(DW_AT_name)
             low = values.get(DW_AT_low_pc)
             high = low + values.get(DW_AT_high_pc)
-            calls[function] = call_addresses(sections[".text"], low, high,
-                                             target)
+            calls[function] = call_addresses(sections, low, high, target)
         elif tag in (DW_TAG_variable, DW_TAG_formal_parameter):
             location = values.get(DW_AT_location)
             if location is None:
@@ -515,7 +539,7 @@ def check_register_variables(davecc, source, work, target, opt, allocator_env):
                            "-c", source, "-o", obj], env=env)
     locations, calls = register_locations(obj, target)
     config = "%s %s %s" % (target, opt, allocator_env or "")
-    saved = CALLEE_SAVED[target]
+    saved = saved_registers(target, allocator_env)
 
     # A call overwrites the registers it does not save, so a location list
     # cannot claim one of them holds a variable once the call returns.
@@ -525,8 +549,8 @@ def check_register_variables(davecc, source, work, target, opt, allocator_env):
         for low, high, kind, reg in location[0]:
             if reg in saved["int"] or reg in saved["fp"]:
                 continue
-            for call in calls.get(function, []):
-                if low <= call and call + 4 < high:
+            for call, after in calls.get(function, []):
+                if low <= call and after < high:
                     raise ValueError(
                         "%s: %s in %s is in register %d at 0x%x-0x%x, across "
                         "the call at 0x%x" %
@@ -558,7 +582,14 @@ def check_register_variables(davecc, source, work, target, opt, allocator_env):
     if shared(total, i) is not None:
         raise ValueError("%s: total and i share register %d" %
                          (config, shared(total, i)))
-    expect("scale", "x", "reg", saved["fp"])
+    if saved["fp"]:
+        expect("scale", "x", "reg", saved["fp"])
+    else:
+        # No register keeps x across the calls.
+        location = locations.get(("scale", "x"))
+        if location is None or location[0] != "fbreg" or location[1] >= 0:
+            raise ValueError("%s: x in scale is at %s, expected the frame" %
+                             (config, location))
     expect("scale", "acc", "reg", FP_REGS[target])
     expect("make", "r", "breg", set(range(0, 32)))
 
@@ -593,7 +624,7 @@ compile_and_check(davecc, source, work, "x86_64", [], c_langs)
 compile_and_check(davecc, source, work, "aarch64", [], c_langs)
 compile_and_check(davecc, cxx_source, work, "x86_64", [], cxx_langs,
                   obj_name="x86_64_cxx")
-for target in ("aarch64", "riscv"):
+for target in ("aarch64", "riscv", "x86_64"):
     for opt in ("-O1", "-O2"):
         for allocator_env in ({}, {"DAVECC_OLD_RA": "1"}):
             check_register_variables(davecc, register_source, work, target,

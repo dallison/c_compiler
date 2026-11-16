@@ -17,10 +17,12 @@
 #include "debug.h"
 #include "member_pointer.h"
 
+#include "x86_emitter.h"
 #include "x86_optimize.h"
 #include "x86_codegen_private.h"
 #include "errors.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 static void LowerVariables(X86Generator* rv, Generator* gen);
 static TargetInstruction* LowerIRNode(X86Generator* rv, Generator* gen,
@@ -912,7 +914,7 @@ static TargetInstruction* IntVariableRegister(X86Generator* rv, int varnum, Symb
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(ivarreg));
@@ -931,7 +933,7 @@ static TargetInstruction* FloatingPointVariableRegister(X86Generator* rv, int va
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(fvarreg));
@@ -6062,8 +6064,89 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
             X86_FRAME_POINTER_RESIDUE;
 }
 
-static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
+// Marks register variable |inst| as holding the address of its variable, which
+// lives in memory.
+static void SetHoldsAddress(X86Generator* rv, TargetInstruction* inst) {
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->holds_address = true;
+    }
+  }
+}
+
+static int DwarfRegister(TargetGenerator* gen, TargetRegister* reg) {
+  return X86RegisterDwarfNumber(&((X86Generator*)gen)->register_allocator,
+                                reg);
+}
+
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it, it was spilled, or
+// splitting moved it over part of the function.
+static int DebugRegister(X86Generator* rv, RegisterVariable* var) {
+  TargetRegister* reg = var->inst->reg;
+  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
+      (var->split_location != NULL && var->split_location->reg != reg)) {
+    return -1;
+  }
+  return DwarfRegister(&rv->base, reg);
+}
+
+// The frame base offset of spill slot |slot|, which the emitter addresses
+// 8 + |slot| bytes below the local variables and saved arguments.
+static int SpillSlotFrameOffset(X86Generator* rv, int slot) {
+  return -(rv->base.stack_frame_size + rv->saved_arg_area_size +
+           X86_P(rv)->stack_frame_header_size + 8 + slot);
+}
+
+// Points each register variable's debug information at the registers or spill
+// slot allocation chose for it.
+static void SetDebugRegisterLocations(X86Generator* rv) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  TargetDebugVariable* colored =
+      malloc((rv->var_regs.length + 1) * sizeof(TargetDebugVariable));
+  int num_colored = 0;
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    if (symbol == NULL) {
+      continue;
+    }
+    // Every assignment of a spilled variable stores it, so its slot holds it
+    // throughout, unless splitting gave it a register over part of the
+    // function.
+    if (var->spilled) {
+      if (var->spill_slot >= 0 && !var->holds_address &&
+          var->split_location == NULL) {
+        VariableDIESetStackOffset(SymbolDIE(symbol),
+                                  SpillSlotFrameOffset(rv, var->spill_slot));
+      }
+      continue;
+    }
+    // The coloring allocator reuses a variable's register where the variable
+    // is dead.
+    if (rv->colored) {
+      colored[num_colored++] = (TargetDebugVariable){
+          symbol, {var->inst, var->split_location}, var->holds_address};
+      continue;
+    }
+    int reg = DebugRegister(rv, var);
+    if (reg < 0) {
+      continue;
+    }
+    if (var->holds_address) {
+      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
+    } else {
+      VariableDIESetRegister(SymbolDIE(symbol), reg);
+    }
+  }
+  if (num_colored != 0) {
+    TargetSetDebugLocationLists(&rv->base, X86RAInfo(), colored, num_colored,
+                                DwarfRegister, X86InstructionEmitsCode);
+  }
+  free(colored);
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
@@ -6226,7 +6309,6 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = X86_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(rv, entry, args, func);
         if (location.type == kArgLocationRegister) {
@@ -6309,7 +6391,6 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
           // TODO: if this is a leaf procedure we can keep them in the arg regs.
           int reg = rv->num_int_reg_vars++;
           entry->pooled->data.ivalue = X86_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
           ArgLocation location = ArgumentLocation(rv, entry, args, func);
           if (location.type == kArgLocationRegister) {
             // Named small-struct argument that consumed an integer argument
@@ -6392,7 +6473,7 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
           Emit(rv, NewInstruction2(X86_OP(mv), var,
                       IncomingIntArgumentRegister(rv, 0)));
         }
-        SetDebugRegisterLocation(entry, rv->struct_return_reg);
+        SetHoldsAddress(rv, var);
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
@@ -6420,7 +6501,6 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
         X86HasFreeIntRegVar(rv)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = X86_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(rv, entry, args, func);
@@ -6722,6 +6802,7 @@ void X86Lower(X86Generator* rv, Generator* gen) {
   }
   // Allocate registers to the instructions.
   X86AllocateRegisters(&rv->register_allocator);
+  SetDebugRegisterLocations(rv);
 }
 
 void X86Print(X86Generator* rv, FILE* fp) {
