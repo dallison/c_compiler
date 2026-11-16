@@ -3798,6 +3798,7 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
   // a multi-dimensional array, where arr[i] has array type), it decays to its
   // address rather than being loaded.
   if (TypeIsArray(node->base.type) || TypeIsStructOrUnion(node->base.type) ||
+      TypeIsVector(node->base.type) ||
       TypeIsMemberPointerAggregate(node->base.type) ||
       TypeUsesLongDoubleRepresentation(node->base.type) ||
       TypeIsInt128(node->base.type) ||
@@ -5429,10 +5430,10 @@ static IRNode* GenerateContentsOf(Generator* gen, UnaryASTNode* node) {
     return addr;
   }
 
-  if (TypeIsStructOrUnion(node->base.type)) {
-    // We are dereferencing a struct pointer.  We can't load the value
-    // because the user of this expression will be expecting the
-    // address of the struct.
+  if (TypeIsStructOrUnion(node->base.type) || TypeIsVector(node->base.type)) {
+    // We are dereferencing a struct or vector pointer.  We can't load the
+    // value because the user of this expression will be expecting the
+    // address of the object.
     return addr;
   }
 
