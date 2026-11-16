@@ -209,6 +209,18 @@ static void RestoreExceptionLandingState(PCodeEmitter* emitter, FILE* fp) {
   }
 }
 
+// The store or load of a spill slot for a register of |type|.
+static const char* SpillMnemonic(PCodeRegisterType type, bool store) {
+  switch (type) {
+    case kPCodeRegTypeFloat:
+      return store ? "stf" : "ldf";
+    case kPCodeRegTypeDouble:
+      return store ? "std" : "ldd";
+    default:
+      return store ? "stx" : "ldx";
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -246,7 +258,25 @@ static void PrintInstruction(PCodeEmitter* emitter, TargetInstruction* inst,
         PrintRmov(emitter, inst, fp);
         return;
       }
+      if (inst->operand[0] != NULL && inst->reg == inst->operand[0]->reg) {
+        return;
+      }
       break;
+    case P_OP(spill): {
+      PCodeRegister* reg = (PCodeRegister*)inst->operand[0]->reg;
+      fprintf(fp, "\t%-8s %s, [fp, #%d]\n", SpillMnemonic(reg->type, true),
+              PCodeRegisterName(reg, buf1, sizeof(buf1)),
+              (int)TargetIntValue(inst->operand[1]));
+      return;
+    }
+    case P_OP(reload): {
+      PCodeRegister* reg = (PCodeRegister*)inst->reg;
+      fprintf(fp, "\t%-8s %s, [fp, #%d]\n",
+              SpillMnemonic(reg->type, false),
+              PCodeRegisterName(reg, buf1, sizeof(buf1)),
+              (int)TargetIntValue(inst->operand[0]->operand[1]));
+      return;
+    }
     case P_OP(symbol): {
       TargetSymbol* sym = (TargetSymbol*)inst;
       char namebuf[256];

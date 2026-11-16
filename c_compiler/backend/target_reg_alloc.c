@@ -18,7 +18,8 @@
 
 enum {
   kNoNode = -1,
-  kMaxKeys = 96,       // Clobbers, implicit uses or forbidden keys.
+  // Clobbers, implicit uses or forbidden keys.
+  kMaxKeys = TARGET_RA_FIXED_KEYS,
   kMaxReadDepth = 32,  // Operands read through, such as an argument chain.
   kMaxRounds = 32,
   kChunkBits = 8,

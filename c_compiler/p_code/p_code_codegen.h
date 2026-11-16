@@ -219,6 +219,10 @@ typedef enum {
   P_OP(rcall),    // Call register with int resutl.
   P_OP(rcallf),   // Call register with float result.
   P_OP(rcalld),   // Call register with double result.
+
+  // Spill slots for the coloring allocator, at an offset from fp.
+  P_OP(spill),    // Store operand 0 at operand 1.
+  P_OP(reload),   // Load from the slot of the spill in operand 0.
 } PCodeOpcode;
 
 typedef struct {
@@ -235,6 +239,8 @@ typedef struct PCodeGenerator {
   TargetGenerator base;
 
   TargetInstruction* argument_pointer;
+  // The prologue's `mov sp -> fp`, after which the frame is allocated.
+  TargetInstruction* frame_setup;
   Vector exception_ranges;
   Vector exception_typeinfos;
   int source_pointer_size;

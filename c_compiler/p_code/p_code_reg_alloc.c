@@ -8,6 +8,8 @@
 
 #include "p_code_reg_alloc.h"
 #include <assert.h>
+#include <string.h>
+#include "compiler.h"
 #include "p_code_codegen.h"
 #include "p_code_machine.h"
 #include "target_basic_block.h"
@@ -288,6 +290,10 @@ static PCodeRegisterType RegisterTypeFromInstruction(TargetInstruction* inst) {
       assert(false);
       return 0;
   }
+}
+
+PCodeRegisterType PCodeInstructionRegisterType(TargetInstruction* inst) {
+  return RegisterTypeFromInstruction(inst);
 }
 
 static void FreeRegisters(PCodeRegisterAllocator* allocator,
@@ -672,7 +678,35 @@ const char* PCodeRegisterName(PCodeRegister* reg, char* buf, size_t len) {
   return buf;
 }
 
+// The coloring allocator is the default from -O1; at -O0 the linear walk is
+// faster and DAVECC_NEW_RA selects coloring anyway.  DAVECC_OLD_RA selects the
+// linear walk at every level.  For bisecting, DAVECC_NEW_RA_FUNC limits the
+// coloring allocator to one function and DAVECC_NEW_RA_LIMIT to the first n
+// functions compiled.
+bool PCodeUseColoringAllocator(PCodeGenerator* pcode) {
+  if (getenv("DAVECC_OLD_RA") != NULL ||
+      (!OptLevel1() && getenv("DAVECC_NEW_RA") == NULL)) {
+    return false;
+  }
+  const char* only = getenv("DAVECC_NEW_RA_FUNC");
+  if (only != NULL && strcmp(only, pcode->base.function_name.value) != 0) {
+    return false;
+  }
+  const char* limit = getenv("DAVECC_NEW_RA_LIMIT");
+  if (limit != NULL) {
+    static int count;
+    return count++ < atoi(limit);
+  }
+  return true;
+}
+
 void PCodeAllocateRegisters(PCodeRegisterAllocator* allocator) {
+  if (PCodeUseColoringAllocator(allocator->pcode)) {
+    TargetBuildBasicBlocks(&allocator->pcode->base);
+    if (PCodeAllocateRegistersByColoring(allocator)) {
+      return;
+    }
+  }
   alloc_epoch = 1;
   TargetInstruction* inst = TargetFirstInstruction(&allocator->pcode->base);
   while (inst != NULL) {

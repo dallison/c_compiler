@@ -12,7 +12,7 @@
 #include <string.h>
 #include "target_basic_block.h"
 
-enum { kMaxDefsPerInst = 72 };
+enum { kMaxDefsPerInst = TARGET_RA_FIXED_KEYS + 2 };
 
 enum {
   kDetailOrphaned,

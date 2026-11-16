@@ -3,13 +3,16 @@
 .global __davecc_capture_regs
 .type __davecc_capture_regs, @function
 __davecc_capture_regs:
-	ldx r1, [sp, #8]
-	ldx r2, [sp, #0]
-	stx r2, [r1, #0]
-	mov r2, ap
-	stx r2, [r1, #8]
-	mov r2, fp
-	stx r2, [r1, #16]
+	// A call may overwrite only r0, so r1 is saved.
+	pushx r1
+	ldx r1, [sp, #16]
+	ldx r0, [sp, #8]
+	stx r0, [r1, #0]
+	mov r0, ap
+	stx r0, [r1, #8]
+	mov r0, fp
+	stx r0, [r1, #16]
+	popx r1
 	ret
 
 .global __davecc_jump_to_landing_pad

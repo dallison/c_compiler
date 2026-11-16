@@ -363,6 +363,18 @@ static void FunctionLabelName(char* buffer, size_t size, const char* function,
   snprintf(buffer, size, ".%s_label_%d", function, label->id);
 }
 
+// The store or load of a spill slot for a register of |type|.
+static int SpillMachineOpcode(PCodeRegisterType type, bool store) {
+  switch (type) {
+    case kPCodeRegTypeFloat:
+      return store ? PCODE_OP(stf) : PCODE_OP(ldf);
+    case kPCodeRegTypeDouble:
+      return store ? PCODE_OP(std) : PCODE_OP(ldd);
+    default:
+      return store ? PCODE_OP(stx) : PCODE_OP(ldx);
+  }
+}
+
 static bool EmitRegisterSaveRestore(PCodeObject* object,
                                     PCodeRegisterAllocator* allocator,
                                     bool save, const char** reason) {
@@ -532,6 +544,24 @@ static bool EmitInstruction(PCodeObject* object, PCodeGenerator* pcode,
     case P_OP(asm):
       *reason = "inline assembly is not supported in constexpr pcode";
       return false;
+    case P_OP(spill): {
+      PCodeRegister* reg = (PCodeRegister*)instruction->operand[0]->reg;
+      AppendU32(&object->text,
+                PCodeEncodeRegisters64(SpillMachineOpcode(reg->type, true),
+                                       reg->base.num, PCODE_FP_REG));
+      AppendU32(&object->text,
+                (uint32_t)TargetIntValue(instruction->operand[1]));
+      return true;
+    }
+    case P_OP(reload): {
+      PCodeRegister* reg = (PCodeRegister*)instruction->reg;
+      AppendU32(&object->text,
+                PCodeEncodeRegisters64(SpillMachineOpcode(reg->type, false),
+                                       reg->base.num, PCODE_FP_REG));
+      AppendU32(&object->text,
+                (uint32_t)TargetIntValue(instruction->operand[0]->operand[1]));
+      return true;
+    }
     default:
       break;
   }
@@ -563,6 +593,12 @@ static bool EmitInstruction(PCodeObject* object, PCodeGenerator* pcode,
     }
     AppendU32(&object->text, PCodeEncodeRegisters32(
                                  machine_opcode, move_dest, move_source, 0));
+    return true;
+  }
+  if ((opcode == P_OP(mov) || opcode == P_OP(movf) ||
+       opcode == P_OP(movd)) &&
+      instruction->operand[0] != NULL &&
+      instruction->reg == instruction->operand[0]->reg) {
     return true;
   }
 

@@ -22,7 +22,7 @@
 #include "target_generator.h"
 #include "target_ra_ir.h"
 
-#define TARGET_RA_MAX_CLASSES 2
+#define TARGET_RA_MAX_CLASSES 3
 #define TARGET_RA_MAX_CLASS_REGS 64
 
 typedef struct {

@@ -264,6 +264,11 @@ const char* PCodeOpcodeName(int op) {
       return "rcalld";
     case P_OP(ret):
       return "ret";
+
+    case P_OP(spill):
+      return "spill";
+    case P_OP(reload):
+      return "reload";
   }
 }
 
@@ -280,6 +285,7 @@ static bool PCodeIsBranch(TargetInstruction* inst) {
   case P_OP(bra):
   case P_OP(bz):
   case P_OP(bnz):
+  case P_OP(cbra):     // Computed branch into the table after it.
   case P_OP(jmp):      // Jump to address.
   case P_OP(cjmp):     // Jump to contents of address.
     return true;
@@ -414,7 +420,13 @@ static bool PCodeIsJumpTableEntry(TargetInstruction* inst) {
 }
 
 static TargetInstruction* PCodeGetBranchTarget(TargetInstruction* inst) {
-  return inst->operand[1];
+  switch ((PCodeOpcode)inst->opcode) {
+    case P_OP(bz):
+    case P_OP(bnz):
+      return inst->operand[1];
+    default:
+      return inst->operand[0];
+  }
 }
 
 static TargetVirtuals virtuals = {
@@ -438,6 +450,7 @@ void PCodeGeneratorInit(PCodeGenerator* pcode, Generator* gen) {
   TargetGeneratorInit(&pcode->base, gen, &virtuals);
 
   pcode->argument_pointer = NULL;
+  pcode->frame_setup = NULL;
   pcode->source_pointer_size = gen->source_pointer_size;
   VectorInit(&pcode->exception_ranges);
   VectorInit(&pcode->exception_typeinfos);
@@ -1356,6 +1369,7 @@ static TargetInstruction* LowerComputedBranch(PCodeGenerator* pcode,
   assert(node->inputs.length == 1);
   TargetInstruction* value = GetLoweredNode(node->inputs.value.p[0]);
   TargetInstruction* cbra = Emit(pcode, NewInstruction1(P_OP(cbra), value));
+  cbra->flags |= TARGET_INST_TABLE_JUMP;
   SetLoweredNode(node, cbra);
   return cbra;
 }
@@ -2573,6 +2587,7 @@ static TargetInstruction* LowerIRNodeOperation(PCodeGenerator* pcode,
           Emit(pcode, NewInstruction1(P_OP(mov),
                                       StackPointer(pcode)));
       result->dest = FramePointer(pcode);
+      pcode->frame_setup = result;
       if (pcode->base.stack_frame_size > 0) {
         return Emit(pcode, NewInstruction1(
                                P_OP(decsp),
@@ -2986,6 +3001,7 @@ bool PCodeIsExpression(TargetInstruction* inst) {
 //    case P_OP(rmovd):
     case P_OP(loc):
     case P_OP(named_label):
+    case P_OP(spill):
       return false;
 
     default:

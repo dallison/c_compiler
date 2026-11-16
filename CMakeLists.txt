@@ -383,6 +383,7 @@ davecc_library(davecc_compiler
   c_compiler/p_code/p_code_emitter.c
   c_compiler/p_code/p_code_object.c
   c_compiler/p_code/p_code_optimize.c
+  c_compiler/p_code/p_code_ra_info.c
   c_compiler/p_code/p_code_reg_alloc.c
   c_compiler/p_code/p_code_target.c
   c_compiler/p_code/p_code_vm.c
