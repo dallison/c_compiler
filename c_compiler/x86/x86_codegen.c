@@ -6669,16 +6669,11 @@ static void LowerVariables(X86Generator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
-// The coloring allocator leaves inline assembly and vector code to the
-// dominator walk.
+// The coloring allocator leaves inline assembly to the dominator walk.
 static bool ColoringHandlesFunction(Generator* gen) {
   for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
        node = IRNext(node)) {
     if (node->opcode == IR_OP(asm)) {
-      return false;
-    }
-    if ((node->opcode >= IR_OP(vadd) && node->opcode <= IR_OP(vcmpgeu)) ||
-        (node->type != NULL && TypeIsVector(node->type))) {
       return false;
     }
   }

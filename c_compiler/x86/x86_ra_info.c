@@ -231,6 +231,29 @@ static int RegClass(TargetInstruction* inst) {
   }
 }
 
+// A vector in an xmm register, which is 16 bytes of it unless its width flags
+// say 8 or 4.  A reload is a vector if its spill is.
+static bool IsVector(TargetInstruction* inst) {
+  if ((X86Opcode)inst->opcode == X86_OP(reload)) {
+    inst = inst->operand[0];
+  }
+  return (inst->flags & X86_VECTOR_VALUE) != 0 ||
+         (X86Opcode)inst->opcode == X86_OP(loadv) ||
+         (X86Opcode)inst->opcode == X86_OP(resultv);
+}
+
+// The flags that make the emitter move all of a vector, for an instruction
+// that moves |inst|.
+static int VectorFlags(TargetInstruction* inst) {
+  if (!IsVector(inst)) {
+    return 0;
+  }
+  if ((X86Opcode)inst->opcode == X86_OP(reload)) {
+    inst = inst->operand[0];
+  }
+  return X86_VECTOR_VALUE | (inst->flags & X86_VECTOR_WIDTH_MASK);
+}
+
 static int FixedValueKey(TargetInstruction* inst) {
   switch ((X86Opcode)inst->opcode) {
     case X86_OP(call):
@@ -351,13 +374,15 @@ static bool EarlyClobber(TargetInstruction* inst) {
 }
 
 // The copy is in the class of the register it writes.  Both moves print as
-// whichever instruction takes the value between the register files.
+// whichever instruction takes the value between the register files, and a
+// vector's copy moves the whole register.
 static TargetInstruction* CreateCopy(void* ctx, TargetInstruction* value,
                                      TargetInstruction* dest) {
   (void)ctx;
   bool fp = RegClass(dest != NULL ? dest : value) == kFloatClass;
   TargetInstruction* copy = TargetNewInstruction1(
       (TargetOpcode)(fp ? X86_OP(fmv_d) : X86_OP(mv)), value);
+  copy->flags |= VectorFlags(value);
   copy->dest = dest;
   if (dest != NULL && value->dest == dest) {
     value->dest = NULL;
@@ -381,10 +406,21 @@ static RegisterVariable* FindVariable(ColoringContext* c,
   return NULL;
 }
 
+// The emitter addresses slot |s| 8 + |s| bytes below the top of the spill
+// region, so slot |s| is the 8 bytes at depth |s| and a 16-byte slot at depth
+// |d| is numbered |d| + 8.
 static int NewSlot(void* ctx, TargetInstruction* value) {
   ColoringContext* c = ctx;
-  int slot = c->spill_size;
-  c->spill_size += 8;
+  int vector = VectorFlags(value);
+  int slot;
+  if (vector != 0 && (vector & X86_VECTOR_WIDTH_MASK) == 0) {
+    c->spill_size = (c->spill_size + 15) & ~15;
+    slot = c->spill_size + 8;
+    c->spill_size += 16;
+  } else {
+    slot = c->spill_size;
+    c->spill_size += 8;
+  }
   RegisterVariable* var = FindVariable(c, value);
   if (var != NULL) {
     var->spill_slot = var->spilled && var->spill_slot != slot ? -1 : slot;
@@ -396,10 +432,13 @@ static int NewSlot(void* ctx, TargetInstruction* value) {
 static TargetInstruction* CreateSpill(void* ctx, TargetInstruction* value,
                                       int slot) {
   ColoringContext* c = ctx;
-  return TargetNewInstruction2(
+  TargetInstruction* spill = TargetNewInstruction2(
       (TargetOpcode)X86_OP(spill), value,
       TargetGetIntConstant(&c->allocator->rv->base, NULL, kTargetType32Bit,
                            slot));
+  // The emitter stores a vector's spill and reloads it at its width.
+  spill->flags |= VectorFlags(value);
+  return spill;
 }
 
 static TargetInstruction* CreateReload(void* ctx, TargetInstruction* spill) {
@@ -415,6 +454,7 @@ static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
   TargetInitInstruction(
       &location->base,
       (TargetOpcode)(fp ? X86_OP(fvarreg) : X86_OP(ivarreg)));
+  location->base.flags |= VectorFlags(like);
   TargetTrackOrphanInstruction(&c->allocator->rv->base, &location->base);
   RegisterVariable* var = FindVariable(c, like);
   if (var != NULL) {
@@ -543,11 +583,6 @@ static const char* Unsupported(X86Generator* rv) {
       default:
         break;
     }
-    if ((op >= X86_OP(paddb) && op <= X86_OP(divpd)) ||
-        op == X86_OP(loadv) || op == X86_OP(storev) ||
-        op == X86_OP(resultv) || (inst->flags & X86_VECTOR_VALUE) != 0) {
-      return "vector";
-    }
     if (HasPrintedThroughAddress(inst)) {
       return "folded-address";
     }
@@ -624,7 +659,8 @@ static void FindResults(TargetGenerator* gen, ColoringContext* c) {
       X86Opcode op = (X86Opcode)inst->dest->opcode;
       if (op == X86_OP(resulti)) {
         writes_int = true;
-      } else if (op == X86_OP(resultf) || op == X86_OP(resultd)) {
+      } else if (op == X86_OP(resultf) || op == X86_OP(resultd) ||
+                 op == X86_OP(resultv)) {
         c->returns_float = true;
       }
     }

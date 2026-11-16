@@ -1837,6 +1837,16 @@ static void PrintDefaultInstruction(FILE* fp, TargetInstruction* inst,
                                                              : inst->reg)) {
         return;
       }
+      if ((X86Opcode)opcode == X86_OP(fmv_d) &&
+          (inst->flags & X86_VECTOR_VALUE) != 0) {
+        // movsd would copy only the low 8 bytes of a vector.
+        fprintf(fp, "\tmovdqu ");
+        PrintAttOperand(fp, inst->operand[0], buf1, sizeof(buf1));
+        fprintf(fp, ", ");
+        PrintResultRegFromInst(fp, inst, buf2, sizeof(buf2));
+        fprintf(fp, "\n");
+        return;
+      }
       if (((X86Opcode)opcode == X86_OP(fmv_s) ||
            (X86Opcode)opcode == X86_OP(fmv_d)) &&
           TargetIsConst(inst->operand[0]) &&
