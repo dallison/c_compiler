@@ -138,13 +138,28 @@ static bool IsSavedInt(int r) {
   return r == X86_REG_RBX || (r >= X86_REG_R12 && r <= X86_REG_R15);
 }
 
+static bool IsCompareExchange(TargetInstruction* inst) {
+  switch ((X86Opcode)inst->opcode) {
+    case X86_OP(atomic_compare_exchange_bool):
+    case X86_OP(atomic_compare_exchange_val):
+    case X86_OP(atomic_compare_exchange_n):
+      return true;
+    default:
+      return false;
+  }
+}
+
 // A call overwrites the SysV caller-saved registers, which are all of the xmm
 // registers.  The divide family leaves rax and rdx holding its quotient and
-// remainder.  The epilogue reloads the callee-saved registers, so a value read
-// after it, such as the target of an indirect tail call, must be in none of
-// them.
+// remainder, and cmpxchg leaves rax holding the value it found.  The epilogue
+// reloads the callee-saved registers, so a value read after it, such as the
+// target of an indirect tail call, must be in none of them.
 static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   int n = 0;
+  if (IsCompareExchange(inst)) {
+    keys[n++] = X86_REG_RAX;
+    return n;
+  }
   switch ((X86Opcode)inst->opcode) {
     case X86_OP(call):
     case X86_OP(rcall):
@@ -289,6 +304,12 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
                         int max_keys) {
   ColoringContext* c = ctx;
   int n = 0;
+  if (IsCompareExchange(inst)) {
+    // The lowering moves the expected value into rax, which cmpxchg compares
+    // with memory.
+    keys[n++] = X86_REG_RAX;
+    return n;
+  }
   switch ((X86Opcode)inst->opcode) {
     case X86_OP(save):
       // The prologue stores incoming argument registers to the frame.
@@ -513,10 +534,6 @@ static const char* Unsupported(X86Generator* rv) {
       case X86_OP(asm):
       case X86_OP(spill):
       case X86_OP(reload):
-      case X86_OP(atomic_compare_exchange_bool):
-      case X86_OP(atomic_compare_exchange_val):
-      case X86_OP(atomic_compare_exchange_n):
-      case X86_OP(atomic_fetch_add_sub):
       case X86_OP(atomic64):
       case X86_OP(a6):
       case X86_OP(a7):
@@ -564,6 +581,57 @@ static void RestoreWrittenMoves(Vector* moves) {
   }
 }
 
+// xadd leaves its result in its delta's register, which the lowering says by
+// making the delta its dest, although the delta is a value.  Here the result
+// gets a register of its own, and the emitter copies the delta into it.
+// Records each xadd in |xadds| for RestoreXaddDests.
+static void DetachXaddDests(TargetGenerator* gen, Vector* xadds) {
+  FOR_EACH_INSTRUCTION(gen, inst) {
+    if ((X86Opcode)inst->opcode == X86_OP(atomic_fetch_add_sub) &&
+        inst->dest != NULL && inst->dest == inst->operand[1]) {
+      VectorAppend(xadds, inst);
+      inst->dest = NULL;
+    }
+  }
+}
+
+static void RestoreXaddDests(Vector* xadds) {
+  for (size_t i = 0; i < xadds->length; i++) {
+    TargetInstruction* inst = xadds->value.p[i];
+    inst->dest = inst->operand[1];
+  }
+}
+
+// Notes which result registers the function returns values in.  The lowering
+// also moves a compare-exchange's expected value into rax, so a write to rax
+// that a compare-exchange follows in its block is not a result.
+static void FindResults(TargetGenerator* gen, ColoringContext* c) {
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    TargetBasicBlock* block = gen->basic_blocks.value.p[b];
+    if (block->code == NULL || block->end_code == NULL) {
+      continue;
+    }
+    bool writes_int = false;
+    for (TargetInstruction* inst = block->code; inst != NULL;
+         inst = NextInBlock(block, inst)) {
+      if (IsCompareExchange(inst)) {
+        writes_int = false;
+        continue;
+      }
+      if (inst->dest == NULL) {
+        continue;
+      }
+      X86Opcode op = (X86Opcode)inst->dest->opcode;
+      if (op == X86_OP(resulti)) {
+        writes_int = true;
+      } else if (op == X86_OP(resultf) || op == X86_OP(resultd)) {
+        c->returns_float = true;
+      }
+    }
+    c->returns_int |= writes_int;
+  }
+}
+
 bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
   X86Generator* rv = allocator->rv;
   TargetGenerator* gen = &rv->base;
@@ -577,18 +645,7 @@ bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
   }
 
   ColoringContext ctx = {.allocator = allocator};
-  FOR_EACH_INSTRUCTION(gen, inst) {
-    TargetInstruction* dest = inst->dest;
-    if (dest == NULL) {
-      continue;
-    }
-    X86Opcode op = (X86Opcode)dest->opcode;
-    if (op == X86_OP(resulti)) {
-      ctx.returns_int = true;
-    } else if (op == X86_OP(resultf) || op == X86_OP(resultd)) {
-      ctx.returns_float = true;
-    }
-  }
+  FindResults(gen, &ctx);
 
   TargetRegAllocDesc desc = {
       .info = &kInfo,
@@ -633,14 +690,20 @@ bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
   Vector moves;
   VectorInit(&moves);
   RewriteWrittenMoves(gen, &moves);
+  Vector xadds;
+  VectorInit(&xadds);
+  DetachXaddDests(gen, &xadds);
   if (getenv("DAVECC_RA_CHECK") != NULL) {
     TargetRACheck(gen, &kInfo, NULL, stderr, 3);
   }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
+    RestoreXaddDests(&xadds);
     RestoreWrittenMoves(&moves);
+    VectorDestruct(&xadds);
     VectorDestruct(&moves);
     return false;
   }
+  VectorDestruct(&xadds);
   VectorDestruct(&moves);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((X86Opcode)inst->opcode == X86_OP(spill)) {

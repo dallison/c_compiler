@@ -2169,18 +2169,43 @@ static void PrintAtomicCompareExchange(TargetInstruction* inst,
   }
 }
 
+// xadd leaves the old value in the register that held the delta.  A result in
+// a register of its own gets a copy of the delta first, made in r11 if the
+// result shares the address's register.
 static void PrintAtomicFetchAddSub(TargetInstruction* inst, FILE* fp) {
   int size_log2 =
       (inst->flags & X86_ATOMIC_SIZE_MASK) >> X86_ATOMIC_SIZE_SHIFT;
   static const char* xadd[] = {
       "atomic_xaddb", "atomic_xaddw", "atomic_xaddl", "atomic_xaddq"};
-  char b0[16], b1[16];
+  char b0[16], b1[16], b2[16];
+  TargetInstruction* addr = inst->operand[0];
+  TargetInstruction* delta = inst->operand[1];
 
-  fprintf(fp, "\t%s ", xadd[size_log2]);
-  PrintPercentRegFromInst(fp, inst->operand[1], b0, sizeof(b0));
+  if (inst->dest == delta || SamePhysicalReg(inst->reg, delta->reg)) {
+    fprintf(fp, "\t%s ", xadd[size_log2]);
+    PrintPercentRegFromInst(fp, delta, b0, sizeof(b0));
+    fprintf(fp, ", (");
+    PrintPercentRegFromInst(fp, addr, b1, sizeof(b1));
+    fprintf(fp, ")\n");
+    return;
+  }
+  bool via_scratch = SamePhysicalReg(inst->reg, addr->reg);
+  const char* result =
+      via_scratch ? "r11" : GetRegisterName(inst, b2, sizeof(b2));
+  fprintf(fp, "\tmovq ");
+  PrintPercentRegFromInst(fp, delta, b0, sizeof(b0));
+  fprintf(fp, ", ");
+  PrintPercentReg(fp, result);
+  fprintf(fp, "\n\t%s ", xadd[size_log2]);
+  PrintPercentReg(fp, result);
   fprintf(fp, ", (");
-  PrintPercentRegFromInst(fp, inst->operand[0], b1, sizeof(b1));
+  PrintPercentRegFromInst(fp, addr, b1, sizeof(b1));
   fprintf(fp, ")\n");
+  if (via_scratch) {
+    fprintf(fp, "\tmovq %%r11, ");
+    PrintPercentRegFromInst(fp, inst, b2, sizeof(b2));
+    fprintf(fp, "\n");
+  }
 }
 
 static void RestoreStackPointerAtLandingPad(X86Emitter* emitter, FILE* fp);
