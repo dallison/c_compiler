@@ -435,6 +435,14 @@ typedef struct {
   TargetInstruction* inst;      // Actually a TargetSymbol*.
   int varnum;
   bool is_fp;
+  bool holds_address;           // Holds the variable's address, not its value.
+  // Allocation spilled the variable to |spill_slot|, or to more than one slot
+  // if that is -1.
+  bool spilled;
+  int spill_slot;
+  // The location splitting gave the variable over part of the function, or
+  // NULL.
+  TargetInstruction* split_location;
 } RegisterVariable;
 
 typedef struct {
@@ -463,6 +471,8 @@ typedef struct ARMGenerator {
   bool uses_dynamic_stack;  // Uses VLA/alloca (sp adjusted dynamically); the
                             // epilogue must restore sp from fp.
   int saved_arg_size;     // Bytes used by register-passed argument homes.
+  bool wide_result;       // Returns a 64-bit integer in r0:r1.
+  bool colored;           // The coloring allocator allocated the registers.
   
   Vector saved_regs;
   Vector offsets;         // Pointers to Offset.
@@ -517,6 +527,8 @@ bool ARMIsVarRegister(TargetInstruction* inst);
 bool ARMIsJumpTableEntry(TargetInstruction* inst);
 
 TargetInstruction* ARMGetBranchTarget(TargetInstruction* inst);
+// The condition of an unconditional branch.
+TargetInstruction* ARMAlwaysCondition(ARMGenerator* g);
 
 int ARMGetRegisterSize(TargetInstruction* inst);
 

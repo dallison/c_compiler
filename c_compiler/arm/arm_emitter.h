@@ -33,4 +33,7 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp);
 void ARMPrintCXXAdjustorThunks(FILE* fp);
 void ARMPrintEHABISupport(FILE* fp);
 
+// False when the emitter prints no machine code for |inst|.
+bool ARMInstructionEmitsCode(TargetInstruction* inst);
+
 #endif /* arm_emitter_h */

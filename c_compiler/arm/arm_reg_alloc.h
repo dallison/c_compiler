@@ -16,6 +16,7 @@
 #include "map.h"
 #include "arm_machine.h"
 #include "target_generator.h"
+#include "target_ra_ir.h"
 
 struct ARMGenerator;
 struct ARMInstruction;
@@ -75,5 +76,12 @@ void ARMAllocateRegisters(ARMRegisterAllocator* emitter);
 const char* ARMRegisterName(ARMRegister* reg, int size, char* buf, size_t len);
 // True if the allocator gives |inst|'s result a VFP register.
 bool ARMHasFloatResult(TargetInstruction* inst);
+
+// How the shared register allocator code reads ARM instructions.
+const TargetRAInfo* ARMRAInfo(void);
+
+// Allocates the current function's registers with the shared coloring
+// allocator.  Returns false, with the IR untouched, if it cannot.
+bool ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator);
 
 #endif /* arm_reg_alloc_h */

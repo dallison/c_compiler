@@ -947,6 +947,7 @@ cc_library(
         "c_compiler/arm/arm_codegen.c",
         "c_compiler/arm/arm_emitter.c",
         "c_compiler/arm/arm_optimize.c",
+        "c_compiler/arm/arm_ra_info.c",
         "c_compiler/arm/arm_reg_alloc.c",
         "c_compiler/arm/arm_target.c",
         "c_compiler/bpf/bpf_assembler.c",

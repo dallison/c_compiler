@@ -7,6 +7,7 @@
 //
 
 #include "arm_codegen.h"
+#include "arm_emitter.h"
 #include "arm_optimize.h"
 #include <assert.h>
 #include <limits.h>
@@ -17,6 +18,7 @@
 #include "debug.h"
 
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 static void LowerVariables(ARMGenerator* g, Generator* gen);
 
@@ -710,6 +712,8 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   g->has_stack_args = false;
   g->uses_dynamic_stack = false;
   g->saved_arg_size = 0;
+  g->wide_result = false;
+  g->colored = false;
   g->zero = NULL;
   g->tmp = NULL;
   g->lsl = NULL;
@@ -979,6 +983,10 @@ static TargetInstruction* Condition(ARMGenerator* g, ARMOpcode cond, int size) {
   return inst;
 }
 
+TargetInstruction* ARMAlwaysCondition(ARMGenerator* g) {
+  return Condition(g, ARM_OP(al), 0);
+}
+
 static TargetInstruction* IntArgumentRegister(ARMGenerator* g, int argnum) {
   if (g->int_argument_registers[argnum] == NULL) {
     // Allocate instruction for argument register and emit it.  The argument
@@ -1008,7 +1016,7 @@ static TargetInstruction* IntVariableRegister(ARMGenerator* g, int varnum, Symbo
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(ivarreg));
@@ -1027,7 +1035,7 @@ static TargetInstruction* FloatingPointVariableRegister(ARMGenerator* g, int var
       return var->inst;
     }
   }
-  RegisterVariable* var = malloc(sizeof(RegisterVariable));
+  RegisterVariable* var = calloc(1, sizeof(RegisterVariable));
   var->varnum = varnum;
   TargetSymbol* inst = malloc(sizeof(TargetSymbol));
   TargetInitInstruction(&inst->base, TARGET_OP(fvarreg));
@@ -3736,6 +3744,7 @@ static TargetInstruction* LowerResult(ARMGenerator* g, IRNode* node) {
     SetDestOrMove(g, lo, r0, ARM_OP(mov));
     TargetInstruction* r1 = EmitSymbol(g, NewInstruction(ARM_OP(r1)));
     TargetInstruction* res_hi = SetDestOrMove(g, hi, r1, ARM_OP(mov));
+    g->wide_result = true;
     return SetLoweredNode(node, res_hi);
   }
   TargetInstruction* result = Materialize(g, node->inputs.value.p[0]);
@@ -6352,8 +6361,78 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 
-static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
+// Marks register variable |inst| as holding the address of its variable, which
+// lives in memory.
+static void SetHoldsAddress(ARMGenerator* g, TargetInstruction* inst) {
+  for (size_t i = 0; i < g->var_regs.length; i++) {
+    RegisterVariable* var = g->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->holds_address = true;
+    }
+  }
+}
+
+// The DWARF number of |r|.  A single is the low half of the D register that
+// holds it, so a VFP register is named by its D register.
+static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
+  (void)gen;
+  ARMRegister* reg = (ARMRegister*)r;
+  if (reg == NULL) {
+    return -1;
+  }
+  if (reg->type == kARMRegTypeFloat) {
+    return 256 + reg->base.num / 2;  // d0 to d15.
+  }
+  return reg->base.num;
+}
+
+// The DWARF number of the one register that holds |var| wherever it is live,
+// or -1 if there is none: optimization removed it or it was spilled.
+static int DebugRegister(RegisterVariable* var) {
+  if ((var->inst->flags & TARGET_INST_SPILLED) != 0) {
+    return -1;
+  }
+  return DwarfRegister(NULL, var->inst->reg);
+}
+
+// Points each register variable's debug information at the registers
+// allocation chose for it.  The emitter places spill slots, so a spilled
+// variable has no location.
+static void SetDebugRegisterLocations(ARMGenerator* g) {
+  if (!compiler->debug_output) {
+    return;
+  }
+  TargetDebugVariable* colored =
+      malloc((g->var_regs.length + 1) * sizeof(TargetDebugVariable));
+  int num_colored = 0;
+  for (size_t i = 0; i < g->var_regs.length; i++) {
+    RegisterVariable* var = g->var_regs.value.p[i];
+    Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    if (symbol == NULL || var->spilled) {
+      continue;
+    }
+    // The coloring allocator reuses a variable's register where the variable
+    // is dead.
+    if (g->colored) {
+      colored[num_colored++] = (TargetDebugVariable){
+          symbol, {var->inst, var->split_location}, var->holds_address};
+      continue;
+    }
+    int reg = DebugRegister(var);
+    if (reg < 0) {
+      continue;
+    }
+    if (var->holds_address) {
+      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
+    } else {
+      VariableDIESetRegister(SymbolDIE(symbol), reg);
+    }
+  }
+  if (num_colored != 0) {
+    TargetSetDebugLocationLists(&g->base, ARMRAInfo(), colored, num_colored,
+                                DwarfRegister, ARMInstructionEmitsCode);
+  }
+  free(colored);
 }
 
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
@@ -6531,7 +6610,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     if (UseRegisterForVariable(g, entry->pooled) && !arg_on_stack) {
       int reg = g->num_fp_reg_vars++;
       entry->pooled->data.ivalue = ARM_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(g, reg, location, entry->pooled);
@@ -6637,7 +6715,7 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
         TargetInstruction* mv =
             Emit(g, NewInstruction1(ARM_OP(mov), IntArgumentRegister(g, 0)));
         mv->dest = var;
-        SetDebugRegisterLocation(entry, g->struct_return_reg);
+        SetHoldsAddress(g, var);
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
@@ -6673,7 +6751,6 @@ static void AssignRegisterOrOffset(ARMGenerator* g, PoolEntry* entry,
     if (UseRegisterForVariable(g, entry->pooled) && !arg_on_stack) {
       int reg = g->num_int_reg_vars++;
       entry->pooled->data.ivalue = ARM_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(entry, args);
@@ -6888,6 +6965,7 @@ void ARMLower(ARMGenerator* g, Generator* gen) {
   }
   // Allocate registers to the instructions.
   ARMAllocateRegisters(&g->register_allocator);
+  SetDebugRegisterLocations(g);
 }
 
 void ARMPrint(ARMGenerator* g, FILE* fp) {

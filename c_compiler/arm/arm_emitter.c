@@ -20,6 +20,7 @@
 #include "arm_codegen.h"
 #include "arm_reg_alloc.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 #include "eh_metadata.h"
 
 static void Trap() {}
@@ -103,6 +104,10 @@ static void AddSubImmediate(ARMEmitter* emitter,
   char commentbuf[256] = {0};
   if (comment != NULL) {
     snprintf(commentbuf, sizeof(commentbuf), "\t// %s", comment);
+  }
+  if (value == 0 && strcmp(destreg, srcreg) != 0) {
+    fprintf(fp, "\tmov %s, %s%s\n", destreg, srcreg, commentbuf);
+    return;
   }
   const char* op = add ? "add" : "sub";
   int shift = 0;
@@ -251,8 +256,9 @@ static bool OmitFramePointer(ARMEmitter* emitter) {
          emitter->g->saved_regs.length == 0;
 }
 
+// The coloring allocator keeps the hidden result pointer like any other value.
 static bool NeedsStructReturnHome(ARMEmitter* emitter) {
-  return emitter->g->struct_return_reg >= 0 &&
+  return emitter->g->struct_return_reg >= 0 && !emitter->g->colored &&
          (emitter->g->base.num_calls > 0 ||
           emitter->g->exception_ranges.length > 0);
 }
@@ -315,10 +321,11 @@ static bool EmptyStackFrame(ARMEmitter* emitter) {
   // register-spill region.  Callee-saved registers (used_int_regs /
   // used_float_regs) are stored at sp-relative offsets that assume the body of
   // the frame has been allocated, so a function that uses them needs a real
-  // frame even if it has no locals and makes no calls.
+  // frame even if it has no locals and makes no calls.  So does one that moves
+  // sp, which the epilogue restores from fp.
   return emitter->g->base.stack_frame_size == 0 &&
          emitter->g->base.num_calls == 0 && !emitter->g->not_leaf &&
-         !emitter->g->has_stack_args &&
+         !emitter->g->has_stack_args && !emitter->g->uses_dynamic_stack &&
          emitter->g->exception_ranges.length == 0 &&
          BitSetCount(&emitter->regs->used_int_regs) == 0 &&
          BitSetCount(&emitter->regs->used_float_regs) == 0 &&
@@ -393,7 +400,7 @@ static void EmitIntRegBlock(FILE* fp, const char* op, const char* base,
 }
 
 static int StructReturnPhysicalRegister(ARMEmitter* emitter) {
-  if (emitter->g->struct_return_reg < 0) {
+  if (emitter->g->struct_return_reg < 0 || emitter->g->colored) {
     return -1;
   }
   bool is_leaf = emitter->g->base.num_calls == 0 && compiler->optimize;
@@ -1097,11 +1104,18 @@ static void PrintRmov(ARMEmitter* emitter, TargetInstruction* inst, FILE* fp) {
       ARMRegisterName((ARMRegister*)inst->operand[1]->reg, ARMGetRegisterSize(inst), buf2, sizeof(buf2)));
 }
 
-static const char* GetRegisterName(TargetInstruction* inst, int size, char* buf, size_t bufsize) {
-  if (inst->dest != NULL) {
-    return ARMRegisterName((ARMRegister*)inst->dest->reg, size, buf, bufsize);
+// The register |inst| writes.  A dest the coloring allocator spilled has no
+// register; the spill after |inst| stores its own.
+static TargetRegister* WrittenRegister(TargetInstruction* inst) {
+  if (inst->dest != NULL && inst->dest->reg != NULL) {
+    return inst->dest->reg;
   }
-  return ARMRegisterName((ARMRegister*)inst->reg, size, buf, bufsize);
+  return inst->reg;
+}
+
+static const char* GetRegisterName(TargetInstruction* inst, int size, char* buf, size_t bufsize) {
+  return ARMRegisterName((ARMRegister*)WrittenRegister(inst), size, buf,
+                         bufsize);
 }
 
 static AsmOperand* GetAsmOperand(ARMAsmInstruction* inst, int index) {
@@ -1859,6 +1873,75 @@ static bool PrintNeonDataProc(TargetInstruction* inst, FILE* fp) {
   return true;
 }
 
+// The width of the VFP value |spill| stores.  A spilled variable register
+// carries no size, so the spill records it.
+static int SpilledSize(TargetInstruction* spill) {
+  int size = ARMGetRegisterSize(spill->operand[0]);
+  if (size == 0) {
+    size = ARMGetRegisterSize(spill);
+  }
+  return size == 0 ? kSize32Bit : size;
+}
+
+// Prints `movt reg, sym` if |high|, else `movw reg, sym`.
+static void PrintMovHalf(bool high, const char* reg, TargetInstruction* sym,
+                         FILE* fp) {
+  fprintf(fp, "\t%-12s%s, ", ARMOpcodeName(high ? ARM_OP(movt) : ARM_OP(movw)),
+          reg);
+  if (((int)sym->opcode == (int)ARM_OP(symbol))) {
+    char symbuf[256];
+    fprintf(fp, "%s\n", TargetSymbolName(((TargetSymbol*)sym)->symbol,
+                                         symbuf, sizeof(symbuf)));
+  } else if (((int)sym->opcode == (int)ARM_OP(literal))) {
+    char litname[64];
+    LiteralAsmName(((TargetLiteral*)sym)->literal_id, litname,
+                   sizeof(litname));
+    fprintf(fp, "%s\n", litname);
+  } else if (TargetIsConst(sym)) {
+    uint64_t value = (uint64_t)TargetIntValue(sym);
+    if (high) {
+      value >>= 16;
+    }
+    fprintf(fp, "#%" PRIu64 "\n", value & 0xffffu);
+  } else {
+    assert(false);
+  }
+}
+
+// Whether every reader of |movw| is a movt in another register, which sets
+// both halves itself.
+static bool OnlyFeedsMovtElsewhere(TargetInstruction* movw) {
+  if (movw->users.length == 0) {
+    return false;
+  }
+  for (size_t i = 0; i < movw->users.length; i++) {
+    TargetInstruction* user = movw->users.value.p[i];
+    if ((ARMOpcode)user->opcode != ARM_OP(movt) || user->operand[0] != movw ||
+        WrittenRegister(user) == WrittenRegister(movw)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Mirrors the instructions PrintInstruction prints no machine code for.
+bool ARMInstructionEmitsCode(TargetInstruction* inst) {
+  if (inst->block == NULL) {
+    return false;
+  }
+  switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(label):
+      return (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0;
+    case ARM_OP(named_label):
+    case ARM_OP(ivarreg):
+    case ARM_OP(fvarreg):
+    case ARM_OP(loc):
+      return false;
+    default:
+      return IsPrintable(inst) && !inst->observable_checkpoint;
+  }
+}
+
 // Main instruction printer.
 static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
                              const char* func_name, FILE* fp) {
@@ -2088,10 +2171,7 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       // Use the spilled value's real size so a double is saved with vstr dN.
       int spill_size = reg->type == kARMRegTypeInt
                            ? kSize32Bit
-                           : ARMGetRegisterSize(inst->operand[0]);
-      if (spill_size == 0) {
-        spill_size = kSize32Bit;
-      }
+                           : SpilledSize(inst);
       if (spill_size == kSize128Bit) {
         PrintFpPairMem(fp, false, reg, offset);
         fprintf(fp, "\t// Spilled @%d\n", inst->operand[0]->id);
@@ -2120,10 +2200,7 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       // not vldr sN, or the high 32 bits read back as garbage.
       int reload_size = reg->type == kARMRegTypeInt
                             ? kSize32Bit
-                            : ARMGetRegisterSize(spill->operand[0]);
-      if (reload_size == 0) {
-        reload_size = kSize32Bit;
-      }
+                            : SpilledSize(spill);
       if (reload_size == kSize128Bit) {
         PrintFpPairMem(fp, true, reg, offset);
         fprintf(fp, "\t// Reloaded spilled @%d\n", spill->operand[0]->id);
@@ -2213,6 +2290,11 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
   // General case for instruction printing->base.
   if ((ARMOpcode)inst->opcode == ARM_OP(mov) && inst->reg != NULL &&
       inst->operand[0] != NULL && inst->operand[0]->reg == inst->reg) {
+    return;
+  }
+  if ((ARMOpcode)inst->opcode == ARM_OP(fmov) && inst->operand[0] != NULL &&
+      inst->operand[1] == NULL &&
+      inst->operand[0]->reg == WrittenRegister(inst)) {
     return;
   }
 
@@ -2490,30 +2572,20 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
 
     case ARM_OP(movw):
     case ARM_OP(movt): {
-      TargetInstruction* sym = inst->operand[0];
-      if ((ARMOpcode)inst->opcode == ARM_OP(movt)) {
-        sym = inst->operand[1];
-      }
-      fprintf(fp, "\t%-12s%s, ", ARMOpcodeName(inst->opcode),
-              GetRegisterName(inst, reg_size, buf1, sizeof(buf1)));
-      if (((int)sym->opcode == (int)ARM_OP(symbol))) {
-        char symbuf[256];
-        fprintf(fp, "%s\n", TargetSymbolName(((TargetSymbol*)sym)->symbol,
-                                             symbuf, sizeof(symbuf)));
-      } else if (((int)sym->opcode == (int)ARM_OP(literal))) {
-        char litname[64];
-        LiteralAsmName(((TargetLiteral*)sym)->literal_id, litname,
-                       sizeof(litname));
-        fprintf(fp, "%s\n", litname);
-      } else if (TargetIsConst(sym)) {
-        uint64_t value = (uint64_t)TargetIntValue(sym);
-        if ((ARMOpcode)inst->opcode == ARM_OP(movt)) {
-          value >>= 16;
+      bool high = (ARMOpcode)inst->opcode == ARM_OP(movt);
+      TargetInstruction* sym = high ? inst->operand[1] : inst->operand[0];
+      const char* reg = GetRegisterName(inst, reg_size, buf1, sizeof(buf1));
+      // The coloring allocator gives movw and movt their own registers, so a
+      // movt in another register sets both halves.
+      if (emitter->g->colored) {
+        if (!high && OnlyFeedsMovtElsewhere(inst)) {
+          break;
         }
-        fprintf(fp, "#%" PRIu64 "\n", value & 0xffffu);
-      } else {
-        assert(false);
+        if (high && inst->operand[0]->reg != WrittenRegister(inst)) {
+          PrintMovHalf(false, reg, sym, fp);
+        }
       }
+      PrintMovHalf(high, reg, sym, fp);
       break;
     }
 
@@ -2790,6 +2862,12 @@ void ARMPrintFunction(ARMEmitter* emitter, FILE* fp) {
   fprintf(fp, "%s:\n", func_name);
   TargetInstruction* inst = TargetFirstInstruction(&emitter->g->base);
   while (inst != NULL) {
+    int label = TargetDebugLabel(&emitter->g->base, inst);
+    if (label >= 0) {
+      char name[32];
+      TargetDebugLabelName(label, name, sizeof(name));
+      fprintf(fp, "%s:\n", name);
+    }
     PrintInstruction(emitter, inst, func_name, fp);
     inst = TargetNext(inst);
   }

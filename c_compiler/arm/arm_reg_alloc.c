@@ -9,6 +9,7 @@
 #include "arm_reg_alloc.h"
 #include <assert.h>
 #include <limits.h>
+#include <string.h>
 #include "arm_codegen.h"
 #include "arm_machine.h"
 #include "target_basic_block.h"
@@ -2081,7 +2082,29 @@ static void ResolveArgumentMoves(ARMRegisterAllocator* allocator) {
   }
 }
 
+static bool UseColoringAllocator(ARMRegisterAllocator* allocator) {
+  if (getenv("DAVECC_OLD_RA") != NULL ||
+      (!OptLevel1() && getenv("DAVECC_NEW_RA") == NULL)) {
+    return false;
+  }
+  const char* only = getenv("DAVECC_NEW_RA_FUNC");
+  if (only != NULL &&
+      strcmp(only, allocator->g->base.function_name.value) != 0) {
+    return false;
+  }
+  const char* limit = getenv("DAVECC_NEW_RA_LIMIT");
+  if (limit != NULL) {
+    static int count;
+    return count++ < atoi(limit);
+  }
+  return true;
+}
+
 void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
+  if (UseColoringAllocator(allocator) &&
+      ARMAllocateRegistersByColoring(allocator)) {
+    return;
+  }
   if (allocator->g->struct_return_reg >= 0) {
     bool is_leaf = allocator->g->base.num_calls == 0 && compiler->optimize;
     int reg_num = (is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR
