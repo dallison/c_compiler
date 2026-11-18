@@ -133,6 +133,12 @@ DIE* BuildTypeDebugInfo(DebugBuilder* builder, TypeRecord* type) {
     return NULL;
   }
   DIE* die = NewTypeRecordDIE(builder, type);
+  // A DIE that is already built is shared: a struct tag named by an earlier
+  // declaration, or a base type.  Building it again would append its
+  // attributes a second time, so the name would be emitted more than once.
+  if (die == NULL || die->abbrev != NULL) {
+    return die;
+  }
   VectorAppend(&builder->top_dies, die);
   die->virtuals->builder(builder, die);
   return die;
@@ -186,6 +192,19 @@ static bool DebugTypeIsSignedInt128(TypeRecord* type) {
 static bool DebugTypeIsAuto(TypeRecord* type) {
   return type != NULL && type->declarator == kDeclPrimitive &&
          (type->type & kTypeAuto) != 0;
+}
+
+static bool DebugTypeIsFloatComplex(TypeRecord* type) {
+  return TypeIsComplex(type) && TypeComplexElementType(type) == kTypeFloat;
+}
+
+static bool DebugTypeIsDoubleComplex(TypeRecord* type) {
+  return TypeIsComplex(type) && TypeComplexElementType(type) == kTypeDouble;
+}
+
+static bool DebugTypeIsLongDoubleComplex(TypeRecord* type) {
+  return TypeIsComplex(type) &&
+         TypeComplexElementType(type) == kTypeLongDouble;
 }
 
 static BaseTypeDIE base_types[] = {
@@ -315,6 +334,21 @@ static BaseTypeDIE base_types[] = {
      "auto",
      0,
      0},
+    {{26, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsFloatComplex,
+     "float _Complex",
+     DW_ATE(complex_float),
+     8},
+    {{27, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsDoubleComplex,
+     "double _Complex",
+     DW_ATE(complex_float),
+     16},
+    {{28, DW_TAG(base_type), &base_type_virtuals},
+     DebugTypeIsLongDoubleComplex,
+     "long double _Complex",
+     DW_ATE(complex_float),
+     16},
 };
 
 #define NUM_BASE_TYPES (sizeof(base_types) / sizeof(BaseTypeDIE))
@@ -583,11 +617,13 @@ static DIEVirtuals struct_virtuals = {StructDIEDestruct, StructDIEBuild,
 
 static DIE* NewStructDIE(DebugBuilder* builder, TypeRecord* type) {
   StructDIE* die = malloc(sizeof(StructDIE));
+  String* tag = type->info.struct_info->tag_name;
+  const char* name = tag == NULL ? NULL : tag->value;
   NamedDIEInit(&die->die,
                type->info.struct_info->is_union ? DW_TAG(union_type)
                                                 : DW_TAG(structure_type),
-               &struct_virtuals, type->info.struct_info->tag_name->value, true);
-  StringInit(&die->die.name, type->info.struct_info->tag_name->value);
+               &struct_virtuals, name, true);
+  StringInit(&die->die.name, name);
   VectorInit(&die->members);
   die->byte_size = type->size;
   AddDIE(builder, (DIE*)die);
@@ -759,14 +795,20 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
       die = NewFunctionTypeRecordDIE(builder, type, false);
       break;
     case kDeclPrimitive:
-      if (TypeIsStructOrUnion(type)) {
-        die = FindTag(builder, type->info.struct_info->tag_name->value);
+      // A complex value is a struct of __real and __imag only so the backends
+      // can pass it in memory.  It has no tag, and DWARF names it as a base
+      // type with DW_ATE_complex_float.
+      if (TypeIsComplex(type)) {
+        die = PrimitiveToDIE(type);
+      } else if (TypeIsStructOrUnion(type)) {
+        String* tag = type->info.struct_info->tag_name;
+        die = tag == NULL ? NULL : FindTag(builder, tag->value);
         if (die == NULL) {
           die = NewStructDIE(builder, type);
-          MapKeyValue kv = {.key.p =
-                                type->info.struct_info->tag_name->value,
-                            .value.p = die};
-          MapInsert(&builder->tags, kv);
+          if (tag != NULL) {
+            MapKeyValue kv = {.key.p = tag->value, .value.p = die};
+            MapInsert(&builder->tags, kv);
+          }
           // An ill-formed specialization that is only named has members
           // without a type.
           size_t member_count =
