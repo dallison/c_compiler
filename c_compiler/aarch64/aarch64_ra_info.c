@@ -516,6 +516,33 @@ static const char* Unsupported(AARCH64Generator* g) {
   return NULL;
 }
 
+// An argument list keeps the argument registers live up to the call.  Where
+// it names the value moved into one rather than the register itself, it
+// names the register.  Records each change in |undo| for Restore.
+static void ReadArgumentRegisters(TargetGenerator* gen, Vector* undo) {
+  FOR_EACH_INSTRUCTION(gen, inst) {
+    if ((AARCH64Opcode)inst->opcode != AARCH64_OP(regarg)) {
+      continue;
+    }
+    TargetInstruction* arg = inst->operand[1];
+    if (arg == NULL || Kind(arg) != kTargetRAValue || arg->dest == NULL ||
+        LocationKey(arg->dest) < 0) {
+      continue;
+    }
+    VectorAppend(undo, inst);
+    VectorAppend(undo, arg);
+    TargetReplaceOperand(inst, 1, arg->dest);
+  }
+}
+
+static void Restore(Vector* undo) {
+  for (size_t i = 0; i + 1 < undo->length; i += 2) {
+    TargetInstruction* inst = undo->value.p[i];
+    TargetInstruction* was = undo->value.p[i + 1];
+    TargetReplaceOperand(inst, 1, was);
+  }
+}
+
 bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
   AARCH64Generator* g = allocator->g;
   TargetGenerator* gen = &g->base;
@@ -588,9 +615,15 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
     floats->regs[floats->num_regs++] = kFloatKeyBase + r;
   }
 
+  Vector undo;
+  VectorInit(&undo);
+  ReadArgumentRegisters(gen, &undo);
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
+    Restore(&undo);
+    VectorDestruct(&undo);
     return false;
   }
+  VectorDestruct(&undo);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((AARCH64Opcode)inst->opcode == AARCH64_OP(spill)) {
       inst->reg = inst->operand[0]->reg;
