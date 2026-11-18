@@ -140,11 +140,13 @@ static bool IsRegisterScalar(Symbol* symbol) {
          !TypeIsVLA(type) && !SymbolNeedsDynamicStackAllocation(symbol);
 }
 
-// In SSA form every write to a register scalar creates a new ssavar, so a
-// version is only ever written by the one store that defines it.  Loads of
-// such a version all read the same value and can be numbered like any other
-// pure expression.  Anything else touching the node (an address, a store that
-// was not renamed, an inc/dec) means its contents can change.
+// In SSA form every write to an automatic creates a new ssavar, so a version
+// is only ever written by the one store that defines it.  Loads of such a
+// version all read the same value and can be numbered like any other pure
+// expression.  A global or static local is not one of these: a call writes it
+// without a new version (effect() stores to g between two loads of the same
+// ssavar).  Anything else touching the node (an address, a store that was not
+// renamed, an inc/dec) means its contents can change.
 static bool LoadsSSAValue(IRNode* load) {
   if (!IRIsLoadOnly(load) || load->inputs.length != 1 || load->dest != NULL ||
       (load->flags & ~kIRVarUse) != 0) {
@@ -162,6 +164,13 @@ static bool LoadsSSAValue(IRNode* load) {
   }
   Symbol* symbol = ((IRVariable*)var)->symbol;
   if (symbol == NULL || !IsRegisterScalar(symbol)) {
+    return false;
+  }
+  // A call writes a global or a static local without creating a new version.
+  // Only an automatic, argument, or temporary is unchanged across a call.
+  if (!(symbol->flags.is_argument || symbol->flags.is_temp ||
+        (symbol->flags.is_local &&
+         !StorageIs(symbol->storage, STO(static))))) {
     return false;
   }
   size_t stores = 0;
