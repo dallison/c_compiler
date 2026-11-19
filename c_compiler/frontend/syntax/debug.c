@@ -625,6 +625,7 @@ static DIE* NewStructDIE(DebugBuilder* builder, TypeRecord* type) {
                &struct_virtuals, name, true);
   StringInit(&die->die.name, name);
   VectorInit(&die->members);
+  die->has_members = false;
   die->byte_size = type->size;
   AddDIE(builder, (DIE*)die);
   return (DIE*)die;
@@ -656,6 +657,47 @@ static DIE* NewEnumDIE(DebugBuilder* builder, TypeRecord* type) {
 static DIE* FindTag(DebugBuilder* builder, const char* name) {
   MapKeyType key = {.p = (void*)name};
   return MapFind(&builder->tags, key);
+}
+
+static size_t StructDebugMemberCount(TypeRecord* type) {
+  // An ill-formed specialization that is only named has members without a
+  // type.
+  return type->info.struct_info->invalid_instantiated_member != NULL
+             ? 0
+             : type->info.struct_info->members.length;
+}
+
+static void AddStructMembers(DebugBuilder* builder, StructDIE* die,
+                             TypeRecord* type) {
+  size_t member_count = StructDebugMemberCount(type);
+  die->has_members = member_count != 0;
+  for (size_t i = 0; i < member_count; i++) {
+    DIE* member = NewMemberDIE(
+        builder, (StructMember*)type->info.struct_info->members.value.p[i]);
+    VectorAppend(&die->members, member);
+  }
+}
+
+// The tag's DIE was made when the struct was only declared, so it has no
+// members and no size.  Give it the definition's.  If it is already built,
+// its byte size attribute and abbreviation are those of the declaration, so
+// build it again.  Nothing is emitted until the end of the translation unit.
+static void CompleteStructDIE(DebugBuilder* builder, StructDIE* die,
+                              TypeRecord* type) {
+  if (die->has_members || StructDebugMemberCount(type) == 0) {
+    return;
+  }
+  AddStructMembers(builder, die, type);
+  die->byte_size = type->size;
+  if (die->die.die.abbrev == NULL) {
+    return;
+  }
+  VectorDestructWithContents(&die->die.die.attr_values,
+                             (VectorElementDestructor)DebugAttributeValueDestruct,
+                             /*free_element=*/true);
+  VectorInit(&die->die.die.attr_values);
+  die->die.die.abbrev = NULL;
+  die->die.die.virtuals->builder(builder, &die->die.die);
 }
 
 typedef struct {
@@ -809,19 +851,9 @@ static DIE* NewTypeRecordDIE(DebugBuilder* builder, TypeRecord* type) {
             MapKeyValue kv = {.key.p = tag->value, .value.p = die};
             MapInsert(&builder->tags, kv);
           }
-          // An ill-formed specialization that is only named has members
-          // without a type.
-          size_t member_count =
-              type->info.struct_info->invalid_instantiated_member != NULL
-                  ? 0
-                  : type->info.struct_info->members.length;
-          for (size_t i = 0; i < member_count; i++) {
-            DIE* member = NewMemberDIE(
-                builder,
-                (StructMember*)type->info.struct_info->members.value.p[i]);
-            StructDIE* s = (StructDIE*)die;
-            VectorAppend(&s->members, member);
-          }
+          AddStructMembers(builder, (StructDIE*)die, type);
+        } else if (die->virtuals == &struct_virtuals) {
+          CompleteStructDIE(builder, (StructDIE*)die, type);
         }
       } else if (TypeIsEnum(type)) {
         die = FindTag(builder, type->info.enum_info->tag_name->value);

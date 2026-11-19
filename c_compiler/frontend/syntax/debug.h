@@ -245,6 +245,8 @@ typedef struct {
   NamedDIE die;
   int byte_size;
   Vector members;
+  // Set before the members are made, since a member can name the struct.
+  bool has_members;
 } StructDIE;
 
 typedef struct {
