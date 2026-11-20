@@ -32,14 +32,6 @@ typedef struct AARCH64Register {
   AARCH64RegisterType type;
 } AARCH64Register;
 
-// Allocating for one instruction recurses into its unallocated operands and its
-// destination register variable, so the nesting follows the depth of an operand
-// tree rather than being a fixed couple of levels.
-#define AARCH64_MAX_ALLOCATION_DEPTH 32
-
-
-// The RISC-V R32F and R32D instructions share floating point registers.
-
 #define AARCH64_INT_RETURN_REG AARCH64_INT_ARG_START  // Integer return value register.
 #define AARCH64_FLOAT_RETURN_REG \
   AARCH64_FP_ARG_START  // Float/Double return value register.
@@ -54,37 +46,12 @@ typedef struct {
   // we have used.
   BitSet used_int_regs;
   BitSet used_float_regs;
-  
-  int current_spilled_region_size;
+
   int max_spilled_region_size;
-  BitSet preserved_instructions;    // Instructions needing preseAARCH64ed regs.
-  BitSet short_lived_varregs;
-  // Variable registers written by pointing a value's destination at them, where
-  // that value is read in its own right as well.  See FindSpillVictim.
-  BitSet shared_varregs;
-  Map reassignable_spills;
-  // Maps a variable register to the value most recently written into it, for
-  // as long as that value is still read in its own right.  The two share one
-  // physical register, so taking it away from the variable takes it away from
-  // the value as well.  See SpillInstruction.
-  Map varreg_values;
 
   // The saved registers shrink wrapping replaces on the fast path, one bit
   // each.
   uint32_t shrink_wrapped_regs;
-
-  // Set when no register could be freed for the value being allocated, so it
-  // was given the scratch register instead and has to be written to a spill
-  // slot as soon as it is computed.  See AllocateRegisterWithType.
-  bool spill_after_definition;
-
-  // The instructions currently being allocated for, outermost first.  Each has
-  // already had reloads inserted for whichever of its operands were spilled, so
-  // a spill from here on cannot redirect its reads to a slot by retargeting
-  // them.  Allocation nests through operands and destination variables, hence a
-  // stack rather than a single instruction.  See IsBeingAllocated.
-  TargetInstruction* allocating[AARCH64_MAX_ALLOCATION_DEPTH];
-  size_t allocating_depth;
 } AARCH64RegisterAllocator;
 
 void AARCH64RegisterAllocatorInit(AARCH64RegisterAllocator* alloc,
@@ -105,8 +72,7 @@ bool AARCH64HasFloatResult(TargetInstruction* inst);
 // How the shared allocator code reads AArch64 instructions.
 const TargetRAInfo* AARCH64RAInfo(void);
 
-// Allocates the current function with the shared coloring allocator.  Returns
-// false, leaving the function untouched, if it cannot.
-bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator);
+// Allocates the current function with the shared coloring allocator.
+void AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator);
 
 #endif /* arm_reg_alloc_h */

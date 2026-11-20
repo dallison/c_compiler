@@ -7,6 +7,7 @@
 //  target_reg_alloc.h.
 //
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "aarch64_reg_alloc.h"
@@ -104,8 +105,63 @@ static int WrittenOperand(TargetInstruction* inst) {
   return -1;
 }
 
+static bool IsExtendedAsm(TargetInstruction* inst) {
+  return (AARCH64Opcode)inst->opcode == AARCH64_OP(asm) &&
+         (inst->flags & AARCH64_INST_EXTENDED_ASM) != 0;
+}
+
+// The key of a callee-saved register named in an asm clobber list, or -1.
+static int CalleeSavedClobberKey(const char* name) {
+  if (name[0] == '\0') {
+    return -1;
+  }
+  char* end;
+  long num = strtol(name + 1, &end, 10);
+  if (end == name + 1 || *end != '\0') {
+    return -1;
+  }
+  switch (name[0]) {
+    case 'x':
+    case 'w':
+      return num >= AARCH64_INT_SAVED_START && num <= AARCH64_INT_SAVED_END
+                 ? (int)num
+                 : -1;
+    case 'v':
+    case 'q':
+    case 'd':
+    case 's':
+    case 'h':
+    case 'b':
+      return num >= AARCH64_FP_SAVED_START && num <= AARCH64_FP_SAVED_END
+                 ? kFloatKeyBase + (int)num
+                 : -1;
+    default:
+      return -1;
+  }
+}
+
+static int CalleeSavedClobbers(TargetInstruction* inst, int* keys,
+                               int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  Vector* clobbers = &((AARCH64AsmInstruction*)inst)->asm_node->clobbers;
+  int n = 0;
+  for (size_t i = 0; i < clobbers->length && n < max_keys; i++) {
+    int key = CalleeSavedClobberKey(((String*)clobbers->value.p[i])->value);
+    if (key >= 0) {
+      keys[n++] = key;
+    }
+  }
+  return n;
+}
+
+// Inline asm is lowered with its operands in fixed registers, and the
+// registers its text uses are unknown, so it clobbers what a call does and
+// whatever callee-saved registers it names.
 static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
-  if (!AARCH64IsCall(inst)) {
+  bool is_asm = (AARCH64Opcode)inst->opcode == AARCH64_OP(asm);
+  if (!AARCH64IsCall(inst) && !is_asm) {
     return 0;
   }
   int n = 0;
@@ -122,7 +178,7 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
        r++) {
     keys[n++] = kFloatKeyBase + r;
   }
-  return n;
+  return n + CalleeSavedClobbers(inst, keys + n, max_keys - n);
 }
 
 static bool ReadsThrough(TargetInstruction* operand) {
@@ -276,6 +332,28 @@ static int ArgumentKeys(int* keys, int max_keys) {
   return n;
 }
 
+// The registers codegen loaded an asm's inputs and read-write outputs into.
+// An immediate input has no register.
+static int AsmReadKeys(TargetInstruction* inst, int* keys, int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  AARCH64AsmInstruction* asm_inst = (AARCH64AsmInstruction*)inst;
+  Vector* outputs = &asm_inst->asm_node->outputs;
+  int n = 0;
+  for (int i = 0; i < asm_inst->num_operands && n < max_keys; i++) {
+    bool is_output = (size_t)i < outputs->length;
+    if (is_output && !((AsmOperand*)outputs->value.p[i])->is_readwrite) {
+      continue;
+    }
+    int num = asm_inst->reg_nums[i];
+    if (num != INT_MIN) {
+      keys[n++] = asm_inst->is_fp[i] ? kFloatKeyBase + num : num;
+    }
+  }
+  return n;
+}
+
 static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
                         int max_keys) {
   ColoringContext* c = ctx;
@@ -292,6 +370,8 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
         keys[n++] = kFloatKeyBase + AARCH64_FLOAT_RETURN_REG;
       }
       return n;
+    case AARCH64_OP(asm):
+      return AsmReadKeys(inst, keys, max_keys);
     default:
       return 0;
   }
@@ -486,8 +566,6 @@ static const char* Unsupported(AARCH64Generator* g) {
   FOR_EACH_INSTRUCTION(&g->base, inst) {
     AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
     switch (op) {
-      case AARCH64_OP(asm):
-      case AARCH64_OP(tlsgd):
       case AARCH64_OP(ldp):
       case AARCH64_OP(ldpsw):
       case AARCH64_OP(movk):
@@ -518,8 +596,8 @@ static const char* Unsupported(AARCH64Generator* g) {
 
 // An argument list keeps the argument registers live up to the call.  Where
 // it names the value moved into one rather than the register itself, it
-// names the register.  Records each change in |undo| for Restore.
-static void ReadArgumentRegisters(TargetGenerator* gen, Vector* undo) {
+// names the register.
+static void ReadArgumentRegisters(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((AARCH64Opcode)inst->opcode != AARCH64_OP(regarg)) {
       continue;
@@ -529,30 +607,22 @@ static void ReadArgumentRegisters(TargetGenerator* gen, Vector* undo) {
         LocationKey(arg->dest) < 0) {
       continue;
     }
-    VectorAppend(undo, inst);
-    VectorAppend(undo, arg);
     TargetReplaceOperand(inst, 1, arg->dest);
   }
 }
 
-static void Restore(Vector* undo) {
-  for (size_t i = 0; i + 1 < undo->length; i += 2) {
-    TargetInstruction* inst = undo->value.p[i];
-    TargetInstruction* was = undo->value.p[i + 1];
-    TargetReplaceOperand(inst, 1, was);
-  }
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
 }
 
-bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
+void AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
   AARCH64Generator* g = allocator->g;
   TargetGenerator* gen = &g->base;
   const char* reason = Unsupported(g);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   ColoringContext ctx = {.allocator = allocator};
@@ -615,22 +685,24 @@ bool AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
     floats->regs[floats->num_regs++] = kFloatKeyBase + r;
   }
 
-  Vector undo;
-  VectorInit(&undo);
-  ReadArgumentRegisters(gen, &undo);
+  ReadArgumentRegisters(gen);
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
-    Restore(&undo);
-    VectorDestruct(&undo);
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
-  VectorDestruct(&undo);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((AARCH64Opcode)inst->opcode == AARCH64_OP(spill)) {
       inst->reg = inst->operand[0]->reg;
     }
+    int keys[AARCH64_INT_SAVED_END - AARCH64_INT_SAVED_START + 1 +
+             AARCH64_FP_SAVED_END - AARCH64_FP_SAVED_START + 1];
+    int num_keys = CalleeSavedClobbers(inst, keys, sizeof(keys) / sizeof(keys[0]));
+    for (int k = 0; k < num_keys; k++) {
+      if (keys[k] >= kFloatKeyBase) {
+        BitSetInsert(&allocator->used_float_regs, (size_t)(keys[k] - kFloatKeyBase));
+      } else {
+        BitSetInsert(&allocator->used_int_regs, (size_t)keys[k]);
+      }
+    }
   }
-  allocator->current_spilled_region_size = ctx.spill_size;
   allocator->max_spilled_region_size = ctx.spill_size;
-  g->colored = true;
-  return true;
 }

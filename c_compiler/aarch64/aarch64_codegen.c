@@ -903,7 +903,6 @@ void AARCH64GeneratorInit(AARCH64Generator* g, Generator* gen) {
   g->num_fp_reg_vars = 0;
   g->struct_return_reg = -1;
   g->struct_return_spill_offset = 0;
-  g->colored = false;
   g->not_leaf = false;
   g->moves_sp = false;
   g->calls_move_sp = false;
@@ -6746,18 +6745,6 @@ static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
   return reg->base.num;
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it, it was spilled, or
-// splitting or shrink wrapping moved it over part of the function.
-static int DebugRegister(AARCH64Generator* g, RegisterVariable* var) {
-  TargetRegister* reg = var->inst->reg;
-  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
-      (var->split_location != NULL && var->split_location->reg != reg)) {
-    return -1;
-  }
-  return DwarfRegister(&g->base, reg);
-}
-
 // The frame base offset of spill slot |slot|, which the emitter addresses
 // 8 + |slot| bytes below the local variables.
 static int SpillSlotFrameOffset(AARCH64Generator* g, int slot) {
@@ -6792,22 +6779,9 @@ static void SetDebugRegisterLocations(AARCH64Generator* g) {
       }
       continue;
     }
-    // The coloring allocator reuses a variable's register where the variable
-    // is dead.
-    if (g->colored) {
-      colored[num_colored++] = (TargetDebugVariable){
-          symbol, {var->inst, var->split_location}, var->holds_address};
-      continue;
-    }
-    int reg = DebugRegister(g, var);
-    if (reg < 0) {
-      continue;
-    }
-    if (var->holds_address) {
-      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
-    } else {
-      VariableDIESetRegister(SymbolDIE(symbol), reg);
-    }
+    // The allocator reuses a variable's register where the variable is dead.
+    colored[num_colored++] = (TargetDebugVariable){
+        symbol, {var->inst, var->split_location}, var->holds_address};
   }
   if (num_colored != 0) {
     TargetSetDebugLocationLists(&g->base, AARCH64RAInfo(), colored,

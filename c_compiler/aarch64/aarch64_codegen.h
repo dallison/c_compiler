@@ -468,9 +468,6 @@ typedef struct AARCH64Generator {
   int num_fp_reg_vars;    // Number of floating point regs for vars.
   int struct_return_reg;
   int struct_return_spill_offset;
-  // Registers came from the coloring allocator, which gives the hidden result
-  // pointer no dedicated register.
-  bool colored;
   bool not_leaf;          // Not a leaf procedure.
   // sp may differ from the fixed frame bottom at a return (VLA, alloca or
   // inline asm), so the epilogue must rebuild it from x29.

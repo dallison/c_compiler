@@ -708,21 +708,8 @@ static void RestoreExceptionLandingState(AARCH64Emitter* emitter, FILE* fp) {
   // handler needs the values this function itself had at the call that threw,
   // and reloading the slots would overwrite exactly those.  The unwinder
   // reconstructs them from the CFI of the frames it pops, which is why the FDE
-  // has to describe where the prologue put them.  The hidden result pointer is
-  // this function's own, so that one is reloaded into its dedicated register.
-  // The coloring allocator keeps it live across the calls instead.
-  if (emitter->g->struct_return_reg >= 0 && !emitter->g->colored) {
-    char buf[8];
-    bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
-                   !emitter->g->not_leaf;
-    int reg_num = (is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
-                           : AARCH64_FIRST_INT_REG_VAR) +
-                  emitter->g->struct_return_reg;
-    fprintf(fp, "\tldr %s, [x29, #%d]\n",
-            AARCH64RegisterNameFromNum(reg_num, kAARCH64RegTypeInt,
-                                      kSize64Bit, buf, sizeof(buf)),
-            emitter->g->struct_return_spill_offset);
-  }
+  // has to describe where the prologue put them.  The allocator keeps the
+  // hidden result pointer live across the calls.
 }
 
 // In aarch64_codegen.c.
@@ -2365,15 +2352,6 @@ static void ProgramRestoreExceptionLandingState(AARCH64Emitter* emitter,
   int frame_adjustment =
       StackFrameSize(emitter) - VarargsSaveAreaSize(emitter);
   ProgramAddSubImmediate(module, 31, 29, true, false, frame_adjustment);
-  if (emitter->g->struct_return_reg >= 0 && !emitter->g->colored) {
-    bool is_leaf = emitter->g->base.num_calls == 0 && OptLevel1() &&
-                   !emitter->g->not_leaf;
-    int reg = (is_leaf ? AARCH64_FIRST_LEAF_INT_REG_VAR
-                       : AARCH64_FIRST_INT_REG_VAR) +
-              emitter->g->struct_return_reg;
-    ProgramLoadStore(module, true, false, 3, false, reg, 29,
-                     emitter->g->struct_return_spill_offset);
-  }
 }
 
 static void ProgramEmitAtomic(AARCH64Emitter* emitter, TargetInstruction* inst,
