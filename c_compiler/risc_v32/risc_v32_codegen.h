@@ -397,10 +397,6 @@ typedef struct RV32Generator {
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
   bool stages_tail_target;  // An indirect tail call stages its target in t2.
-  // Set before lowering when this function will try the coloring allocator.
-  bool try_coloring;
-  // Registers came from the coloring allocator.
-  bool colored;
   
   Vector saved_regs;
   

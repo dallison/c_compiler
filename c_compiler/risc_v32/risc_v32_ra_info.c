@@ -7,6 +7,7 @@
 //  target_reg_alloc.h.
 //
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "risc_v32_reg_alloc.h"
@@ -140,16 +141,76 @@ static bool IsSavedFloat(int r) {
          (r >= RV32_FP_SAVED_START_2 && r <= RV32_FP_SAVED_END_2);
 }
 
+static bool IsExtendedAsm(TargetInstruction* inst) {
+  return (RV32Opcode)inst->opcode == RV32_OP(asm) &&
+         (inst->flags & RV32_INST_EXTENDED_ASM) != 0;
+}
+
+// The key of a callee-saved register named in an asm clobber list, or -1.
+// s0 is the frame pointer, which an asm cannot be allowed to change.
+static int CalleeSavedClobberKey(const char* name) {
+  if (name[0] != 'x' && name[0] != 'f') {
+    return -1;
+  }
+  char* end;
+  long num = strtol(name + 1, &end, 10);
+  if (end == name + 1 || *end != '\0') {
+    return -1;
+  }
+  if (name[0] == 'x') {
+    return num < RV32_NUM_INT_REGS && IsSavedInt((int)num) ? (int)num : -1;
+  }
+  return num < RV32_NUM_FLOAT_REGS && IsSavedFloat((int)num)
+             ? kFloatKeyBase + (int)num
+             : -1;
+}
+
+static int CalleeSavedClobbers(TargetInstruction* inst, int* keys,
+                               int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  Vector* clobbers = &((RV32AsmInstruction*)inst)->asm_node->clobbers;
+  int n = 0;
+  for (size_t i = 0; i < clobbers->length && n < max_keys; i++) {
+    int key = CalleeSavedClobberKey(((String*)clobbers->value.p[i])->value);
+    if (key >= 0) {
+      keys[n++] = key;
+    }
+  }
+  return n;
+}
+
+// Whether an asm names ra as a clobber, so that the prologue must save it.
+static bool ClobbersReturnAddress(TargetInstruction* inst) {
+  if (!IsExtendedAsm(inst)) {
+    return false;
+  }
+  Vector* clobbers = &((RV32AsmInstruction*)inst)->asm_node->clobbers;
+  for (size_t i = 0; i < clobbers->length; i++) {
+    const char* name = ((String*)clobbers->value.p[i])->value;
+    if (strcmp(name, "ra") == 0 || strcmp(name, "x1") == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A call overwrites ra and the temporary and argument registers.  The
 // epilogue reloads ra and the callee-saved registers, so a value read after
 // it, such as the target of an indirect tail call, must be in neither.
+// Inline asm is lowered with its operands in fixed registers, and the
+// registers its text uses are unknown, so it clobbers what a call does and
+// whatever callee-saved registers it names.
 static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   int n = 0;
   bool restore = (RV32Opcode)inst->opcode == RV32_OP(restore);
-  if ((RV32IsCall(inst) || restore) && n < max_keys) {
+  bool is_call =
+      RV32IsCall(inst) || (RV32Opcode)inst->opcode == RV32_OP(asm);
+  if ((is_call || restore) && n < max_keys) {
     keys[n++] = RV32_RET_REG;
   }
-  if (RV32IsCall(inst)) {
+  if (is_call) {
     for (int r = 0; r < RV32_NUM_INT_REGS && n < max_keys; r++) {
       if ((r >= RV32_INT_TEMP_START_1 && r <= RV32_INT_TEMP_END_1) ||
           (r >= RV32_INT_ARG_START && r <= RV32_INT_ARG_END) ||
@@ -162,7 +223,7 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
         keys[n++] = kFloatKeyBase + r;
       }
     }
-    return n;
+    return n + CalleeSavedClobbers(inst, keys + n, max_keys - n);
   }
   if (restore) {
     for (int r = 0; r < RV32_NUM_INT_REGS && n < max_keys; r++) {
@@ -318,6 +379,28 @@ static int ArgumentKeys(int* keys, int max_keys) {
   return n;
 }
 
+// The registers codegen loaded an asm's inputs and read-write outputs into.
+// An immediate input has no register.
+static int AsmReadKeys(TargetInstruction* inst, int* keys, int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  RV32AsmInstruction* asm_inst = (RV32AsmInstruction*)inst;
+  Vector* outputs = &asm_inst->asm_node->outputs;
+  int n = 0;
+  for (int i = 0; i < asm_inst->num_operands && n < max_keys; i++) {
+    bool is_output = (size_t)i < outputs->length;
+    if (is_output && !((AsmOperand*)outputs->value.p[i])->is_readwrite) {
+      continue;
+    }
+    int num = asm_inst->reg_nums[i];
+    if (num != INT_MIN) {
+      keys[n++] = asm_inst->is_fp[i] ? kFloatKeyBase + num : num;
+    }
+  }
+  return n;
+}
+
 static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
                         int max_keys) {
   ColoringContext* c = ctx;
@@ -344,6 +427,8 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
         keys[n++] = kFloatKeyBase + RV32_FLOAT_RETURN_REG;
       }
       return n;
+    case RV32_OP(asm):
+      return AsmReadKeys(inst, keys, max_keys);
     default:
       return 0;
   }
@@ -478,48 +563,31 @@ static TargetInstruction* NextInBlock(TargetBasicBlock* block,
       for (TargetInstruction* inst = block_->code; inst != NULL;            \
            inst = NextInBlock(block_, inst))
 
+// Spills and reloads only come from allocation.
 static const char* Unsupported(RV32Generator* rv) {
   FOR_EACH_INSTRUCTION(&rv->base, inst) {
     RV32Opcode op = (RV32Opcode)inst->opcode;
-    switch (op) {
-      case RV32_OP(asm):
-      case RV32_OP(spill):
-      case RV32_OP(reload):
-        return RV32OpcodeName((int)op);
-      default:
-        break;
+    if (op == RV32_OP(spill) || op == RV32_OP(reload)) {
+      return RV32OpcodeName((int)op);
     }
   }
   return NULL;
 }
 
-// The allocator reads `mv loc, src` as `mv src -> loc`.  t2 only keeps a call
-// target away from the argument registers for the dominator walk, so a move
-// into it becomes a plain copy that the allocator places itself.  Records
-// each move and the location it wrote in |moves| for RestoreWrittenMoves.
-static void RewriteWrittenMoves(TargetGenerator* gen, Vector* moves) {
+// The allocator reads `mv loc, src` as `mv src -> loc`.  A move into t2, which
+// keeps a call target away from the argument registers, becomes a plain copy
+// that the allocator places itself.
+static void RewriteWrittenMoves(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if (WrittenOperand(inst) != 0) {
       continue;
     }
     TargetInstruction* location = inst->operand[0];
-    VectorAppend(moves, inst);
-    VectorAppend(moves, location);
     TargetReplaceOperand(inst, 0, inst->operand[1]);
     TargetReplaceOperand(inst, 1, NULL);
     if ((RV32Opcode)location->opcode != RV32_OP(t2)) {
       inst->dest = location;
     }
-  }
-}
-
-static void RestoreWrittenMoves(Vector* moves) {
-  for (size_t i = 0; i + 1 < moves->length; i += 2) {
-    TargetInstruction* inst = moves->value.p[i];
-    TargetInstruction* location = moves->value.p[i + 1];
-    TargetReplaceOperand(inst, 1, inst->operand[0]);
-    TargetReplaceOperand(inst, 0, location);
-    inst->dest = NULL;
   }
 }
 
@@ -532,16 +600,18 @@ static bool HasAtomics(TargetGenerator* gen) {
   return false;
 }
 
-bool RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator) {
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
+}
+
+void RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator) {
   RV32Generator* rv = allocator->rv;
   TargetGenerator* gen = &rv->base;
   const char* reason = Unsupported(rv);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   ColoringContext ctx = {.allocator = allocator};
@@ -618,25 +688,29 @@ bool RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator) {
     }
   }
 
-  Vector moves;
-  VectorInit(&moves);
-  RewriteWrittenMoves(gen, &moves);
+  RewriteWrittenMoves(gen);
   if (getenv("DAVECC_RA_CHECK") != NULL) {
     TargetRACheck(gen, &kInfo, NULL, stderr, 3);
   }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
-    RestoreWrittenMoves(&moves);
-    VectorDestruct(&moves);
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
-  VectorDestruct(&moves);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((RV32Opcode)inst->opcode == RV32_OP(spill)) {
       inst->reg = inst->operand[0]->reg;
     }
+    if (ClobbersReturnAddress(inst)) {
+      rv->not_leaf = true;
+    }
+    int keys[RV32_NUM_INT_REGS + RV32_NUM_FLOAT_REGS];
+    int num_keys = CalleeSavedClobbers(inst, keys, sizeof(keys) / sizeof(keys[0]));
+    for (int k = 0; k < num_keys; k++) {
+      if (keys[k] >= kFloatKeyBase) {
+        BitSetInsert(&allocator->used_float_regs, (size_t)(keys[k] - kFloatKeyBase));
+      } else {
+        BitSetInsert(&allocator->used_int_regs, (size_t)keys[k]);
+      }
+    }
   }
-  allocator->current_spilled_region_size = ctx.spill_size;
   allocator->max_spilled_region_size = ctx.spill_size;
-  rv->colored = true;
-  return true;
 }

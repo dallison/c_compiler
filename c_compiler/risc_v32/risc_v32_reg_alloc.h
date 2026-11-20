@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
-#include "map.h"
 #include "risc_v32_machine.h"
 #include "target_generator.h"
 #include "target_ra_ir.h"
@@ -40,7 +39,6 @@ typedef struct RV32Register {
 #define RV32_INT_RETURN_REG RV32_INT_ARG_START  // Integer return value register.
 #define RV32_FLOAT_RETURN_REG \
   RV32_FP_ARG_START  // Float/Double return value register.
-#define RV32_MAX_ALLOCATION_DEPTH 32
 
 typedef struct {
   struct RV32Generator* rv;
@@ -53,20 +51,7 @@ typedef struct {
   BitSet used_int_regs;
   BitSet used_float_regs;
   
-  int current_spilled_region_size;
   int max_spilled_region_size;
-  BitSet preserved_instructions;    // Instructions needing preserved regs.
-  // Reassignable values (variable registers and merge temporaries) need their
-  // spill slot refreshed after every target instruction that defines them.
-  Map reassignable_spills;
-  // Instructions whose own allocation is in progress.  Allocating one can spill
-  // another value, and once the reload pass for an in-flight instruction has
-  // run, a read of that value has to be repaired rather than retargeted:
-  // pointing the operand at the spill slot then leaves it naming a register the
-  // spill has given away.
-  TargetInstruction* allocating[RV32_MAX_ALLOCATION_DEPTH];
-  bool allocating_reloaded[RV32_MAX_ALLOCATION_DEPTH];
-  size_t allocating_depth;
 } RV32RegisterAllocator;
 
 void RV32RegisterAllocatorInit(RV32RegisterAllocator* alloc,
@@ -81,18 +66,13 @@ void RV32RegisterAllocatorDelete(RV32RegisterAllocator* alloc);
 void RV32AllocateRegisters(RV32RegisterAllocator* emitter);
 const char* RV32RegisterName(RV32Register* reg, char* buf, size_t len);
 
-// The register file the dominator walk gives |inst|'s result.
+// The register file of |inst|'s result.
 RV32RegisterType RV32ResultRegisterType(TargetInstruction* inst);
 
 // How the shared allocator code reads RISC-V32 instructions.
 const TargetRAInfo* RV32RAInfo(void);
 
-// Whether to try the coloring allocator on the function |rv| is starting.
-// Call once per function.
-bool RV32UseColoringAllocator(struct RV32Generator* rv);
-
-// Allocates the current function with the shared coloring allocator.  Returns
-// false, leaving the function untouched, if it cannot.
-bool RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator);
+// Allocates the current function with the shared coloring allocator.
+void RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator);
 
 #endif /* risc_v32_reg_alloc_h */

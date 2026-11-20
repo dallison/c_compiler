@@ -840,8 +840,6 @@ void RV32GeneratorInit(RV32Generator* rv, Generator* gen) {
   rv->tmp2 = NULL;
   rv->not_leaf = false;
   rv->stages_tail_target = false;
-  rv->try_coloring = false;
-  rv->colored = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
@@ -1448,25 +1446,13 @@ static RV32Opcode IR2RV(IROpcode op) {
 }
 
 static int MaxIntRegisterVariables(RV32Generator* rv) {
-  if (rv->try_coloring) {
-    return INT_MAX;
-  }
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
-  if (is_leaf) {
-    return RV32_LAST_LEAF_INT_REG_VAR - RV32_FIRST_LEAF_INT_REG_VAR + 1;
-  }
-  return RV32_LAST_INT_REG_VAR - RV32_FIRST_INT_REG_VAR + 1;
+  (void)rv;
+  return INT_MAX;
 }
 
 static int MaxFpRegisterVariables(RV32Generator* rv) {
-  if (rv->try_coloring) {
-    return INT_MAX;
-  }
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
-  if (is_leaf) {
-    return RV32_LAST_LEAF_FP_REG_VAR - RV32_FIRST_LEAF_FP_REG_VAR + 1;
-  }
-  return RV32_LAST_FP_REG_VAR - RV32_FIRST_FP_REG_VAR + 1;
+  (void)rv;
+  return INT_MAX;
 }
 
 static bool UseRegisterForVariable(RV32Generator* rv, IRNode* var_node) {
@@ -5676,10 +5662,6 @@ static void AlignOffset(PoolEntry* entry, int* offset) {
   *offset = (*offset + (alignment - 1)) & ~(alignment - 1);
 }
 
-static void SetDebugRegisterLocation(PoolEntry* entry, int reg) {
-  VariableDIESetRegister(SymbolDIE(entry->value.symbol), reg);
-}
-
 static void SetDebugStackLocation(PoolEntry* entry, int offset) {
   VariableDIESetStackOffset(SymbolDIE(entry->value.symbol), offset);
 }
@@ -5839,7 +5821,6 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_fp_reg_vars++;
       entry->pooled->data.ivalue = RV32_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         ArgLocation location = ArgumentLocation(entry, args);
         LoadFpArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
@@ -5958,7 +5939,6 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
             location.type == kArgLocationRegister) {
           int reg = rv->num_int_reg_vars++;
           entry->pooled->data.ivalue = RV32_REG_VAR | reg;
-          SetDebugRegisterLocation(entry, reg);
           SetHoldsAddress(rv, LoadIntArgumentIntoRegisterVariable(
                                   rv, reg, location, entry->pooled));
         } else if (location.type == kArgLocationPushed ||
@@ -5978,7 +5958,6 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
         TargetInstruction* var = IntVariableRegister(rv, rv->struct_return_reg, entry->value.symbol);
         Emit(rv, NewInstruction2(RV32_OP(mv), var,
                     IntArgumentRegister(rv, 0)));
-        SetDebugRegisterLocation(entry, rv->struct_return_reg);
         SetHoldsAddress(rv, var);
       } else {
         AlignOffset(entry, var_offset);
@@ -6006,7 +5985,6 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
     if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = RV32_REG_VAR | reg;
-      SetDebugRegisterLocation(entry, reg);
       if (is_arg) {
         // Argument, load it into a register.
         ArgLocation location = ArgumentLocation(entry, args);
@@ -6170,10 +6148,9 @@ static int SpillSlotFrameOffset(RV32Generator* rv, int slot) {
 }
 
 // Points each register variable's debug information at the registers or spill
-// slot the coloring allocator chose for it.  The dominator walk's locations
-// were recorded while lowering.
+// slot allocation chose for it.
 static void SetDebugRegisterLocations(RV32Generator* rv) {
-  if (!compiler->debug_output || !rv->colored) {
+  if (!compiler->debug_output) {
     return;
   }
   TargetDebugVariable* colored =
@@ -6206,20 +6183,8 @@ static void SetDebugRegisterLocations(RV32Generator* rv) {
   free(colored);
 }
 
-// The coloring allocator leaves inline assembly to the dominator walk.
-static bool ColoringHandlesFunction(Generator* gen) {
-  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
-       node = IRNext(node)) {
-    if (node->opcode == IR_OP(asm)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 void RV32Lower(RV32Generator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
-  rv->try_coloring = RV32UseColoringAllocator(rv) && ColoringHandlesFunction(gen);
   
   // If the function returns in memory, allocate the struct result
   // register now.

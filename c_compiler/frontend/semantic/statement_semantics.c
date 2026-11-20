@@ -1789,7 +1789,8 @@ static bool IsSupportedAsmClobber(const char* name) {
     return IsNumericRegisterClobber(name, "r", 15) || strcmp(name, "lr") == 0 ||
            strcmp(name, "sp") == 0 || strcmp(name, "pc") == 0;
   }
-  if (StringEqual(compiler->target_name, "riscv")) {
+  if (StringEqual(compiler->target_name, "riscv") ||
+      StringEqual(compiler->target_name, "riscv32")) {
     return IsNumericRegisterClobber(name, "x", 31) ||
            IsNumericRegisterClobber(name, "f", 31) ||
            strcmp(name, "ra") == 0 || strcmp(name, "sp") == 0 ||
