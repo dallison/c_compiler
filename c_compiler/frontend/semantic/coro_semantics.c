@@ -1680,25 +1680,26 @@ static ASTNode* LowerReadyCoAwaitExpression(UnaryASTNode* co_await) {
 
 /* AST visitor that replaces every always-ready co_await with its await_resume
  * call in place. */
-static void LowerReadyCoAwaitNode(ASTNode* node, void* data, int child_id,
+static bool LowerReadyCoAwaitNode(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL ||
       node->op != AST_OP(co_await) || !CoAwaitIsAlwaysReady(node)) {
-    return;
+    return true;
   }
   ASTNodeReplaceInParent(node, LowerReadyCoAwaitExpression((UnaryASTNode*)node),
                          true);
+  return true;
 }
 
 /* AST visitor that records coroutine-defining keywords (co_return/co_await/
  * co_yield) and counts the suspension points into the CoroutineScan in `data`. */
-static void ScanCoroutineNode(ASTNode* node, void* data, int child_id,
+static bool ScanCoroutineNode(ASTNode* node, void* data, int child_id,
                               VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   CoroutineScan* scan = data;
   switch (node->op) {
@@ -1706,21 +1707,22 @@ static void ScanCoroutineNode(ASTNode* node, void* data, int child_id,
       scan->is_coroutine = true;
       scan->has_co_return = true;
       scan->has_co_return_value = ((CombinedStatementASTNode*)node)->cond != NULL;
-      return;
+      return true;
     case AST_OP(co_await):
       scan->is_coroutine = true;
       if (!CoAwaitIsAlwaysReady(node)) {
         scan->suspend_count++;
       }
-      return;
+      return true;
     case AST_OP(co_yield):
       scan->is_coroutine = true;
       scan->has_co_yield = true;
       scan->suspend_count++;
-      return;
+      return true;
     default:
-      return;
+      return true;
   }
+  return true;
 }
 
 /* Resolve the promise type as the nested `return_type::promise_type` typedef, if
@@ -2391,16 +2393,16 @@ typedef struct {
 
 /* Visitor that records nested suspending co_await expressions (skipping the
  * search root and always-ready awaits). */
-static void FindNestedSuspendingCoAwait(ASTNode* node, void* data,
+static bool FindNestedSuspendingCoAwait(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(co_await)) {
-    return;
+    return true;
   }
   SuspendedCoroutineExpressionSearch* search = data;
   if (node == search->root || CoAwaitIsAlwaysReady(node)) {
-    return;
+    return true;
   }
   search->count++;
   if (search->found == NULL) {
@@ -2409,19 +2411,20 @@ static void FindNestedSuspendingCoAwait(ASTNode* node, void* data,
   if (TypeIsVoid(node->type)) {
     search->void_result = true;
   }
+  return true;
 }
 
 /* Visitor that records nested co_yield expressions (skipping the search root). */
-static void FindNestedSuspendingCoYield(ASTNode* node, void* data,
+static bool FindNestedSuspendingCoYield(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(co_yield)) {
-    return;
+    return true;
   }
   SuspendedCoroutineExpressionSearch* search = data;
   if (node == search->root) {
-    return;
+    return true;
   }
   search->count++;
   if (search->found == NULL) {
@@ -2430,6 +2433,7 @@ static void FindNestedSuspendingCoYield(ASTNode* node, void* data,
   if (TypeIsVoid(node->type)) {
     search->void_result = true;
   }
+  return true;
 }
 
 /* State for checking whether a suspension sits under an operator with
@@ -3954,13 +3958,14 @@ static ASTNode* EnclosingCoroutineLoopOrSwitch(ASTNode* node,
   return NULL;
 }
 
-static void CollectCoroutineBreakContinue(ASTNode* node, void* data,
+static bool CollectCoroutineBreakContinue(ASTNode* node, void* data,
                                           int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL &&
       (node->op == AST_OP(break) || node->op == AST_OP(continue))) {
     VectorAppend((Vector*)data, node);
   }
+  return true;
 }
 
 /* Coroutines bypass the ordinary scope-exit insertion pass because persisted
@@ -4446,12 +4451,12 @@ typedef struct {
 /* Visitor that retargets identifier nodes referring to `old_symbol` to
  * `new_symbol` (e.g. remapping the original function parameter to the resume
  * function's frame parameter). */
-static void ReplaceIdentifierSymbol(ASTNode* node, void* data, int child_id,
+static bool ReplaceIdentifierSymbol(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   SymbolReplacement* replacement = data;
   IdentifierASTNode* identifier = (IdentifierASTNode*)node;
@@ -4459,6 +4464,7 @@ static void ReplaceIdentifierSymbol(ASTNode* node, void* data, int child_id,
     identifier->symbol = replacement->new_symbol;
     ASTNodeSetType(node, TypeRecordCopy(replacement->new_symbol->type));
   }
+  return true;
 }
 
 /* True if `node` is exactly `frame->member` for the given frame slot. */
@@ -4585,25 +4591,25 @@ static bool IsInsideCoroutineFrameStore(ASTNode* node) {
 /* Visitor that rewrites references to frame-owned locals into `frame->slot`
  * accesses, skipping the declaration itself, self-copy assignment RHSs, and
  * in-place construction arguments to avoid clobbering construction semantics. */
-static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
+static bool ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier) || node->parent == NULL ||
       (node->flags & kASTIsDeclaration)) {
-    return;
+    return true;
   }
   CoroutineFrame* frame = data;
   IdentifierASTNode* identifier = (IdentifierASTNode*)node;
   if (IsInsideDeclarationOfSymbol(node, identifier->symbol) ||
       IsInsideCoroutineFrameStore(node)) {
-    return;
+    return true;
   }
   StructMember* member =
       CoroutineFrameMemberForSymbol(frame, identifier->symbol);
   if (member == NULL || IsFrameCopyAssignmentRhs(node, member) ||
       IsFrameConstructionActual(node, member)) {
-    return;
+    return true;
   }
   ASTNode* access = NewFrameMemberAccess(frame, member, node->location);
   if (TypeIsReference(identifier->symbol->type)) {
@@ -4612,6 +4618,7 @@ static void ReplaceFrameOwnedIdentifier(ASTNode* node, void* data,
         node->location, access);
   }
   ASTNodeReplaceInParent(node, access, true);
+  return true;
 }
 
 /* Rewrite all references to frame-owned locals within `node` into frame
@@ -5381,17 +5388,17 @@ static bool SuspensionPointIsStatementCoYield(SuspensionPoint* point) {
 /* Visitor that records every statement-level suspension point in the (already
  * normalized) body: co_return operands, expression-statement co_await/co_yield,
  * assignment RHSs, and declaration initializers. */
-static void CollectSuspensionPointNode(ASTNode* node, void* data,
+static bool CollectSuspensionPointNode(ASTNode* node, void* data,
                                        int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   SuspensionPoints* points = data;
   if (node->op == AST_OP(co_return)) {
     AddCoAwaitSuspensionPoint(points, node,
                               ((CombinedStatementASTNode*)node)->cond);
-    return;
+    return true;
   }
   if (node->op == AST_OP(expr)) {
     ASTNode* expr = ((ExpressionStatementASTNode*)node)->expr;
@@ -5401,7 +5408,7 @@ static void CollectSuspensionPointNode(ASTNode* node, void* data,
       AddCoYieldSuspensionPoint(points, node, ((BinaryASTNode*)expr)->right);
       AddCoAwaitSuspensionPoint(points, node, ((BinaryASTNode*)expr)->right);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(decl_list)) {
     CompoundStatementASTNode* compound = NULL;
@@ -5413,6 +5420,7 @@ static void CollectSuspensionPointNode(ASTNode* node, void* data,
           points, (DeclarationListASTNode*)node, compound, statement_index);
     }
   }
+  return true;
 }
 
 /* Collect all suspension points in a coroutine body into `points`. */
@@ -5429,18 +5437,19 @@ typedef struct {
 
 /* Visitor that flags `found` when a non-declaration reference to the target
  * symbol is seen. */
-static void FindSymbolUse(ASTNode* node, void* data, int child_id,
+static bool FindSymbolUse(ASTNode* node, void* data, int child_id,
                           VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !((SymbolUseSearch*)data)->found;
   }
   SymbolUseSearch* search = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if ((node->flags & kASTIsDeclaration) == 0 && id->symbol == search->symbol) {
     search->found = true;
   }
+  return !((SymbolUseSearch*)data)->found;
 }
 
 /* True if `node` references `symbol` anywhere (outside its own declaration). */
@@ -5866,23 +5875,23 @@ static bool CoroutineRangeForContainsSuspension(
   return false;
 }
 
-static void AnalyzeCoroutineRangeForDeclarations(
+static bool AnalyzeCoroutineRangeForDeclarations(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(compound) ||
       (node->flags & kASTRangeForInitializer) == 0) {
-    return;
+    return true;
   }
   CompoundStatementASTNode* range = (CompoundStatementASTNode*)node;
   if (range->statements == NULL || range->statements->length < 2) {
-    return;
+    return true;
   }
   AnalyzeStatement(range->statements->value.p[0]);
   ASTNode* iteration = range->statements->value.p[1];
   if (iteration == NULL || iteration->op != AST_OP(compound)) {
-    return;
+    return true;
   }
   CompoundStatementASTNode* declarations =
       (CompoundStatementASTNode*)iteration;
@@ -5893,21 +5902,22 @@ static void AnalyzeCoroutineRangeForDeclarations(
     }
     AnalyzeStatement(statement);
   }
+  return true;
 }
 
-static void CollectPersistedCoroutineRangeForTemporaries(
+static bool CollectPersistedCoroutineRangeForTemporaries(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(compound) ||
       (node->flags & kASTRangeForInitializer) == 0) {
-    return;
+    return true;
   }
   PersistedRangeForTemporaryCollection* collection = data;
   CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
   if (!CoroutineRangeForContainsSuspension(compound, collection->points) ||
       compound->statements == NULL || compound->statements->length == 0) {
-    return;
+    return true;
   }
   Vector temporaries;
   VectorInit(&temporaries);
@@ -5925,6 +5935,7 @@ static void CollectPersistedCoroutineRangeForTemporaries(
                                false, false, compound);
   }
   VectorDestruct(&temporaries);
+  return true;
 }
 
 /* Build the full set of locals and catch-parameters that live across any
@@ -6210,18 +6221,19 @@ static bool PersistedCoroutineForInitializerNeedsHoist(
   return false;
 }
 
-static void CollectPersistedCoroutineForInitializers(
+static bool CollectPersistedCoroutineForInitializers(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(for)) {
-    return;
+    return true;
   }
   PersistedForInitializerHoist* hoist = data;
   if (PersistedCoroutineForInitializerNeedsHoist(
           (ForStatementASTNode*)node, hoist->persisted_locals)) {
     VectorAppend(&hoist->loops, node);
   }
+  return true;
 }
 
 /* A class object declared in a for-init statement has the lifetime of the

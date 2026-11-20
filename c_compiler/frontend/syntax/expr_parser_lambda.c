@@ -93,9 +93,9 @@ static TypeRecord* ParseLambdaSpecifiersAndReturnType(Syntax* syntax, TypeRecord
 static Struct* EnclosingClassForLambda(Syntax* syntax);
 static Symbol* NewLambdaClosureTag(Syntax* syntax, SourceLocation location, TypeRecord** closure_type);
 static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type, TypeRecord* return_type, bool is_mutable, Vector* explicit_template_params, SourceLocation location, bool* out_is_static);
-static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool CollectLambdaBodyLocalSymbols(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool LambdaBodyDeclaresSymbol(Vector* body_locals, Symbol* symbol);
-static void CollectDefaultLambdaCaptures(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool CollectDefaultLambdaCaptures(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static TypeRecord* LambdaCaptureFieldType(LambdaCapture* capture);
 static void AddLambdaCaptureFields(TypeRecord* closure_type, Vector* captures, SourceLocation location);
 static ASTNode* NewLambdaCaptureInitializer(LambdaCapture* capture, SourceLocation location);
@@ -103,7 +103,7 @@ static ASTNode* NewLambdaCaptureAccess(Symbol* this_symbol, LambdaCapture* captu
 static void AddLambdaInitCaptureScopeSymbols(Syntax* syntax, Vector* captures);
 static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
                                          ASTNode* replacement, bool delete_old);
-static void RewriteLambdaCaptureUses(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool RewriteLambdaCaptureUses(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static ASTNode* ParseLambdaBody(Syntax* syntax, Symbol* call_operator, Vector* captures, TokenClass followers);
 static void RefreshGenericLambdaTemplatePatternBodyAfterCaptureSetup( TypeRecord* func);
 static ASTNode* NewLambdaClosureInitializer(TypeRecord* closure_type, Vector* captures, SourceLocation location);
@@ -928,11 +928,11 @@ static Symbol* NewLambdaCallOperator(Syntax* syntax, TypeRecord* closure_type,
 // does not treat them as enclosing-scope captures (e.g. `[&]{ auto inner =
 // []{}; return inner(); }` must not capture `inner`, and a catch parameter
 // must not be treated as a by-reference capture of a non-existent local).
-static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
+static bool CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
                                           int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   Vector* locals = (Vector*)data;
   if (node->op == AST_OP(vardecl)) {
@@ -940,14 +940,14 @@ static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
     if (decl->symbol != NULL) {
       VectorAppend(locals, decl->symbol);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(catch)) {
     CatchASTNode* clause = (CatchASTNode*)node;
     if (clause->symbol != NULL) {
       VectorAppend(locals, clause->symbol);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(structured_binding)) {
     StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
@@ -963,6 +963,7 @@ static void CollectLambdaBodyLocalSymbols(ASTNode* node, void* data,
       VectorAppend(locals, binding->condition_symbol);
     }
   }
+  return true;
 }
 
 
@@ -983,30 +984,30 @@ static bool LambdaBodyDeclaresSymbol(Vector* body_locals, Symbol* symbol) {
 
 // Visitor: for a `[=]`/`[&]` lambda, append a capture for each enclosing-scope
 // identifier referenced in the body that is not already captured.
-static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
+static bool CollectDefaultLambdaCaptures(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   // Nested lambda-expressions are compound literals whose capture initializers
   // may still name enclosing locals (e.g. `[&]{ auto i = [&]{ return x; }; }`).
   // Walk those initializers so this lambda captures `x`; do not treat the
   // nested closure's own body locals as capturable (handled via body_locals).
   if (node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   LambdaCaptureScan* scan = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol != NULL &&
       (SymbolExtraOf(id->symbol)->variable_template != NULL ||
        id->symbol->flags.is_template || id->symbol->flags.is_concept)) {
-    return;
+    return true;
   }
   if (!CanCaptureSymbol(id->symbol, scan->lambda_func) ||
       LambdaBodyDeclaresSymbol(scan->body_locals, id->symbol) ||
       FindLambdaCapture(scan->captures, id->symbol) != NULL) {
-    return;
+    return true;
   }
   bool by_reference =
       scan->capture_default == kLambdaCaptureDefaultReference;
@@ -1022,6 +1023,7 @@ static void CollectDefaultLambdaCaptures(ASTNode* node, void* data,
                                                 is_pack,
                                                 /*initializer=*/NULL,
                                                 /*is_init_capture=*/false));
+  return true;
 }
 
 
@@ -1243,21 +1245,21 @@ static void ReplaceChildForLambdaCapture(ASTNode* parent, int child_id,
 // Visitor: rewrite each identifier in the body that names a captured entity
 // into the corresponding `this->field` access, so the body reads captures from
 // the closure object rather than the (now out-of-scope) enclosing variables.
-static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
+static bool RewriteLambdaCaptureUses(ASTNode* node, void* data,
                                      int child_id, VisitorMode mode) {
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   if (node->parent != NULL && node->parent->op == AST_OP(reflect) &&
       ((ReflectionASTNode*)node->parent)->operand == node) {
-    return;
+    return true;
   }
   LambdaRewrite* rewrite = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   LambdaCapture* capture = FindLambdaCapture(rewrite->captures, id->symbol);
   if (capture == NULL || capture->field == NULL) {
-    return;
+    return true;
   }
   ASTNode* replacement =
       NewLambdaCaptureAccess(rewrite->this_symbol, capture, node->location);
@@ -1289,6 +1291,7 @@ static void RewriteLambdaCaptureUses(ASTNode* node, void* data,
                                    /*delete_old=*/false);
     }
   }
+  return true;
 }
 
 

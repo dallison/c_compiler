@@ -13,7 +13,7 @@ typedef struct {
   int loop_count;
 } VarAnalyzer;
 
-static void AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+static bool AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   VarAnalyzer* a = data;
   switch (node->op) {
     case AST_OP(identifier): {
@@ -51,6 +51,7 @@ static void AnalyzeVars(ASTNode* node, void* data, int child_id, VisitorMode mod
     default:
       break;
   }
+  return true;
 }
 
 void AnalyzeVariables(ASTNode* node) {

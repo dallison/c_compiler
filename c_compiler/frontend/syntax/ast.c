@@ -814,16 +814,16 @@ static void ASTTreePrintNodeDescription(ASTNode* node, FILE* fp) {
   fputc('\n', fp);
 }
 
-static void ASTTreePrintVisitor(ASTNode* node, void* data, int child_id,
+static bool ASTTreePrintVisitor(ASTNode* node, void* data, int child_id,
                                 VisitorMode mode) {
   (void)child_id;
   if (node == NULL) {
-    return;
+    return true;
   }
   ASTTreePrintContext* context = data;
   if (mode == kVisitPostChildren) {
     context->depth--;
-    return;
+    return true;
   }
   Indent(context->indents, context->fp);
   for (int i = 1; i < context->depth; i++) {
@@ -836,6 +836,7 @@ static void ASTTreePrintVisitor(ASTNode* node, void* data, int child_id,
   if (node->virtuals->visitor != NULL) {
     context->depth++;
   }
+  return true;
 }
 
 void ASTNodePrintTree(ASTNode* node, int indents, FILE* fp) {
@@ -890,51 +891,38 @@ ASTNode* ASTNodeClone(const ASTNode* node,
   return clone;
 }
 
-static bool* ast_visit_early_stop;
-
-void ASTNodeVisit(ASTNode* node,
-                  void (*func)(ASTNode* node, void*, int, VisitorMode),
-                  int child_id,
+bool ASTNodeVisit(ASTNode* node, ASTNodeVisitFunc func, int child_id,
                   void* data) {
-  if (node == NULL ||
-      (ast_visit_early_stop != NULL && *ast_visit_early_stop)) {
-    return;
+  if (node == NULL) {
+    return true;
   }
   if (node->virtuals->visitor == NULL) {
     // Base class only.
-    func(node, data, child_id, kVisitPreChildren);
-    return;
+    return func(node, data, child_id, kVisitPreChildren);
   }
-  node->virtuals->visitor(node, func, child_id, data);
+  return node->virtuals->visitor(node, func, child_id, data);
 }
 
 typedef struct {
   ASTNodeUpwardVisitor predicate;
   void* data;
-  bool* found;
 } ASTNodeAnyContext;
 
-static void ASTNodeAnyVisitor(ASTNode* node, void* data, int child_id,
+static bool ASTNodeAnyVisitor(ASTNode* node, void* data, int child_id,
                               VisitorMode mode) {
   (void)child_id;
   ASTNodeAnyContext* context = data;
-  if (mode == kVisitPreChildren && !*context->found &&
-      context->predicate(node, context->data)) {
-    *context->found = true;
-  }
+  // predicate returns true on a match.  Stop the walk then.
+  return !(mode == kVisitPreChildren &&
+           context->predicate(node, context->data));
 }
 
 bool ASTNodeAny(ASTNode* node, ASTNodeUpwardVisitor predicate, void* data) {
   if (node == NULL || predicate == NULL) {
     return false;
   }
-  bool found = false;
-  bool* saved_stop = ast_visit_early_stop;
-  ast_visit_early_stop = &found;
-  ASTNodeAnyContext context = {predicate, data, &found};
-  ASTNodeVisit(node, ASTNodeAnyVisitor, 0, &context);
-  ast_visit_early_stop = saved_stop;
-  return found;
+  ASTNodeAnyContext context = {predicate, data};
+  return !ASTNodeVisit(node, ASTNodeAnyVisitor, 0, &context);
 }
 
 void ASTNodeVisitUpwards(ASTNode* node, ASTNodeUpwardVisitor func,
@@ -1533,14 +1521,18 @@ static ASTNode* UnaryASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void UnaryASTNodeVisit(ASTNode* node,
-                              void (*func)(ASTNode* node, void*, int, VisitorMode),
+static bool UnaryASTNodeVisit(ASTNode* node,
+                              ASTNodeVisitFunc func,
                               int child_id,
                               void* data) {
   UnaryASTNode* n = (UnaryASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->sub, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->sub, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void UnaryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -1619,15 +1611,21 @@ static ASTNode* BinaryASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void BinaryASTNodeVisit(ASTNode* node,
-                               void (*func)(ASTNode* node, void*, int, VisitorMode),
+static bool BinaryASTNodeVisit(ASTNode* node,
+                               ASTNodeVisitFunc func,
                                int child_id,
                                void* data) {
   BinaryASTNode* n = (BinaryASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->left, func, 0, data);
-  ASTNodeVisit(n->right, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->left, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->right, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void BinaryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -1723,12 +1721,12 @@ static bool InlineCallNodeBelongsTo(ASTNode* node,
   return false;
 }
 
-static void FindInlineCallGotoLabel(ASTNode* node, void* data, int child_id,
+static bool FindInlineCallGotoLabel(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(label)) {
-    return;
+    return true;
   }
   InlineCallGotoReconnect* reconnect = data;
   LabelASTNode* label = (LabelASTNode*)node;
@@ -1736,18 +1734,19 @@ static void FindInlineCallGotoLabel(ASTNode* node, void* data, int child_id,
       StringEqualString(reconnect->jump->label_name, &label->name)) {
     reconnect->jump->label = node;
   }
+  return true;
 }
 
-static void ReconnectInlineCallGoto(ASTNode* node, void* data, int child_id,
+static bool ReconnectInlineCallGoto(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(goto)) {
-    return;
+    return true;
   }
   InlineCallASTNode* owner = data;
   if (!InlineCallNodeBelongsTo(node, owner)) {
-    return;
+    return true;
   }
   GotoStatementASTNode* jump = (GotoStatementASTNode*)node;
   jump->label = NULL;
@@ -1757,6 +1756,7 @@ static void ReconnectInlineCallGoto(ASTNode* node, void* data, int child_id,
       .jump = jump,
   };
   ASTNodeVisit(owner->inlined, FindInlineCallGotoLabel, 0, &reconnect);
+  return true;
 }
 
 static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
@@ -1772,16 +1772,21 @@ static ASTNode* InlineCallASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void InlineCallASTNodeVisit(ASTNode* node,
-                                   void (*func)(ASTNode* node, void*,
-                                                int, VisitorMode),
+static bool InlineCallASTNodeVisit(ASTNode* node,
+                                   ASTNodeVisitFunc func,
                                    int child_id,
                                    void* data) {
   InlineCallASTNode* n = (InlineCallASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->inlined, func, 0, data);
-  ASTNodeVisit(n->ret_value, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->inlined, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->ret_value, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void InlineCallASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -1879,17 +1884,23 @@ static ASTNode* VectorASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void VectorASTNodeVisit(ASTNode* node,
-                               void (*func)(ASTNode* node, void*,int,  VisitorMode),
+static bool VectorASTNodeVisit(ASTNode* node,
+                               ASTNodeVisitFunc func,
                                int child_id,
                                void* data) {
   VectorASTNode* n = (VectorASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->left, func, 0, data);
-  for (size_t i = 0; i < n->children->length; i++) {
-    ASTNodeVisit(n->children->value.p[i], func, (int)i+1, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  if (!ASTNodeVisit(n->left, func, 0, data)) {
+    return false;
+  }
+  for (size_t i = 0; i < n->children->length; i++) {
+    if (!ASTNodeVisit(n->children->value.p[i], func, (int)i+1, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void VectorASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -2022,14 +2033,17 @@ static ASTNode* CastASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void CastASTNodeVisit(ASTNode* node,
-                             void (*func)(ASTNode* node, void*, int,
-                                          VisitorMode),
+static bool CastASTNodeVisit(ASTNode* node,
+                             ASTNodeVisitFunc func,
                              int child_id, void* data) {
   CastASTNode* n = (CastASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static bool CastASTNodeUsesValue(ASTNode* node, ASTNode* value) {
@@ -2113,14 +2127,17 @@ static ASTNode* PtrScaleASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void PtrScaleASTNodeVisit(ASTNode* node,
-                                 void (*func)(ASTNode*, void*, int,
-                                              VisitorMode),
+static bool PtrScaleASTNodeVisit(ASTNode* node,
+                                 ASTNodeVisitFunc func,
                                  int child_id, void* data) {
   PtrScaleASTNode* n = (PtrScaleASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static bool PtrScaleASTNodeUsesValue(ASTNode* node, ASTNode* value) {
@@ -2202,14 +2219,17 @@ static ASTNode* SizeofASTNodeClone(const ASTNode* node,
   return func(&to->base.base, data);
 }
 
-static void SizeofASTNodeVisit(ASTNode* node,
-                               void (*func)(ASTNode* node, void*, int,
-                                            VisitorMode),
+static bool SizeofASTNodeVisit(ASTNode* node,
+                               ASTNodeVisitFunc func,
                                int child_id, void* data) {
   SizeofASTNode* n = (SizeofASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void SizeofASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -2336,16 +2356,19 @@ static ASTNode* TypeidASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void TypeidASTNodeVisit(ASTNode* node,
-                               void (*func)(ASTNode* node, void*, int,
-                                            VisitorMode),
+static bool TypeidASTNodeVisit(ASTNode* node,
+                               ASTNodeVisitFunc func,
                                int child_id, void* data) {
   TypeidASTNode* n = (TypeidASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  if (n->expr != NULL) {
-    ASTNodeVisit(n->expr, func, 0, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  if (n->expr != NULL) {
+    if (!ASTNodeVisit(n->expr, func, 0, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void TypeidASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -2468,13 +2491,17 @@ static ASTNode* ReflectionASTNodeClone(
   return func((ASTNode*)to, data);
 }
 
-static void ReflectionASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+static bool ReflectionASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
     int child_id, void* data) {
   ReflectionASTNode* reflection = (ReflectionASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(reflection->operand, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(reflection->operand, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ReflectionASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -2562,13 +2589,17 @@ static ASTNode* SpliceASTNodeClone(
   return func((ASTNode*)to, data);
 }
 
-static void SpliceASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+static bool SpliceASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
     int child_id, void* data) {
   SpliceASTNode* splice = (SpliceASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(splice->reflection, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(splice->reflection, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void SpliceASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -2621,13 +2652,19 @@ static ASTNode* SpliceQualifiedASTNodeClone(const ASTNode* node,
   to->suffix = ASTNodeClone(from->suffix, func, data, (ASTNode*)to);
   return func((ASTNode*)to, data);
 }
-static void SpliceQualifiedASTNodeVisit(ASTNode* node,
-    void (*func)(ASTNode*, void*, int, VisitorMode), int child_id, void* data) {
+static bool SpliceQualifiedASTNodeVisit(ASTNode* node,
+    ASTNodeVisitFunc func, int child_id, void* data) {
   SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(splice->reflection, func, 0, data);
-  ASTNodeVisit(splice->suffix, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(splice->reflection, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(splice->suffix, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 static void SpliceQualifiedASTNodeTransform(ASTNode* node, ASTNodeTransformer func, void* data) {
   SpliceQualifiedASTNode* splice = (SpliceQualifiedASTNode*)node;
@@ -2671,12 +2708,16 @@ static ASTNode* ConstevalBlockASTNodeClone(const ASTNode* node,
   to->had_parse_errors = from->had_parse_errors;
   return func((ASTNode*)to, data);
 }
-static void ConstevalBlockASTNodeVisit(ASTNode* node,
-    void (*func)(ASTNode*, void*, int, VisitorMode), int child_id, void* data) {
+static bool ConstevalBlockASTNodeVisit(ASTNode* node,
+    ASTNodeVisitFunc func, int child_id, void* data) {
   ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(block->body, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(block->body, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 static void ConstevalBlockASTNodeTransform(ASTNode* node, ASTNodeTransformer func, void* data) {
   ConstevalBlockASTNode* block = (ConstevalBlockASTNode*)node;
@@ -2808,14 +2849,18 @@ static ASTNode* ExpressionStatementASTNodeClone(
   return func(&to->base, data);
 }
 
-static void ExpressionStatementASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+static bool ExpressionStatementASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
                                             int child_id,
                                             void* data) {
   ExpressionStatementASTNode* n = (ExpressionStatementASTNode*)node;
-  func(node, data, child_id,  kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id,  kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ExpressionStatementASTNodeTransform(ASTNode* node,
@@ -2890,14 +2935,20 @@ static ASTNode* StaticAssertASTNodeClone(
   return func(&to->base, data);
 }
 
-static void StaticAssertASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+static bool StaticAssertASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
     int child_id, void* data) {
   StaticAssertASTNode* assert_node = (StaticAssertASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(assert_node->expr, func, 0, data);
-  ASTNodeVisit(assert_node->message_expr, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(assert_node->expr, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(assert_node->message_expr, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void StaticAssertASTNodeTransform(ASTNode* node,
@@ -2968,13 +3019,17 @@ static ASTNode* ContractAssertASTNodeClone(
   return func(&to->base, data);
 }
 
-static void ContractAssertASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode*, void*, int, VisitorMode),
+static bool ContractAssertASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
     int child_id, void* data) {
   ContractAssertASTNode* assert_node = (ContractAssertASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(assert_node->predicate, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(assert_node->predicate, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ContractAssertASTNodeTransform(ASTNode* node,
@@ -3081,17 +3136,24 @@ static ASTNode* IfStatementASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void IfStatementASTNodeVisit(ASTNode* node,
-                                    void (*func)(ASTNode* node, void*,
-                                                 int, VisitorMode),
+static bool IfStatementASTNodeVisit(ASTNode* node,
+                                    ASTNodeVisitFunc func,
                                     int child_id,
                                     void* data) {
   IfStatementASTNode* n = (IfStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->cond, func, 0, data);
-  ASTNodeVisit(n->if_part, func, 1, data);
-  ASTNodeVisit(n->else_part, func, 2, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->cond, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->if_part, func, 1, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->else_part, func, 2, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void IfStatementASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -3195,16 +3257,21 @@ static ASTNode* CombinedStatementASTNodeClone(
   return func(&to->base, data);
 }
 
-static void CombinedStatementASTNodeVisit(ASTNode* node,
-                                          void (*func)(ASTNode* node, void*,
-                                                      int,  VisitorMode),
+static bool CombinedStatementASTNodeVisit(ASTNode* node,
+                                          ASTNodeVisitFunc func,
                                           int child_id,
                                           void* data) {
   CombinedStatementASTNode* n = (CombinedStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->cond, func, 0, data);
-  ASTNodeVisit(n->stmt, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->cond, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void CombinedStatementASTNodeTransform(ASTNode* node,
@@ -3281,14 +3348,17 @@ static ASTNode* ThrowASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void ThrowASTNodeVisit(ASTNode* node,
-                              void (*func)(ASTNode* node, void*,
-                                           int, VisitorMode),
+static bool ThrowASTNodeVisit(ASTNode* node,
+                              ASTNodeVisitFunc func,
                               int child_id, void* data) {
   ThrowASTNode* n = (ThrowASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ThrowASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -3378,17 +3448,20 @@ static ASTNode* CompoundStatementASTNodeClone(
   return func(&to->base, data);
 }
 
-static void CompoundStatementASTNodeVisit(ASTNode* node,
-                                          void (*func)(ASTNode* node, void*,
-                                                       int, VisitorMode),
+static bool CompoundStatementASTNodeVisit(ASTNode* node,
+                                          ASTNodeVisitFunc func,
                                           int child_id,
                                           void* data) {
   CompoundStatementASTNode* n = (CompoundStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  for (size_t i = 0; i < n->statements->length; i++) {
-    ASTNodeVisit(n->statements->value.p[i], func, (int)i, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  for (size_t i = 0; i < n->statements->length; i++) {
+    if (!ASTNodeVisit(n->statements->value.p[i], func, (int)i, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void CompoundStatementASTNodeTransform(ASTNode* node,
@@ -3485,14 +3558,17 @@ static ASTNode* CatchASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void CatchASTNodeVisit(ASTNode* node,
-                              void (*func)(ASTNode* node, void*,
-                                           int, VisitorMode),
+static bool CatchASTNodeVisit(ASTNode* node,
+                              ASTNodeVisitFunc func,
                               int child_id, void* data) {
   CatchASTNode* n = (CatchASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->stmt, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void CatchASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -3574,17 +3650,22 @@ static ASTNode* TryASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void TryASTNodeVisit(ASTNode* node,
-                            void (*func)(ASTNode* node, void*,
-                                         int, VisitorMode),
+static bool TryASTNodeVisit(ASTNode* node,
+                            ASTNodeVisitFunc func,
                             int child_id, void* data) {
   TryASTNode* n = (TryASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->try_stmt, func, 0, data);
-  for (size_t i = 0; i < n->catches->length; i++) {
-    ASTNodeVisit(n->catches->value.p[i], func, (int)i + 1, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  if (!ASTNodeVisit(n->try_stmt, func, 0, data)) {
+    return false;
+  }
+  for (size_t i = 0; i < n->catches->length; i++) {
+    if (!ASTNodeVisit(n->catches->value.p[i], func, (int)i + 1, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void TryASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -3698,18 +3779,27 @@ static ASTNode* ForStatementASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void ForStatementASTNodeVisit(ASTNode* node,
-                                     void (*func)(ASTNode* node, void*,
-                                                  int, VisitorMode),
+static bool ForStatementASTNodeVisit(ASTNode* node,
+                                     ASTNodeVisitFunc func,
                                      int child_id,
                                      void* data) {
   ForStatementASTNode* n = (ForStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->c1, func, 0, data);
-  ASTNodeVisit(n->c2, func, 1, data);
-  ASTNodeVisit(n->c3, func, 2, data);
-  ASTNodeVisit(n->stmt, func, 3, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->c1, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->c2, func, 1, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->c3, func, 2, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 3, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ForStatementASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -3876,15 +3966,23 @@ static ASTNode* ExpansionStatementASTNodeClone(
   return func(&to->base, data);
 }
 
-static void ExpansionStatementASTNodeVisit(
-    ASTNode* node, void (*func)(ASTNode* node, void*, int, VisitorMode),
+static bool ExpansionStatementASTNodeVisit(
+    ASTNode* node, ASTNodeVisitFunc func,
     int child_id, void* data) {
   ExpansionStatementASTNode* n = (ExpansionStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->init_stmt, func, 0, data);
-  ASTNodeVisit(n->initializer, func, 1, data);
-  ASTNodeVisit(n->stmt, func, 2, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->init_stmt, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->initializer, func, 1, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 2, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ExpansionStatementASTNodeTransform(ASTNode* node,
@@ -3985,15 +4083,18 @@ static ASTNode* VariableDeclarationASTNodeClone(
   return func(&to->base, data);
 }
 
-static void VariableDeclarationASTNodeVisit(ASTNode* node,
-                                            void (*func)(ASTNode* node, void*,
-                                                         int, VisitorMode),
+static bool VariableDeclarationASTNodeVisit(ASTNode* node,
+                                            ASTNodeVisitFunc func,
                                             int child_id,
                                             void* data) {
   VariableDeclarationASTNode* n = (VariableDeclarationASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->initializer, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->initializer, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void VariableDeclarationASTNodeTransform(ASTNode* node,
@@ -4091,15 +4192,18 @@ static ASTNode* StructuredBindingASTNodeClone(
   return func(&to->base, data);
 }
 
-static void StructuredBindingASTNodeVisit(ASTNode* node,
-                                          void (*func)(ASTNode* node, void*,
-                                                       int, VisitorMode),
+static bool StructuredBindingASTNodeVisit(ASTNode* node,
+                                          ASTNodeVisitFunc func,
                                           int child_id,
                                           void* data) {
   StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(binding->initializer, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(binding->initializer, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void StructuredBindingASTNodeTransform(ASTNode* node,
@@ -4175,17 +4279,20 @@ static ASTNode* DeclarationListASTNodeClone(
   return func(&to->base, data);
 }
 
-static void DeclarationListASTNodeVisit(ASTNode* node,
-                                        void (*func)(ASTNode* node, void*,
-                                                     int, VisitorMode),
+static bool DeclarationListASTNodeVisit(ASTNode* node,
+                                        ASTNodeVisitFunc func,
                                         int child_id,
                                         void* data) {
   DeclarationListASTNode* n = (DeclarationListASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  for (size_t i = 0; i < n->declarations->length; i++) {
-    ASTNodeVisit(n->declarations->value.p[i], func, (int)i, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  for (size_t i = 0; i < n->declarations->length; i++) {
+    if (!ASTNodeVisit(n->declarations->value.p[i], func, (int)i, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void DeclarationListASTNodeTransform(ASTNode* node,
@@ -4255,16 +4362,21 @@ static ASTNode* CaseLabelASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void CaseLabelASTNodeVisit(ASTNode* node,
-                                  void (*func)(ASTNode* node, void*,
-                                               int, VisitorMode),
+static bool CaseLabelASTNodeVisit(ASTNode* node,
+                                  ASTNodeVisitFunc func,
                                   int child_id,
                                   void* data) {
   CaseLabelASTNode* n = (CaseLabelASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  ASTNodeVisit(n->stmt, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void CaseLabelASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -4388,16 +4500,21 @@ static ASTNode* SwitchStatementASTNodeClone(
   return func(&to->base, data);
 }
 
-static void SwitchStatementASTNodeVisit(ASTNode* node,
-                                        void (*func)(ASTNode* node, void*,
-                                                    int,  VisitorMode),
+static bool SwitchStatementASTNodeVisit(ASTNode* node,
+                                        ASTNodeVisitFunc func,
                                         int child_id,
                                         void* data) {
   SwitchStatementASTNode* n = (SwitchStatementASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  ASTNodeVisit(n->stmt, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void SwitchStatementASTNodeTransform(ASTNode* node,
@@ -4491,15 +4608,18 @@ static void LabelASTNodeReplaceChild(ASTNode* parent, int child_id,
   }
 }
 
-static void LabelASTNodeVisit(ASTNode* node,
-                                  void (*func)(ASTNode* node, void*,
-                                               int, VisitorMode),
+static bool LabelASTNodeVisit(ASTNode* node,
+                                  ASTNodeVisitFunc func,
                                   int child_id,
                                   void* data) {
   LabelASTNode* n = (LabelASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->stmt, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->stmt, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void LabelASTNodeTransform(ASTNode* node, ASTNodeTransformer func,
@@ -4718,15 +4838,18 @@ static ASTNode* ExpressionInitializerASTNodeClone(
   return func(&to->base, data);
 }
 
-static void ExpressionInitializerASTNodeVisit(ASTNode* node,
-                                              void (*func)(ASTNode* node, void*,
-                                                           int, VisitorMode),
+static bool ExpressionInitializerASTNodeVisit(ASTNode* node,
+                                              ASTNodeVisitFunc func,
                                               int child_id,
                                               void* data) {
   ExpressionInitializerASTNode* n = (ExpressionInitializerASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->expr, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->expr, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void ExpressionInitializerASTNodeTransform(ASTNode* node,
@@ -4803,17 +4926,20 @@ static ASTNode* BracedInitializerASTNodeClone(
   return func(&to->base, data);
 }
 
-static void BracedInitializerASTNodeVisit(ASTNode* node,
-                                          void (*func)(ASTNode* node, void*,
-                                                       int, VisitorMode),
+static bool BracedInitializerASTNodeVisit(ASTNode* node,
+                                          ASTNodeVisitFunc func,
                                           int child_id,
                                           void* data) {
   BracedInitializerASTNode* n = (BracedInitializerASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  for (size_t i = 0; i < n->initializers->length; i++) {
-    ASTNodeVisit(n->initializers->value.p[i], func, (int)i, data);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
   }
-  func(node, data, child_id, kVisitPostChildren);
+  for (size_t i = 0; i < n->initializers->length; i++) {
+    if (!ASTNodeVisit(n->initializers->value.p[i], func, (int)i, data)) {
+      return false;
+    }
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void BracedInitializerASTNodeTransform(ASTNode* node,
@@ -4967,15 +5093,18 @@ static ASTNode* DesignatedInitializerASTNodeClone(
   return func(&to->base, data);
 }
 
-static void DesignatedInitializerASTNodeVisit(ASTNode* node,
-                                              void (*func)(ASTNode* node, void*,
-                                                           int, VisitorMode),
+static bool DesignatedInitializerASTNodeVisit(ASTNode* node,
+                                              ASTNodeVisitFunc func,
                                               int child_id,
                                               void* data) {
   DesignatedInitializerASTNode* n = (DesignatedInitializerASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->init, func, 0, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->init, func, 0, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void DesignatedInitializerASTNodeTransform(ASTNode* node,
@@ -5070,15 +5199,20 @@ static ASTNode* CompoundLiteralASTNodeClone(const ASTNode* node,
   return func(&to->base, data);
 }
 
-static void CompoundLiteralASTNodeVisit(ASTNode* node,
-                                        void (*func)(ASTNode* node, void*, int,
-                                                     VisitorMode),
+static bool CompoundLiteralASTNodeVisit(ASTNode* node,
+                                        ASTNodeVisitFunc func,
                                         int child_id, void* data) {
   CompoundLiteralASTNode* n = (CompoundLiteralASTNode*)node;
-  func(node, data, child_id, kVisitPreChildren);
-  ASTNodeVisit(n->sym, func, 0, data);
-  ASTNodeVisit(n->initializer, func, 1, data);
-  func(node, data, child_id, kVisitPostChildren);
+  if (!func(node, data, child_id, kVisitPreChildren)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->sym, func, 0, data)) {
+    return false;
+  }
+  if (!ASTNodeVisit(n->initializer, func, 1, data)) {
+    return false;
+  }
+  return func(node, data, child_id, kVisitPostChildren);
 }
 
 static void CompoundLiteralASTNodeTransform(ASTNode* node,

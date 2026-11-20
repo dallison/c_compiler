@@ -361,14 +361,14 @@ static Symbol* InstantiatedMemberForSymbol(Struct* source, Struct* target,
   return NULL;
 }
 
-static void RebindInstantiatedMemberIdentifier(ASTNode* node, void* data,
+static bool RebindInstantiatedMemberIdentifier(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier) ||
       ASTNodeGetShape(node) != kASTShapeIdentifier) {
-    return;
+    return true;
   }
   Struct** owners = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -377,6 +377,7 @@ static void RebindInstantiatedMemberIdentifier(ASTNode* node, void* data,
   if (replacement != NULL) {
     id->symbol = replacement;
   }
+  return true;
 }
 
 static void FoldInstantiatedConstexprStaticMembers(Struct* source,
@@ -479,7 +480,7 @@ static void EvaluateInstantiatedStaticAsserts(TypeParser* parser,
   }
 }
 
-static void ClearBitWidthAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearBitWidthAnalysis(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   (void)data;
   (void)child_id;
@@ -487,6 +488,7 @@ static void ClearBitWidthAnalysis(ASTNode* node, void* data, int child_id,
     node->flags &= ~kASTAnalyzed;
     ASTNodeClearType(node);
   }
+  return true;
 }
 
 /* Pair source bit-fields with the instantiation's bit-fields in declaration
@@ -1231,23 +1233,24 @@ typedef struct {
 
 /* A constructor-call initializer (`K C<T>::v(4);`) names the defined member
  * itself as the object being constructed. */
-static void RetargetStaticDataMemberIdentifier(ASTNode* node, void* data,
+static bool RetargetStaticDataMemberIdentifier(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   StaticDataMemberRetarget* retarget = data;
   IdentifierASTNode* identifier = (IdentifierASTNode*)node;
   if (identifier->symbol != retarget->pattern) {
-    return;
+    return true;
   }
   identifier->symbol = retarget->instance;
   TypeRecord* type = retarget->instance->type;
   ASTNodeSetType(node, TypeRecordCopy(TypeIsReference(type) ? type->next
                                                             : type));
+  return true;
 }
 
 void TypeEnsureStaticDataMemberDefinition(Syntax* syntax, Symbol* symbol) {
@@ -5477,15 +5480,15 @@ typedef struct {
 
 static bool ClosureBodyDependsOnEnclosingTemplate(Struct* closure, int depth);
 
-static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
+static bool NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
                                             int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !((LambdaBodyEnclosingUse*)data)->found;
   }
   LambdaBodyEnclosingUse* use = data;
   if (use->found) {
-    return;
+    return !((LambdaBodyEnclosingUse*)data)->found;
   }
   // A use of another function template (`std::endl`, `operator<<`) carries
   // that template's own parameter indices.  Those indices overlap the
@@ -5521,7 +5524,7 @@ static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
       if (TemplateParameterIndexIsEnclosing(id->symbol->template_parameter_index,
                                             use->own_base, use->own_limit)) {
         use->found = true;
-        return;
+        return false;
       }
       if (!names_other_function_template) {
         NoteEnclosingTemplateParameterInType(id->symbol->type, use->own_base,
@@ -5548,12 +5551,13 @@ static void NoteLambdaBodyEnclosingTemplate(ASTNode* node, void* data,
       !TypeIsStructOrUnion(node->type) || node->type->info.struct_info == NULL ||
       node->type->info.struct_info->tag_symbol == NULL ||
       !node->type->info.struct_info->tag_symbol->flags.invented) {
-    return;
+    return !((LambdaBodyEnclosingUse*)data)->found;
   }
   if (ClosureBodyDependsOnEnclosingTemplate(node->type->info.struct_info,
                                             use->depth + 1)) {
     use->found = true;
   }
+  return !((LambdaBodyEnclosingUse*)data)->found;
 }
 
 static bool FunctionBodyDependsOnEnclosingTemplate(Symbol* function,
@@ -8107,13 +8111,13 @@ static void MaxTemplateParameterIndexInType(TypeRecord* type, int* max_index) {
  * this, an alias template whose only parameter appears solely inside a
  * dependent non-type argument expression would look parameterless and fail to
  * instantiate. */
-static void MaxTemplateParameterIndexInExprVisitor(ASTNode* node, void* data,
+static bool MaxTemplateParameterIndexInExprVisitor(ASTNode* node, void* data,
                                                    int child_id,
                                                    VisitorMode mode) {
   (void)child_id;
   (void)mode;
   if (node == NULL || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   int* max_index = (int*)data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -8133,6 +8137,7 @@ static void MaxTemplateParameterIndexInExprVisitor(ASTNode* node, void* data,
                                           max_index);
     }
   }
+  return true;
 }
 
 void MaxTemplateParameterIndexInArgument(TemplateArgument* arg,
@@ -8413,13 +8418,13 @@ static void NoteTemplateParameterReference(TemplateParameterReferenceSet* set,
   }
 }
 
-static void CollectTemplateParameterReferenceVisitor(ASTNode* node, void* data,
+static bool CollectTemplateParameterReferenceVisitor(ASTNode* node, void* data,
                                                     int child_id,
                                                     VisitorMode mode) {
   (void)child_id;
   (void)mode;
   if (node == NULL || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   TemplateParameterReferenceSet* set = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -8445,6 +8450,7 @@ static void CollectTemplateParameterReferenceVisitor(ASTNode* node, void* data,
       }
     }
   }
+  return true;
 }
 
 /* A decltype pattern can be checked once every parameter it names is bound.

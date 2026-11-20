@@ -141,12 +141,12 @@ typedef struct {
   bool found;
 } PackExpansionExpressionSearch;
 
-static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
+static bool FindPackExpansionInExpressionNode(ASTNode* node, void* data,
                                               int child_id,
                                               VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !((PackExpansionExpressionSearch*)data)->found;
   }
   PackExpansionExpressionSearch* search = data;
   if (node->op == AST_OP(identifier)) {
@@ -193,6 +193,7 @@ static void FindPackExpansionInExpressionNode(ASTNode* node, void* data,
                               search->pack_index, search->pack_length)) {
     search->found = true;
   }
+  return !((PackExpansionExpressionSearch*)data)->found;
 }
 
 bool FindPackExpansionInExpression(ASTNode* expr, Vector* args,
@@ -3274,13 +3275,14 @@ bool TypeIsDecltypeAliasTemplateId(TypeRecord* type) {
              TypeDependentOf(type)->dependent_decltype_expr;
 }
 
-static void ClearDependentExpressionAnalysis(ASTNode* node, void* data,
+static bool ClearDependentExpressionAnalysis(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 typedef struct {
@@ -3321,12 +3323,12 @@ static TypeRecord* DecltypeThisForSubstitutionTarget(TypeParser* parser,
   return NewPointerTo(GetQualifiers(symbol->type), target);
 }
 
-static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
+static bool RemapDecltypeFunctionParameter(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   Symbol* symbol = id->symbol;
@@ -3340,18 +3342,18 @@ static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
     id->symbol = copy;
     node->flags &= ~kASTAnalyzed;
     ASTNodeClearType(node);
-    return;
+    return true;
   }
   if (symbol == NULL || !symbol->flags.is_argument || symbol->type == NULL ||
       !TypeContainsTemplateParameter(symbol->type)) {
-    return;
+    return true;
   }
   subst =
       SubstituteTemplateParameters(remap->parser, symbol->type, remap->args);
   if (subst == NULL || TypeContainsTemplateParameter(subst) ||
       TypeIsUnknown(subst)) {
     TypeRecordDelete(subst);
-    return;
+    return true;
   }
   Symbol* copy = NewSymbol(symbol->name.value, subst, symbol->storage);
   copy->flags = symbol->flags;
@@ -3360,6 +3362,7 @@ static void RemapDecltypeFunctionParameter(ASTNode* node, void* data,
   id->symbol = copy;
   node->flags &= ~kASTAnalyzed;
   ASTNodeClearType(node);
+  return true;
 }
 
 static bool ClassSubstitutionSourceSeesFunction(Struct* source,
@@ -4286,7 +4289,7 @@ static void RebaseDependentExpressionOwnedType(TypeRecord** slot, int base) {
   *slot = rebased;
 }
 
-static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
+static bool RebaseDependentExpressionVisitor(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)child_id;
   (void)mode;
@@ -4295,22 +4298,22 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
     RebaseDependentExpressionOwnedType(
         &((SizeofASTNode*)node)->type_operand,
         ((RebaseDependentExpressionData*)data)->base);
-    return;
+    return true;
   }
   if (node != NULL && node->op == AST_OP(cast)) {
     RebaseDependentExpressionOwnedType(
         &((CastASTNode*)node)->cast_type,
         ((RebaseDependentExpressionData*)data)->base);
-    return;
+    return true;
   }
   if (node == NULL || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   RebaseDependentExpressionData* rebase = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   Symbol* old = id->symbol;
   if (old == NULL) {
-    return;
+    return true;
   }
   bool needs_copy =
       old->template_parameter_index >= rebase->base ||
@@ -4319,7 +4322,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
       (id->template_arguments != NULL &&
        TemplateArgumentVectorContainsTemplateParameter(id->template_arguments));
   if (!needs_copy) {
-    return;
+    return true;
   }
   // A variable template-id (`is_invocable_r_v<R, F, A>`) is folded by looking
   // up `symbol->variable_template`.  An alias template (`enable_if_t<B, T>`)
@@ -4337,7 +4340,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
        old->type->info.function.cxx_member_owner == NULL)) {
     RebaseTemplateArgumentVectorParameterIndices(id->template_arguments,
                                                  rebase->base);
-    return;
+    return true;
   }
   // The symbol's type spine may link records it does not count references
   // to, so a shallow copy would rebase the shared pattern in place.
@@ -4375,6 +4378,7 @@ static void RebaseDependentExpressionVisitor(ASTNode* node, void* data,
   // and never resolves once the member's own arguments arrive.
   RebaseTemplateArgumentVectorParameterIndices(id->template_arguments,
                                                rebase->base);
+  return true;
 }
 
 static ASTNode* CloneAndRebaseDependentExpression(ASTNode* expr, int base) {
@@ -4408,13 +4412,13 @@ static bool FunctionParameterPackIsConcrete(Symbol* formal, Vector* args) {
  * prototype to take the elements from, so substitute one parameter per pack
  * element.  Without them `ts` keeps its dependent pack type and the expanded
  * call cannot be resolved. */
-static void MapExpressionFunctionParameterPack(ASTNode* node, void* data,
+static bool MapExpressionFunctionParameterPack(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   TemplateFunctionBodyClone* clone = data;
   Symbol* formal = ((IdentifierASTNode*)node)->symbol;
@@ -4422,7 +4426,7 @@ static void MapExpressionFunctionParameterPack(ASTNode* node, void* data,
       !formal->flags.is_parameter_pack ||
       MapFindPointerKey(&clone->pack_symbol_map, formal) != NULL ||
       !FunctionParameterPackIsConcrete(formal, clone->args)) {
-    return;
+    return true;
   }
   Vector* elements = NewVector();
   AppendSubstitutedFormalParameter(clone->parser, elements, formal,
@@ -4431,13 +4435,14 @@ static void MapExpressionFunctionParameterPack(ASTNode* node, void* data,
     Symbol* element = elements->value.p[i];
     if (element == NULL || element->flags.is_parameter_pack) {
       VectorDelete(elements);
-      return;
+      return true;
     }
   }
   MapKeyValue kv;
   kv.key.p = formal;
   kv.value.p = elements;
   MapInsert(&clone->pack_symbol_map, kv);
+  return true;
 }
 
 /* Copy `from`'s function template-parameter list onto `to`, rebasing all

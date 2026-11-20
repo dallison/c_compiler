@@ -50,7 +50,7 @@ typedef struct {
 
 // Sets `search->found` when an identifier in the initializer refers to
 // `search->symbol`.
-static void FindC23AutoSelfReference(ASTNode* node, void* data, int child_id,
+static bool FindC23AutoSelfReference(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
   C23AutoSelfReference* search = data;
@@ -59,6 +59,7 @@ static void FindC23AutoSelfReference(ASTNode* node, void* data, int child_id,
       ((IdentifierASTNode*)node)->symbol == search->symbol) {
     search->found = true;
   }
+  return !((C23AutoSelfReference*)data)->found;
 }
 
 // Emits diagnostics when `sym` uses C23 inferred `auto` on an invalid

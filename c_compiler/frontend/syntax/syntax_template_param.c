@@ -782,19 +782,19 @@ Vector* SyntaxParseTemplateParameterList(Syntax* syntax) {
 
 // AST visitor callback that sets `*(bool*)data` when `node` makes an
 // expression value-dependent on template parameters or class scope.
-static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
+static bool DependentTemplateExpressionVisitor(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
   (void)mode;
   if (node == NULL) {
-    return;
+    return !*(bool*)data;
   }
   if ((node->flags & kASTDependentQualifiedName) != 0 ||
       TypeIsUnknown(node->type) ||
       TypeContainsTemplateParameter(node->type)) {
     *(bool*)data = true;
-    return;
+    return false;
   }
   if (node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) {
     // `sizeof(T)` is value-dependent.  The node's own type is size_t; the
@@ -802,15 +802,15 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
     SizeofASTNode* sizeof_node = (SizeofASTNode*)node;
     if (TypeContainsTemplateParameter(sizeof_node->type_operand)) {
       *(bool*)data = true;
-      return;
+      return false;
     }
   }
   if (node->op != AST_OP(identifier)) {
-    return;
+    return !*(bool*)data;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL) {
-    return;
+    return !*(bool*)data;
   }
   if ((id->symbol->flags.is_template_parameter &&
        id->symbol->template_parameter_index >= 0) ||
@@ -818,7 +818,7 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
       TypeContainsTemplateParameter(id->symbol->type) ||
       TemplateArgumentVectorIsDependent(id->template_arguments)) {
     *(bool*)data = true;
-    return;
+    return false;
   }
   if (TypeIsFunction(id->symbol->type) &&
       id->symbol->type->info.function.cxx_member_owner != NULL &&
@@ -830,6 +830,7 @@ static void DependentTemplateExpressionVisitor(ASTNode* node, void* data,
     // signature but computes its value from the class's extent pack.
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 // True if `node` reads a value through a dependent class-template scope

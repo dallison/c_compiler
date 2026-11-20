@@ -3018,7 +3018,7 @@ static ASTNode* FunctionCallTryMetaSynthesisEarly(VectorASTNode* node) {
 // Clears deferred calls nested in a braced argument once the enclosing
 // function specialization is concrete, so target-typed brace conversion sees
 // `std::move(local)` and similar expressions with their real result types.
-static void ClearConcreteBracedDependentCall(ASTNode* node, void* data,
+static bool ClearConcreteBracedDependentCall(ASTNode* node, void* data,
                                              int child_id,
                                              VisitorMode mode) {
   (void)data;
@@ -3026,7 +3026,7 @@ static void ClearConcreteBracedDependentCall(ASTNode* node, void* data,
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(call) ||
       (node->flags & kASTDependentFunctorCall) == 0) {
-    return;
+    return true;
   }
   node->flags &= ~(kASTDependentFunctorCall | kASTAnalyzed);
   ASTNodeClearType(node);
@@ -3034,6 +3034,7 @@ static void ClearConcreteBracedDependentCall(ASTNode* node, void* data,
   if (call->left != NULL) {
     call->left->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static void FunctionCallAnalyzeActualArguments(VectorASTNode* node) {

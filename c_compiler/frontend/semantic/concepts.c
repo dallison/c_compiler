@@ -506,17 +506,17 @@ static bool TemplateArgumentVectorContainsTemplateParameter(Vector* args) {
   return false;
 }
 
-static void ExpressionContainsTemplateParameterVisitor(ASTNode* node,
+static bool ExpressionContainsTemplateParameterVisitor(ASTNode* node,
                                                        void* data,
                                                        int child_id,
                                                        VisitorMode mode) {
   (void)child_id;
   if (node == NULL || mode != kVisitPreChildren || *(bool*)data) {
-    return;
+    return !*(bool*)data;
   }
   if (TypeContainsTemplateParameter(node->type)) {
     *(bool*)data = true;
-    return;
+    return false;
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -528,6 +528,7 @@ static void ExpressionContainsTemplateParameterVisitor(ASTNode* node,
       *(bool*)data = true;
     }
   }
+  return !*(bool*)data;
 }
 
 static bool ExpressionContainsTemplateParameter(ASTNode* expr) {
@@ -729,7 +730,7 @@ static TypeRecord* CompoundRequirementDecltypeType(ASTNode* expr) {
   return TypeRecordCopy(expr->type);
 }
 
-static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
+static bool ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode);
 
@@ -828,15 +829,15 @@ static bool CalleeTypeIsNoexcept(TypeRecord* callee_type) {
          callee_type->info.function.is_noexcept;
 }
 
-static void ExpressionPotentiallyThrowsVisitor(ASTNode* node, void* data,
+static bool ExpressionPotentiallyThrowsVisitor(ASTNode* node, void* data,
                                                int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   bool* throws = (bool*)data;
   if (*throws) {
-    return;
+    return true;
   }
   switch (node->op) {
     case AST_OP(throw):
@@ -858,6 +859,7 @@ static void ExpressionPotentiallyThrowsVisitor(ASTNode* node, void* data,
     default:
       break;
   }
+  return true;
 }
 
 bool ExpressionPotentiallyThrows(ASTNode* node) {
@@ -932,7 +934,7 @@ static void RequirementFailureInfoDestruct(RequirementFailureInfo* info) {
   info->expression_type = NULL;
 }
 
-static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
+static bool ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)data;
@@ -940,6 +942,7 @@ static void ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 // Pristine (never-substituted) type patterns for requires-expression
@@ -1907,21 +1910,21 @@ typedef struct {
   int index;
 } FoldConstraintPackSearch;
 
-static void FindFoldConstraintPack(ASTNode* node, void* data, int child_id,
+static bool FindFoldConstraintPack(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   (void)child_id;
   if (node == NULL || mode != kVisitPreChildren) {
-    return;
+    return ((FoldConstraintPackSearch*)data)->index < 0;
   }
   FoldConstraintPackSearch* search = data;
   if (search->index >= 0) {
-    return;
+    return ((FoldConstraintPackSearch*)data)->index < 0;
   }
   if (node->op == AST_OP(identifier)) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
       search->index = id->symbol->template_parameter_index;
-      return;
+      return ((FoldConstraintPackSearch*)data)->index < 0;
     }
   }
   if (node->op == AST_OP(sizeof)) {
@@ -1930,7 +1933,7 @@ static void FindFoldConstraintPack(ASTNode* node, void* data, int child_id,
          type = type->next) {
       if (type->template_parameter_index >= 0) {
         search->index = type->template_parameter_index;
-        return;
+        return ((FoldConstraintPackSearch*)data)->index < 0;
       }
     }
   }
@@ -1953,9 +1956,10 @@ static void FindFoldConstraintPack(ASTNode* node, void* data, int child_id,
         FoldConstraintTemplateArgumentPackIndex(arguments->value.p[i]);
     if (index >= 0) {
       search->index = index;
-      return;
+      return ((FoldConstraintPackSearch*)data)->index < 0;
     }
   }
+  return ((FoldConstraintPackSearch*)data)->index < 0;
 }
 
 static int FoldConstraintPackIndex(ASTNode* pattern) {
@@ -2437,13 +2441,13 @@ static bool NormalizedFormSubsumes(NormalizedConstraintForm* stronger_dnf,
   return true;
 }
 
-static void FindConceptTemplateParameterReference(ASTNode* node, void* data,
+static bool FindConceptTemplateParameterReference(ASTNode* node, void* data,
                                                   int child_id,
                                                   VisitorMode mode) {
   (void)child_id;
   if (node == NULL || mode != kVisitPreChildren || *(bool*)data ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !*(bool*)data;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol != NULL && symbol->flags.is_template_template_parameter &&
@@ -2451,6 +2455,7 @@ static void FindConceptTemplateParameterReference(ASTNode* node, void* data,
           kTemplateTemplateParameterConcept) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 bool ConceptsConstraintReferencesConceptTemplateParameter(

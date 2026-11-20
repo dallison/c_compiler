@@ -34,7 +34,7 @@ bool CXXInImmediateFunctionContext(void);
 // outside a constant-required context.
 bool SemanticEvaluateRuntimeTruth(ASTNode* node, int64_t* value);
 bool SemanticEvaluateRuntimeInteger(ASTNode* node, int64_t* value);
-void ClearDeferredAutoInitAnalysis(ASTNode* node, void* data, int child_id, VisitorMode mode);
+bool ClearDeferredAutoInitAnalysis(ASTNode* node, void* data, int child_id, VisitorMode mode);
 void SemanticEnsureAutoReturnTypeDeduced(TypeRecord* func);
 bool ASTNodeIsCXXBracedTemporary(ASTNode* node);
 ASTNode* AnalyzeFunctionCall(VectorASTNode* node);

@@ -1533,17 +1533,18 @@ static void AddRangeForStructuredBindingVariables(Syntax* syntax,
   }
 }
 
-static void NoteRangeExpressionUndeducedAuto(ASTNode* node, void* data,
+static bool NoteRangeExpressionUndeducedAuto(ASTNode* node, void* data,
                                             int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !*(bool*)data;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol != NULL && TypeContainsAuto(symbol->type)) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 static ASTNode* TryParseCXXRangeForStatement(Syntax* syntax,
@@ -2417,15 +2418,16 @@ Vector* SyntaxParseCatchHandlers(Syntax* syntax, TokenClass followers) {
   return catches;
 }
 
-static void DiagnoseCtorDtorFunctionTryReturn(ASTNode* node, void* data,
+static bool DiagnoseCtorDtorFunctionTryReturn(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || node->op != AST_OP(return)) {
-    return;
+    return true;
   }
   SyntaxErrorAtLocation((Syntax*)data, node->location,
                         "a constructor or destructor function-try-block "
                         "handler cannot return");
+  return true;
 }
 
 void SyntaxWrapFunctionTryBlock(TypeRecord* func, Vector* catches) {

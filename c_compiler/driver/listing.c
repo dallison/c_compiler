@@ -200,21 +200,22 @@ typedef struct {
   int line;
 } ListingPos;
 
-static void MaxLineVisitor(ASTNode* node, void* data, int child_id,
+static bool MaxLineVisitor(ASTNode* node, void* data, int child_id,
                            VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   ListingPos* pos = data;
   int lineno = 0;
   File* file = FileFromLocation(node->location, &lineno);
   if (file == NULL || file != pos->file) {
-    return;
+    return true;
   }
   if (lineno > pos->line) {
     pos->line = lineno;
   }
+  return true;
 }
 
 static bool LocationWouldPrint(SourceLocation location) {

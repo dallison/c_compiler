@@ -38,7 +38,7 @@
 
 // Contract: Visitor callback only; mutates matching is_same_v identifiers by
 // clearing kASTAnalyzed pre-children. Does not take ownership of node or data.
-static void ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode);
 
 // Synchronizes an identifier retained from dependent analysis with its symbol
@@ -169,19 +169,20 @@ static ASTNode* AnalyzeExpressionPostProcess(ASTNode* node);
 
 // Re-open analysis for stale template-dependent is_same_v after prior passes set
 // kASTAnalyzed; only runs on identifier pre-children visit.
-static void ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearStaleIsSameVAnalysis(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol != NULL && StringEqual(&id->symbol->name, "is_same_v") &&
       id->template_arguments != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 // Pre-dispatch: inequality rewrite (operands analyzed first) then built-in

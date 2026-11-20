@@ -14,16 +14,16 @@ typedef struct {
   bool invalid_parameter_use;
 } ContractUseCheck;
 
-static void CheckPostconditionParameterUse(ASTNode* node, void* data,
+static bool CheckPostconditionParameterUse(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   ContractUseCheck* check = data;
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol == NULL || symbol == check->assertion->result_binding) {
-    return;
+    return true;
   }
   Vector* prototype = &check->func->info.function.prototype;
   for (size_t i = 0; i < prototype->length; i++) {
@@ -38,8 +38,9 @@ static void CheckPostconditionParameterUse(ASTNode* node, void* data,
                     "a non-reference parameter");
       check->invalid_parameter_use = true;
     }
-    return;
+    return true;
   }
+  return true;
 }
 
 static void SetResultBindingType(TypeRecord* func,

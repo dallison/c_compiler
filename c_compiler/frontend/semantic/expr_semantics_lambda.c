@@ -42,8 +42,8 @@ static ASTNode* AddressOfFunctionSymbol(Symbol* function, SourceLocation locatio
 static bool ClosureCallOperatorIsGeneric(Symbol* call_op);
 static Symbol* ResolveClosureCallOperatorForFunctionPointer( Struct* closure, TypeRecord* target_fn);
 static ASTNode* LambdaCaptureInitializerExpr(ASTNode* init);
-static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data, int child_id, VisitorMode mode);
-static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
+static bool ClearCaptureInitializerAnalyzed(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
                                                  int child_id,
                                                  VisitorMode mode);
 static void ReanalyzeLambdaBodyAfterCaptureDeduction(Struct* closure,
@@ -377,13 +377,14 @@ static ASTNode* LambdaCaptureInitializerExpr(ASTNode* init) {
 }
 
 // Contract: Visitor; clears `kASTAnalyzed` on capture init subtrees before re-analysis.
-static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data,
+static bool ClearCaptureInitializerAnalyzed(ASTNode* node, void* data,
                                             int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 // Besides clearing analysis flags, discard fallback types from member chains
@@ -391,13 +392,13 @@ static void ClearCaptureInitializerAnalyzed(ASTNode* node, void* data,
 // non-NULL placeholder (often the recovery type `int`) as final and never
 // revisits lookup.
 // Contract: Visitor; mutates analysis flags and stale member/call result types.
-static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
+static bool ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
                                                  int child_id,
                                                  VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   node->flags &= ~kASTAnalyzed;
   if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
@@ -405,7 +406,7 @@ static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
     if (access->right != NULL && access->right->op == AST_OP(string)) {
       ASTNodeClearType(node);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(call)) {
     VectorASTNode* call = (VectorASTNode*)node;
@@ -418,6 +419,7 @@ static void ClearLambdaBodyAfterCaptureDeduction(ASTNode* node, void* data,
       }
     }
   }
+  return true;
 }
 
 // A lambda body is initially analyzed while an init-capture field may still be

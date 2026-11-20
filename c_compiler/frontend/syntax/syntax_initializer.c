@@ -225,21 +225,21 @@ static bool CXXTemplateArgumentReferencesParameterPack(
 // AST visitor pre-order hook: sets `((CXXPackExpressionSearch*)data)->found`
 // when `node` references a function parameter pack (directly or via sizeof/
 // alignof or template arguments).
-static void FindCXXParameterPackExpression(ASTNode* node, void* data,
+static bool FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !((CXXPackExpressionSearch*)data)->found;
   }
   if ((node->flags & kASTReferencesParameterPack) != 0) {
     ((CXXPackExpressionSearch*)data)->found = true;
-    return;
+    return false;
   }
   if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
       CXXTypeContainsParameterPack(
           &compiler->syntax, ((SizeofASTNode*)node)->type_operand)) {
     ((CXXPackExpressionSearch*)data)->found = true;
-    return;
+    return false;
   }
   Vector* template_arguments = NULL;
   ASTNodeShape shape = ASTNodeGetShape(node);
@@ -247,12 +247,12 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
       ((CXXPackExpressionSearch*)data)->found = true;
-      return;
+      return false;
     }
     if (id->symbol != NULL &&
         CXXTypeContainsParameterPack(&compiler->syntax, id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
-      return;
+      return false;
     }
     template_arguments = id->template_arguments;
   } else if (shape == kASTShapeStructMember) {
@@ -266,9 +266,10 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     if (CXXTemplateArgumentReferencesParameterPack(
             template_arguments->value.p[i])) {
       ((CXXPackExpressionSearch*)data)->found = true;
-      return;
+      return false;
     }
   }
+  return !((CXXPackExpressionSearch*)data)->found;
 }
 
 // Returns true if `node`'s expression tree references a C++ parameter pack.
