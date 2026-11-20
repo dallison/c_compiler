@@ -12,6 +12,13 @@ typedef void* (*DaveHostGuestPtr)(void* context, uint64_t guest, size_t size);
 // Host pointer for a mapping created by DAVE_SYS_MMAP, or NULL.
 void* DaveHostMappingFind(uint64_t guest, size_t size);
 
+// A counter that changes whenever the set of guest mappings changes.  An
+// interpreter that caches guest-to-host translations must drop them when it
+// sees a new value.  DaveHostMappingChanged bumps it; call it before the
+// memory behind a removed mapping is released.
+uint64_t DaveHostMappingGeneration(void);
+void DaveHostMappingChanged(void);
+
 // `pointer_size` is 4 or 8 and selects the guest msghdr/iovec layout.
 // `address_bits` is 32 or 64.  A 64-bit guest receives the host mapping
 // address; a 32-bit guest receives an address recorded in the mapping table.

@@ -20,6 +20,15 @@ struct X86_64GuestThread;
 #define X86_IA32_STACK_BASE 0x70000000u
 #define X86_IA32_TLS_BASE 0x6F000000u
 
+// A small direct-mapped cache of guest-page-to-host translations.
+#define X86_64_TLB_PAGE_BITS 12
+#define X86_64_TLB_ENTRIES 64
+
+typedef struct {
+  uint64_t page;  // Guest page number, or UINT64_MAX when empty.
+  char* host;     // Host address of the start of the page.
+} X86_64TlbEntry;
+
 typedef struct X86_64Interpreter {
   Loader* loader;
   struct X86_64ProcessRuntime* process;
@@ -57,6 +66,16 @@ typedef struct X86_64Interpreter {
   size_t tls_block_size;
   uint8_t current_seg_prefix;
   SymbolScope symbol_cache;
+  // Translations are valid while the mapping generation and the thread's TLS
+  // placement match the values they were made under.
+  X86_64TlbEntry tlb[X86_64_TLB_ENTRIES];
+  uint64_t tlb_generation;
+  uint64_t tlb_fs_base;
+  size_t tlb_tls_block_size;
+  // Host bytes at fetch_rip, valid only while one instruction is decoded.
+  const uint8_t* fetch_host;
+  uint64_t fetch_rip;
+  size_t fetch_len;
 } X86_64Interpreter;
 
 void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,

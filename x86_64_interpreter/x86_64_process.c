@@ -9,6 +9,7 @@
 #include "guest_addr_wait.h"
 #include "loader_arch.h"
 #include "loader_lifecycle.h"
+#include "posix_host.h"
 #include <errno.h>
 #include <sched.h>
 #include <stdio.h>
@@ -121,6 +122,7 @@ void X86_64ProcessRegisterGuestMemory(X86_64ProcessRuntime* process,
   range->end = start + (uint64_t)size;
   pthread_rwlock_wrlock(&process->memory_lock);
   VectorAppend(&process->memory_ranges, range);
+  DaveHostMappingChanged();
   pthread_rwlock_unlock(&process->memory_lock);
 }
 
@@ -137,6 +139,7 @@ void X86_64ProcessUnregisterGuestMemory(X86_64ProcessRuntime* process,
     if (range != NULL && range->start == start && range->end == end) {
       free(range);
       VectorDeleteElement(&process->memory_ranges, i);
+      DaveHostMappingChanged();
       continue;
     }
     i++;

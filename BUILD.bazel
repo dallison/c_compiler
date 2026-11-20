@@ -1365,7 +1365,9 @@ cc_library(
         "c_compiler/Loader/*.h",
         "c_compiler/Loader/Architecture/*.h",
     ]) + ["libc/include/davecc_guest_syscalls.h"],
-    copts = COMMON_COPTS,
+    # The interpreter runs every x86 test; fastbuild's -O0 makes it several
+    # times slower.
+    copts = COMMON_COPTS + ["-O2"],
     includes = COMMON_INCLUDES,
     deps = [
         ":elf",

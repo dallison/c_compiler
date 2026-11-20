@@ -137,6 +137,16 @@ static int GuestErrno(int host) {
 
 static int64_t Fail(void) { return -(int64_t)GuestErrno(errno); }
 
+static uint64_t g_mapping_generation;
+
+uint64_t DaveHostMappingGeneration(void) {
+  return __atomic_load_n(&g_mapping_generation, __ATOMIC_ACQUIRE);
+}
+
+void DaveHostMappingChanged(void) {
+  __atomic_add_fetch(&g_mapping_generation, 1, __ATOMIC_ACQ_REL);
+}
+
 void* DaveHostMappingFind(uint64_t guest, size_t size) {
   if (size == 0 || guest + (uint64_t)size < guest) return NULL;
   pthread_mutex_lock(&g_mu);
@@ -163,6 +173,7 @@ static int Remember(uint64_t guest, void* host, size_t size) {
   g_maps[g_nmap].host = host;
   g_maps[g_nmap].size = size;
   g_nmap++;
+  DaveHostMappingChanged();
   pthread_mutex_unlock(&g_mu);
   return 0;
 }
@@ -175,6 +186,7 @@ static Mapping Take(uint64_t guest) {
       found = g_maps[i];
       g_maps[i] = g_maps[g_nmap - 1];
       g_nmap--;
+      DaveHostMappingChanged();
       break;
     }
   }

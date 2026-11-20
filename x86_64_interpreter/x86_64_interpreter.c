@@ -189,11 +189,8 @@ static void* ResolveIA32HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
   return NULL;
 }
 
-static void* HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
-                     size_t size) {
-  if ((uint64_t)size > UINT64_MAX - addr) {
-    return NULL;
-  }
+static void* HostPtrUncached(X86_64Interpreter* interpreter, uint64_t addr,
+                             size_t size) {
   void* mapped = DaveHostMappingFind(addr, size);
   if (mapped != NULL) {
     return mapped;
@@ -220,6 +217,54 @@ static void* HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
     return (void*)(uintptr_t)addr;
   }
   return NULL;
+}
+
+static void FlushTlb(X86_64Interpreter* interpreter) {
+  for (int i = 0; i < X86_64_TLB_ENTRIES; i++) {
+    interpreter->tlb[i].page = UINT64_MAX;
+  }
+}
+
+// Every guest access, including each instruction byte, resolves its address
+// here, and the uncached path takes locks and scans several region lists.
+// Cache whole pages that resolve contiguously.  An access that crosses a page
+// boundary, or a page that is only partly mapped, takes the uncached path.
+//
+// Cached entries are dropped when the mapping generation changes (guest
+// mmap/munmap, thread stack and TLS registration).  Loader regions are not
+// included: LoaderDestruct removes them only after guest threads have stopped,
+// and nothing removes them while guest code runs.
+static void* HostPtr(X86_64Interpreter* interpreter, uint64_t addr,
+                     size_t size) {
+  if ((uint64_t)size > UINT64_MAX - addr) {
+    return NULL;
+  }
+  const uint64_t page_size = (uint64_t)1 << X86_64_TLB_PAGE_BITS;
+  uint64_t offset = addr & (page_size - 1);
+  if (offset + size > page_size) {
+    return HostPtrUncached(interpreter, addr, size);
+  }
+  uint64_t generation = DaveHostMappingGeneration();
+  if (interpreter->tlb_generation != generation ||
+      interpreter->tlb_fs_base != interpreter->fs_base ||
+      interpreter->tlb_tls_block_size != interpreter->tls_block_size) {
+    FlushTlb(interpreter);
+    interpreter->tlb_generation = generation;
+    interpreter->tlb_fs_base = interpreter->fs_base;
+    interpreter->tlb_tls_block_size = interpreter->tls_block_size;
+  }
+  uint64_t page = addr >> X86_64_TLB_PAGE_BITS;
+  X86_64TlbEntry* entry = &interpreter->tlb[page % X86_64_TLB_ENTRIES];
+  if (entry->page == page) {
+    return entry->host + offset;
+  }
+  char* host = HostPtrUncached(interpreter, addr - offset, page_size);
+  void* direct = HostPtrUncached(interpreter, addr, size);
+  if (host != NULL && direct == host + offset) {
+    entry->page = page;
+    entry->host = host;
+  }
+  return direct;
 }
 
 static bool InterpreterAddressOk(X86_64Interpreter* interpreter, uint64_t addr,
@@ -373,9 +418,12 @@ static uint8_t Fetch8At(X86_64Interpreter* interpreter, uint64_t addr) {
 }
 
 static uint8_t Fetch8(X86_64Interpreter* interpreter, size_t* pos) {
-  uint8_t value = Fetch8At(interpreter, interpreter->rip + *pos);
-  (*pos)++;
-  return value;
+  size_t at = (*pos)++;
+  if (at < interpreter->fetch_len &&
+      interpreter->rip == interpreter->fetch_rip) {
+    return interpreter->fetch_host[at];
+  }
+  return Fetch8At(interpreter, interpreter->rip + at);
 }
 
 static uint32_t Fetch32(X86_64Interpreter* interpreter, size_t* pos) {
@@ -1665,8 +1713,8 @@ static bool ExecuteSSE(X86_64Interpreter* interpreter, size_t* pos, REX rex,
   }
 }
 
-static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
-                               bool* rip_updated) {
+static bool ExecuteInstructionBody(X86_64Interpreter* interpreter,
+                                   size_t* insn_len, bool* rip_updated) {
   *rip_updated = false;
   interpreter->rip_updated = false;
   interpreter->current_seg_prefix = 0;
@@ -2715,6 +2763,10 @@ void X86_64InterpreterInitForThread(
       interpreter->tls_block_size > 0) {
     interpreter->tls_guest_base = X86_IA32_TLS_BASE;
   }
+  FlushTlb(interpreter);
+  interpreter->tlb_generation = DaveHostMappingGeneration();
+  interpreter->tlb_fs_base = interpreter->fs_base;
+  interpreter->tlb_tls_block_size = interpreter->tls_block_size;
   uint64_t argument_bottom =
       SetupGuestMainArgs(interpreter, argc, argv, entry_address,
                          loader->is_static);
@@ -2767,6 +2819,27 @@ void X86_64InterpreterInit(X86_64Interpreter* interpreter, Loader* loader,
   X86_64InterpreterInitForThread(interpreter, NULL, NULL, loader, entry_address,
                                  argc, argv, NULL, 0, 0, trace_registers,
                                  trace_instructions);
+}
+
+// An x86 instruction is at most 15 bytes.  Translate the bytes at rip once
+// rather than per byte; the window stops at the page end so it stays within
+// a single translation, and bytes past it use the checked path.
+static bool ExecuteInstruction(X86_64Interpreter* interpreter, size_t* insn_len,
+                               bool* rip_updated) {
+  const uint64_t page_size = (uint64_t)1 << X86_64_TLB_PAGE_BITS;
+  uint64_t rip = interpreter->rip;
+  size_t window = (size_t)(page_size - (rip & (page_size - 1)));
+  if (window > 15) {
+    window = 15;
+  }
+  const uint8_t* host = HostPtr(interpreter, rip, window);
+  interpreter->fetch_host = host;
+  interpreter->fetch_rip = rip;
+  interpreter->fetch_len = host != NULL ? window : 0;
+  bool ok = ExecuteInstructionBody(interpreter, insn_len, rip_updated);
+  interpreter->fetch_host = NULL;
+  interpreter->fetch_len = 0;
+  return ok;
 }
 
 static int X86_64InterpreterRunLoop(X86_64Interpreter* interpreter) {
