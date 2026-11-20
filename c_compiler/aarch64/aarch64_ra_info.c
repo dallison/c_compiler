@@ -655,12 +655,9 @@ void AARCH64AllocateRegistersByColoring(AARCH64RegisterAllocator* allocator) {
       .create_reload = CreateReload,
       .assign = Assign,
   };
-  // DAVECC_NEW_RA_NO_SPLIT turns splitting off, for comparison.
-  if (getenv("DAVECC_NEW_RA_NO_SPLIT") == NULL) {
-    desc.create_location = CreateLocation;
-    desc.create_label = CreateLabel;
-    desc.create_jump = CreateJump;
-  }
+  desc.create_location = CreateLocation;
+  desc.create_label = CreateLabel;
+  desc.create_jump = CreateJump;
   // Caller-saved registers first, so that only values live across a call
   // cost a save in the prologue.  x8 and x9 are emitter scratch registers,
   // x16 and x17 the linker's and x18 the platform's.

@@ -675,12 +675,9 @@ void RVAllocateRegistersByColoring(RVRegisterAllocator* allocator) {
       .create_reload = CreateReload,
       .assign = Assign,
   };
-  // DAVECC_NEW_RA_NO_SPLIT turns splitting off, for comparison.
-  if (getenv("DAVECC_NEW_RA_NO_SPLIT") == NULL) {
-    desc.create_location = CreateLocation;
-    desc.create_label = CreateLabel;
-    desc.create_jump = CreateJump;
-  }
+  desc.create_location = CreateLocation;
+  desc.create_label = CreateLabel;
+  desc.create_jump = CreateJump;
   // Caller-saved registers first, so that only values live across a call
   // cost a save in the prologue.  t0 and gp are emitter scratch registers,
   // and the atomic pseudos expand with t1-t6 as scratch.  ra costs a save in
@@ -725,9 +722,6 @@ void RVAllocateRegistersByColoring(RVRegisterAllocator* allocator) {
   }
 
   RewriteWrittenMoves(gen);
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(gen, &kInfo, NULL, stderr, 3);
-  }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
     CannotAllocate(gen, "the shared allocator gave up");
   }

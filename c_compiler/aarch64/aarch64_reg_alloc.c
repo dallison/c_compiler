@@ -982,9 +982,6 @@ static void FoldPhysicalCopies(AARCH64RegisterAllocator* allocator) {
 // Shrink wrapping, hoisting and copy folding work on the physical registers
 // coloring assigned.
 void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(&allocator->g->base, AARCH64RAInfo(), NULL, stderr, 3);
-  }
   AARCH64AllocateRegistersByColoring(allocator);
   AARCH64ShrinkWrap(allocator);
   HoistLoopInvariantValues(allocator);

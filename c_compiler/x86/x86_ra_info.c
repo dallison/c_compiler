@@ -797,12 +797,9 @@ void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
       .create_reload = CreateReload,
       .assign = Assign,
   };
-  // DAVECC_NEW_RA_NO_SPLIT turns splitting off, for comparison.
-  if (getenv("DAVECC_NEW_RA_NO_SPLIT") == NULL) {
-    desc.create_location = CreateLocation;
-    desc.create_label = CreateLabel;
-    desc.create_jump = CreateJump;
-  }
+  desc.create_location = CreateLocation;
+  desc.create_label = CreateLabel;
+  desc.create_jump = CreateJump;
   // Caller-saved registers first, so that only values live across a call
   // cost a save in the prologue, and the argument registers last among those,
   // since calls need them.  rsp and rbp hold the frame, and the emitter uses
@@ -832,9 +829,6 @@ void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
 
   RewriteWrittenMoves(gen);
   DetachXaddDests(gen);
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(gen, &kInfo, NULL, stderr, 3);
-  }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
     CannotAllocate(gen, "the shared allocator gave up");
   }

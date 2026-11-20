@@ -662,9 +662,6 @@ void W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator) {
     }
   }
 
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(gen, &kInfo, NULL, stderr, 3);
-  }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
     CannotAllocate(gen, "the shared allocator gave up");
   }

@@ -494,9 +494,6 @@ void PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator) {
     doubles->regs[doubles->num_regs++] = kDoubleKeyBase + r;
   }
 
-  if (getenv("DAVECC_RA_CHECK") != NULL) {
-    TargetRACheck(gen, &kInfo, NULL, stderr, 3);
-  }
   bool colored = TargetAllocateRegisters(gen, &desc, NULL);
   current = saved;
   TargetRAIndexDestruct(&ctx.tmp_classes);
