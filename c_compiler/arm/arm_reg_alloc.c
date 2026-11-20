@@ -130,6 +130,7 @@ bool ARMHasFloatResult(TargetInstruction* inst) {
 
 void ARMAllocateRegisters(ARMRegisterAllocator* allocator) {
   ARMAllocateRegistersByColoring(allocator);
+  ARMShrinkWrap(allocator);
 }
 
 const char* ARMRegisterName(ARMRegister* reg, int size, char* buf, size_t len) {

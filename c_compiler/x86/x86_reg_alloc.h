@@ -52,6 +52,7 @@ const X86Profile* X86CurrentRegisterNameProfile(void);
 void X86RegisterAllocatorDestruct(X86RegisterAllocator* alloc);
 void X86RegisterAllocatorDelete(X86RegisterAllocator* alloc);
 void X86AllocateRegisters(X86RegisterAllocator* emitter);
+void X86ShrinkWrap(X86RegisterAllocator* allocator);
 const char* X86RegisterName(X86Register* reg, char* buf, size_t len);
 
 // True if the allocator gives |inst|'s result a floating point register.

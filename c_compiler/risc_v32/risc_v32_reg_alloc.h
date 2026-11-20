@@ -64,6 +64,7 @@ void RV32RegisterAllocatorDestruct(RV32RegisterAllocator* alloc);
 void RV32RegisterAllocatorDelete(RV32RegisterAllocator* alloc);
 
 void RV32AllocateRegisters(RV32RegisterAllocator* emitter);
+void RV32ShrinkWrap(RV32RegisterAllocator* allocator);
 const char* RV32RegisterName(RV32Register* reg, char* buf, size_t len);
 
 // The register file of |inst|'s result.

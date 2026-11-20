@@ -122,6 +122,7 @@ RV32RegisterType RV32ResultRegisterType(TargetInstruction* inst) {
 
 void RV32AllocateRegisters(RV32RegisterAllocator* allocator) {
   RV32AllocateRegistersByColoring(allocator);
+  RV32ShrinkWrap(allocator);
 }
 
 const char* RV32RegisterName(RV32Register* reg, char* buf, size_t len) {

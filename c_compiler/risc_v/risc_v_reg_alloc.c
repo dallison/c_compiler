@@ -162,6 +162,7 @@ RVRegisterType RVResultRegisterType(TargetInstruction* inst) {
 
 void RVAllocateRegisters(RVRegisterAllocator* allocator) {
   RVAllocateRegistersByColoring(allocator);
+  RVShrinkWrap(allocator);
 }
 
 const char* RVRegisterName(RVRegister* reg, char* buf, size_t len) {

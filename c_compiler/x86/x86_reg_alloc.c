@@ -192,6 +192,7 @@ bool X86HasFloatResult(TargetInstruction* inst) {
 void X86AllocateRegisters(X86RegisterAllocator* allocator) {
   X86SetRegisterNameProfile(X86_P(allocator->rv));
   X86AllocateRegistersByColoring(allocator);
+  X86ShrinkWrap(allocator);
 }
 
 static const X86Profile* g_x86_reg_name_profile;

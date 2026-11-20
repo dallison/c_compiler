@@ -67,6 +67,7 @@ void RVRegisterAllocatorDestruct(RVRegisterAllocator* alloc);
 void RVRegisterAllocatorDelete(RVRegisterAllocator* alloc);
 
 void RVAllocateRegisters(RVRegisterAllocator* emitter);
+void RVShrinkWrap(RVRegisterAllocator* allocator);
 const char* RVRegisterName(RVRegister* reg, char* buf, size_t len);
 
 // The register file of |inst|'s result.  The float compares write an integer
