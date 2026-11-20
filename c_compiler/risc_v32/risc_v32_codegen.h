@@ -367,6 +367,14 @@ typedef struct {
   TargetInstruction* inst;      // Actually a TargetSymbol*.
   int varnum;
   bool is_fp;
+  bool holds_address;           // Holds the variable's address, not its value.
+  // Allocation spilled the variable to |spill_slot|, or to more than one slot
+  // if that is -1.
+  bool spilled;
+  int spill_slot;
+  // The location splitting gave the variable over part of the function, or
+  // NULL.
+  TargetInstruction* split_location;
 } RegisterVariable;
 
 typedef struct {
@@ -389,6 +397,10 @@ typedef struct RV32Generator {
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
   bool stages_tail_target;  // An indirect tail call stages its target in t2.
+  // Set before lowering when this function will try the coloring allocator.
+  bool try_coloring;
+  // Registers came from the coloring allocator.
+  bool colored;
   
   Vector saved_regs;
   

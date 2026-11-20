@@ -1059,6 +1059,7 @@ cc_library(
         "c_compiler/risc_v32/risc_v32_codegen.c",
         "c_compiler/risc_v32/risc_v32_emitter.c",
         "c_compiler/risc_v32/risc_v32_optimize.c",
+        "c_compiler/risc_v32/risc_v32_ra_info.c",
         "c_compiler/risc_v32/risc_v32_reg_alloc.c",
         "c_compiler/risc_v32/risc_v32_target.c",
         "c_compiler/xtensa/xtensa_assembler.c",

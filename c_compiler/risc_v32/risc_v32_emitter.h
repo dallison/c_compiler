@@ -29,6 +29,10 @@ void RV32EmitterDestruct(RV32Emitter* emitter);
 void RV32EmitterDelete(RV32Emitter* emitter);
 
 void RV32PrintFunction(RV32Emitter* emitter, FILE* fp);
+
+// False for an instruction the emitter prints no machine code for, apart from
+// a label a landing pad arrives at.
+bool RV32InstructionEmitsCode(TargetInstruction* inst);
 void RV32PrintCXXAdjustorThunks(FILE* fp);
 
 #endif /* risc_v32_emitter_h */

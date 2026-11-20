@@ -18,6 +18,7 @@
 #include "map.h"
 #include "risc_v32_machine.h"
 #include "target_generator.h"
+#include "target_ra_ir.h"
 
 struct RV32Generator;
 struct RV32Instruction;
@@ -79,5 +80,19 @@ void RV32RegisterAllocatorDelete(RV32RegisterAllocator* alloc);
 
 void RV32AllocateRegisters(RV32RegisterAllocator* emitter);
 const char* RV32RegisterName(RV32Register* reg, char* buf, size_t len);
+
+// The register file the dominator walk gives |inst|'s result.
+RV32RegisterType RV32ResultRegisterType(TargetInstruction* inst);
+
+// How the shared allocator code reads RISC-V32 instructions.
+const TargetRAInfo* RV32RAInfo(void);
+
+// Whether to try the coloring allocator on the function |rv| is starting.
+// Call once per function.
+bool RV32UseColoringAllocator(struct RV32Generator* rv);
+
+// Allocates the current function with the shared coloring allocator.  Returns
+// false, leaving the function untouched, if it cannot.
+bool RV32AllocateRegistersByColoring(RV32RegisterAllocator* allocator);
 
 #endif /* risc_v32_reg_alloc_h */

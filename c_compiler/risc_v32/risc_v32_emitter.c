@@ -73,6 +73,22 @@ static bool IsPrintable(TargetInstruction* inst) {
   return true;
 }
 
+bool RV32InstructionEmitsCode(TargetInstruction* inst) {
+  if (inst->block == NULL || inst->observable_checkpoint) {
+    return false;
+  }
+  switch ((RV32Opcode)inst->opcode) {
+    case RV32_OP(label):
+      return (inst->flags & TARGET_INST_EXCEPTION_LANDING) != 0;
+    case RV32_OP(named_label):
+    case RV32_OP(loc):
+    case RV32_OP(symbol):
+      return false;
+    default:
+      return IsPrintable(inst);
+  }
+}
+
 static const char* SymbolName(TargetSymbol* sym, char* buf, size_t len) {
   return TargetSymbolName(sym->symbol, buf, len);
 }
@@ -563,7 +579,7 @@ static void RestoreExceptionLandingState(RV32Emitter* emitter, FILE* fp) {
   DecrementStackPointer(emitter, StackFrameSize(emitter), fp);
 
   int struct_return_phys = -1;
-  if (emitter->rv->struct_return_reg >= 0) {
+  if (emitter->rv->struct_return_reg >= 0 && !emitter->rv->colored) {
     bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
                    !emitter->rv->not_leaf;
     struct_return_phys =
@@ -606,7 +622,9 @@ static void PrintRmov(RV32Emitter* emitter, TargetInstruction* inst, FILE* fp) {
   if (inst->operand[0] == NULL || inst->operand[1] == NULL) {
     return;
   }
-  if (inst->operand[1]->block == NULL) {
+  // The variable registers the coloring allocator creates are in no block.
+  if (inst->operand[1]->block == NULL &&
+      !RV32IsVarRegister(inst->operand[1])) {
     // Optimized out.
     return;
   }
@@ -635,7 +653,8 @@ static void PrintRmov(RV32Emitter* emitter, TargetInstruction* inst, FILE* fp) {
 static void PrintDestMove(TargetInstruction* inst, FILE* fp) {
   TargetInstruction* src = inst->operand[0];
   assert(src != NULL);
-  if (src->block == NULL) {
+  // The variable registers the coloring allocator creates are in no block.
+  if (src->block == NULL && !RV32IsVarRegister(src)) {
     return;
   }
   if (src->reg == NULL) {

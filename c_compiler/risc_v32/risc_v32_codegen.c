@@ -19,7 +19,9 @@
 #include "type_core.h"
 
 #include "risc_v32_optimize.h"
+#include "risc_v32_emitter.h"
 #include "target_basic_block.h"
+#include "target_debug_ranges.h"
 
 // RISC-V32 currently uses the 64-bit double representation for long double.
 // Keep the source-language distinction, but select double-width instructions
@@ -30,6 +32,7 @@ static bool RV32FpIsDoubleWidth(TypeRecord* type) {
 
 static void LowerVariables(RV32Generator* rv, Generator* gen);
 static bool TypeIsWideInt(TypeRecord* t);
+static void SetHoldsAddress(RV32Generator* rv, TargetInstruction* inst);
 
 static void Trap() {}
 static void TrapLower(String* name) {
@@ -837,6 +840,8 @@ void RV32GeneratorInit(RV32Generator* rv, Generator* gen) {
   rv->tmp2 = NULL;
   rv->not_leaf = false;
   rv->stages_tail_target = false;
+  rv->try_coloring = false;
+  rv->colored = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
@@ -1057,6 +1062,10 @@ static TargetInstruction* IntVariableRegister(RV32Generator* rv, int varnum, Sym
   inst->symbol = sym;
   var->inst = &inst->base;
   var->is_fp = false;
+  var->holds_address = false;
+  var->spilled = false;
+  var->spill_slot = -1;
+  var->split_location = NULL;
   VectorAppend(&rv->var_regs, var);
   return EmitSymbol(rv, var->inst);
 }
@@ -1076,6 +1085,10 @@ static TargetInstruction* FloatingPointVariableRegister(RV32Generator* rv, int v
   inst->symbol = sym;
   var->inst = &inst->base;
   var->is_fp = true;
+  var->holds_address = false;
+  var->spilled = false;
+  var->spill_slot = -1;
+  var->split_location = NULL;
   VectorAppend(&rv->var_regs, var);
   return EmitSymbol(rv, var->inst);
 }
@@ -1435,6 +1448,9 @@ static RV32Opcode IR2RV(IROpcode op) {
 }
 
 static int MaxIntRegisterVariables(RV32Generator* rv) {
+  if (rv->try_coloring) {
+    return INT_MAX;
+  }
   bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
   if (is_leaf) {
     return RV32_LAST_LEAF_INT_REG_VAR - RV32_FIRST_LEAF_INT_REG_VAR + 1;
@@ -1443,6 +1459,9 @@ static int MaxIntRegisterVariables(RV32Generator* rv) {
 }
 
 static int MaxFpRegisterVariables(RV32Generator* rv) {
+  if (rv->try_coloring) {
+    return INT_MAX;
+  }
   bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
   if (is_leaf) {
     return RV32_LAST_LEAF_FP_REG_VAR - RV32_FIRST_LEAF_FP_REG_VAR + 1;
@@ -5940,7 +5959,8 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
           int reg = rv->num_int_reg_vars++;
           entry->pooled->data.ivalue = RV32_REG_VAR | reg;
           SetDebugRegisterLocation(entry, reg);
-          LoadIntArgumentIntoRegisterVariable(rv, reg, location, entry->pooled);
+          SetHoldsAddress(rv, LoadIntArgumentIntoRegisterVariable(
+                                  rv, reg, location, entry->pooled));
         } else if (location.type == kArgLocationPushed ||
                    location.type == kArgLocationPassedByReferenceOnStack) {
           rv->not_leaf = true;
@@ -5959,6 +5979,7 @@ static void AssignRegisterOrOffset(RV32Generator* rv, PoolEntry* entry,
         Emit(rv, NewInstruction2(RV32_OP(mv), var,
                     IntArgumentRegister(rv, 0)));
         SetDebugRegisterLocation(entry, rv->struct_return_reg);
+        SetHoldsAddress(rv, var);
       } else {
         AlignOffset(entry, var_offset);
         entry->pooled->data.ivalue = *var_offset;
@@ -6119,8 +6140,86 @@ static void LowerVariables(RV32Generator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
+static void SetHoldsAddress(RV32Generator* rv, TargetInstruction* inst) {
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    if (var->inst == inst) {
+      var->holds_address = true;
+    }
+  }
+}
+
+// The DWARF number of |r|, or -1.
+static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
+  (void)gen;
+  RV32Register* reg = (RV32Register*)r;
+  if (reg == NULL) {
+    return -1;
+  }
+  if (reg->type == kRV32RegTypeFloat) {
+    return 32 + reg->base.num;  // f0 to f31.
+  }
+  return reg->base.num;
+}
+
+// The frame base offset of spill slot |slot|, which the emitter addresses
+// 8 + |slot| bytes below the local variables.
+static int SpillSlotFrameOffset(RV32Generator* rv, int slot) {
+  return -(rv->base.stack_frame_size + RV32_STACK_FRAME_HEADER_SIZE + 8 +
+           slot);
+}
+
+// Points each register variable's debug information at the registers or spill
+// slot the coloring allocator chose for it.  The dominator walk's locations
+// were recorded while lowering.
+static void SetDebugRegisterLocations(RV32Generator* rv) {
+  if (!compiler->debug_output || !rv->colored) {
+    return;
+  }
+  TargetDebugVariable* colored =
+      malloc((rv->var_regs.length + 1) * sizeof(TargetDebugVariable));
+  int num_colored = 0;
+  for (size_t i = 0; i < rv->var_regs.length; i++) {
+    RegisterVariable* var = rv->var_regs.value.p[i];
+    Symbol* symbol = ((TargetSymbol*)var->inst)->symbol;
+    if (symbol == NULL) {
+      continue;
+    }
+    // Every assignment of a spilled variable stores it, so its slot holds it
+    // throughout, unless splitting gave it a register over part of the
+    // function.
+    if (var->spilled) {
+      if (var->spill_slot >= 0 && !var->holds_address &&
+          var->split_location == NULL) {
+        VariableDIESetStackOffset(SymbolDIE(symbol),
+                                  SpillSlotFrameOffset(rv, var->spill_slot));
+      }
+      continue;
+    }
+    colored[num_colored++] = (TargetDebugVariable){
+        symbol, {var->inst, var->split_location}, var->holds_address};
+  }
+  if (num_colored != 0) {
+    TargetSetDebugLocationLists(&rv->base, RV32RAInfo(), colored, num_colored,
+                                DwarfRegister, RV32InstructionEmitsCode);
+  }
+  free(colored);
+}
+
+// The coloring allocator leaves inline assembly to the dominator walk.
+static bool ColoringHandlesFunction(Generator* gen) {
+  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
+       node = IRNext(node)) {
+    if (node->opcode == IR_OP(asm)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 void RV32Lower(RV32Generator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
+  rv->try_coloring = RV32UseColoringAllocator(rv) && ColoringHandlesFunction(gen);
   
   // If the function returns in memory, allocate the struct result
   // register now.
@@ -6157,6 +6256,7 @@ void RV32Lower(RV32Generator* rv, Generator* gen) {
   }
   // Allocate registers to the instructions.
   RV32AllocateRegisters(&rv->register_allocator);
+  SetDebugRegisterLocations(rv);
 }
 
 void RV32Print(RV32Generator* rv, FILE* fp) {
