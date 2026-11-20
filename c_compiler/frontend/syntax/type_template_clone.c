@@ -67,20 +67,20 @@ static ASTNode* RebuildClonedCallResultConversion(
 static bool RebindClonedConstructorCall(VectorASTNode* call,
                                         Vector* overload_snapshots);
 static void RestoreSymbolOverloadLinks(Vector* snapshots);
-static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
+static bool DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode);
-static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
+static bool RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode);
-static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
+static bool RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode);
 static void RestoreSymbolOverloadLinks(Vector* snapshots);
 static bool RebindClonedConstructorCall(VectorASTNode* call, Vector* snapshots);
 static StructMember* FindStructMemberOverloadHead(Struct* owner, String* name);
-static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data, int child_id,
+static bool ClearAnalyzedFlagVisitor(ASTNode* node, void* data, int child_id,
                                      VisitorMode mode);
-static void AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
+static bool AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
                                                       int child_id,
                                                       VisitorMode mode);
 static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,
@@ -94,7 +94,7 @@ static void ExpandClonedLocalDirectInitializerPack(
     TemplateFunctionBodyClone* clone, VariableDeclarationASTNode* decl,
     Symbol* replacement);
 static void RewriteDeferredConstructorMemberName(VectorASTNode* call);
-static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
+static bool InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                            void* data,
                                                            int child_id,
                                                            VisitorMode mode);
@@ -129,7 +129,7 @@ static StructMember* FindStructMemberOverloadHead(Struct* owner, String* name) {
   return fallback;
 }
 
-static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
+static bool ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
                                      int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
@@ -146,13 +146,14 @@ static void ClearAnalyzedFlagVisitor(ASTNode* node, void* data,
     // those members a second time.
     if ((node->flags & (kASTForcedTypeAdjustment | kASTValueInitMemzero)) !=
         0) {
-      return;
+      return true;
     }
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
-static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
+static bool ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)data;
@@ -161,6 +162,7 @@ static void ClearClonedCastSubtreeFlagVisitor(ASTNode* node, void* data,
       node->op != AST_OP(call)) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static bool TypeSpineHasDeferredAlias(TypeRecord* type) {
@@ -173,13 +175,13 @@ static bool TypeSpineHasDeferredAlias(TypeRecord* type) {
   return false;
 }
 
-static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
+static bool MarkClonedCastForReanalysis(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL ||
       node->op != AST_OP(cast) || (node->flags & kASTDependentCast) == 0) {
-    return;
+    return true;
   }
   CastASTNode* cast = (CastASTNode*)node;
   TypeRecord* target = cast->cast_type;
@@ -188,7 +190,7 @@ static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
   }
   if (target == NULL || cast->expr == NULL || cast->expr->type == NULL) {
     node->flags &= ~kASTDependentCast;
-    return;
+    return true;
   }
   // A dependent cast was initially analyzed without converting its operand.
   // Once both sides are concrete, every target category (not just class types)
@@ -199,7 +201,7 @@ static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
   if (TypeContainsTemplateParameter(target) ||
       TypeContainsTemplateParameter(cast->expr->type) ||
       ExpressionIsTemplateDependent(cast->expr)) {
-    return;
+    return true;
   }
   // Cast lowering depends on its now-concrete target type. Clear the cast and
   // the dependent arithmetic below it, plus its enclosing expression/statement
@@ -210,25 +212,26 @@ static void MarkClonedCastForReanalysis(ASTNode* node, void* data,
     current->flags &= ~kASTAnalyzed;
   }
   node->flags &= ~kASTDependentCast;
+  return true;
 }
 
-static void AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
+static bool AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
                                                       int child_id,
                                                       VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || node->op != AST_OP(call)) {
-    return;
+    return true;
   }
   VectorASTNode* call = (VectorASTNode*)node;
   if (call->left == NULL || call->left->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)call->left;
   if (id->symbol == NULL || !id->symbol->flags.is_template ||
       !TypeIsFunction(id->symbol->type) ||
       CallActualsStillContainPackExpansion((ASTNode*)call)) {
-    return;
+    return true;
   }
   for (size_t i = 0; call->children != NULL && i < call->children->length; i++) {
     ASTNode* actual = call->children->value.p[i];
@@ -236,6 +239,7 @@ static void AnalyzeFunctionTemplateCallActualsVisitor(ASTNode* node, void* data,
       call->children->value.p[i] = AnalyzeExpression(actual);
     }
   }
+  return true;
 }
 
 static ASTNode* ResolveDependentQualifiedValueName(
@@ -549,12 +553,12 @@ static void RewriteClonedConstructorMemberCall(TemplateFunctionBodyClone* clone,
 
 /* Visitor: rewrite an identifier referencing an original symbol to point at
  * its cloned replacement (from `symbol_map`) and refresh its node type. */
-static void RewriteTemplateBodyIdentifierVisitor(ASTNode* node, void* data,
+static bool RewriteTemplateBodyIdentifierVisitor(ASTNode* node, void* data,
                                                  int child_id,
                                                  VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   Map* symbol_map = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -569,6 +573,7 @@ static void RewriteTemplateBodyIdentifierVisitor(ASTNode* node, void* data,
       ASTNodeSetType(node, replacement->type);
     }
   }
+  return true;
 }
 
 /* Rewrite all identifiers in `node` to their cloned symbols via `symbol_map`. */
@@ -724,13 +729,14 @@ static bool TypeChainReferencesEnclosingStruct(TypeRecord* type, Struct* str) {
   return false;
 }
 
-static void FindPackIndexExpressionVisitor(ASTNode* node, void* data,
+static bool FindPackIndexExpressionVisitor(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL &&
       node->op == AST_OP(pack_index)) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 static bool ExpressionContainsPackIndex(ASTNode* expression) {
@@ -1221,7 +1227,7 @@ static void FinishClonedConstexprDefaultInitializer(
                   : "constexpr variable requires an initializer");
 }
 
-static void RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
+static bool RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode);
 
 // A local array bound that names an earlier constexpr local or a static member
@@ -1573,20 +1579,20 @@ typedef struct {
   bool multiple_packs;
 } PackExpansionExpressionSearch;
 
-static void FindPackExpansionExpressionSymbol(ASTNode* node, void* data,
+static bool FindPackExpansionExpressionSymbol(ASTNode* node, void* data,
                                               int child_id,
                                               VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   PackExpansionExpressionSearch* search = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL || !id->symbol->flags.is_parameter_pack ||
       (MapFindPointerKey(&search->clone->pack_symbol_map, id->symbol) == NULL &&
        MapFindPointerKey(&search->clone->symbol_map, id->symbol) == NULL)) {
-    return;
+    return true;
   }
   if (search->symbol != NULL && search->symbol != id->symbol) {
     Vector* first = MapFindPointerKey(&search->clone->pack_symbol_map,
@@ -1596,9 +1602,10 @@ static void FindPackExpansionExpressionSymbol(ASTNode* node, void* data,
     if (first == NULL || next == NULL || first->length != next->length) {
       search->multiple_packs = true;
     }
-    return;
+    return true;
   }
   search->symbol = id->symbol;
+  return true;
 }
 
 /* Find a parameter-pack symbol referenced inside a pack-expansion pattern.
@@ -1621,26 +1628,27 @@ typedef struct {
   Vector symbols;
 } PackExpansionFunctionPacks;
 
-static void CollectPackExpansionFunctionPacks(ASTNode* node, void* data,
+static bool CollectPackExpansionFunctionPacks(ASTNode* node, void* data,
                                               int child_id,
                                               VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   PackExpansionFunctionPacks* packs = data;
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol == NULL || !symbol->flags.is_parameter_pack ||
       MapFindPointerKey(&packs->clone->pack_symbol_map, symbol) == NULL) {
-    return;
+    return true;
   }
   for (size_t i = 0; i < packs->symbols.length; i++) {
     if (packs->symbols.value.p[i] == symbol) {
-      return;
+      return true;
     }
   }
   VectorAppend(&packs->symbols, symbol);
+  return true;
 }
 
 typedef struct {
@@ -1650,12 +1658,12 @@ typedef struct {
   bool multiple_packs;
 } TemplateArgumentPackExpressionSearch;
 
-static void FindTemplateArgumentPackExpression(ASTNode* node, void* data,
+static bool FindTemplateArgumentPackExpression(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   // Explicit template arguments sit on an identifier, or on the member node
   // of an accessed member template (`this->template Check<T>()...`).
@@ -1686,6 +1694,7 @@ static void FindTemplateArgumentPackExpression(ASTNode* node, void* data,
     search->pack_index = pack_index;
     search->pack_length = pack_length;
   }
+  return true;
 }
 
 static bool PackExpansionTemplateArgumentInfo(
@@ -1712,12 +1721,12 @@ typedef struct {
   bool found;
 } UnresolvedPackSearch;
 
-static void FindUnresolvedPackIdentifier(ASTNode* node, void* data,
+static bool FindUnresolvedPackIdentifier(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !((UnresolvedPackSearch*)data)->found;
   }
   UnresolvedPackSearch* search = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -1741,6 +1750,7 @@ static void FindUnresolvedPackIdentifier(ASTNode* node, void* data,
       search->found = true;
     }
   }
+  return !((UnresolvedPackSearch*)data)->found;
 }
 
 /* True if `node` (a pack-expansion pattern) still references a parameter pack
@@ -1838,12 +1848,12 @@ static bool TypeNamesMemberTemplateOwnParameter(
   return false;
 }
 
-static void FindMemberTemplateOwnPack(ASTNode* node, void* data, int child_id,
+static bool FindMemberTemplateOwnPack(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !((UnresolvedPackSearch*)data)->found;
   }
   UnresolvedPackSearch* search = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -1854,6 +1864,7 @@ static void FindMemberTemplateOwnPack(ASTNode* node, void* data, int child_id,
            : MapFindPointerKey(&search->clone->pack_symbol_map,
                                id->symbol) == NULL)) {
     search->found = true;
+    return false;
   }
   for (size_t i = 0;
        id->template_arguments != NULL && i < id->template_arguments->length;
@@ -1873,10 +1884,16 @@ static void FindMemberTemplateOwnPack(ASTNode* node, void* data, int child_id,
                                                    true)) {
       search->found = true;
     }
-    if (arg->dependent_expr != NULL) {
-      ASTNodeVisit(arg->dependent_expr, FindMemberTemplateOwnPack, 0, search);
+    if (search->found) {
+      return false;
+    }
+    if (arg->dependent_expr != NULL &&
+        !ASTNodeVisit(arg->dependent_expr, FindMemberTemplateOwnPack, 0,
+                      search)) {
+      return false;
     }
   }
+  return !((UnresolvedPackSearch*)data)->found;
 }
 
 /* True if `node`, a pack-expansion pattern in a member function template body
@@ -2006,13 +2023,13 @@ typedef struct {
   ASTNode* found;
 } LambdaCapturePackAccessSearch;
 
-static void FindLambdaCapturePackAccessVisitor(ASTNode* node, void* data,
+static bool FindLambdaCapturePackAccessVisitor(ASTNode* node, void* data,
                                                int child_id, VisitorMode mode) {
   (void)child_id;
   LambdaCapturePackAccessSearch* search = data;
   if (mode != kVisitPreChildren || search->found != NULL ||
       LambdaCapturePackMemberAccess(node) != node) {
-    return;
+    return ((LambdaCapturePackAccessSearch*)data)->found == NULL;
   }
   Vector* fields = LambdaCapturePackFieldReplacements(node, search->owner);
   if (fields != NULL && fields->length > 0) {
@@ -2021,6 +2038,7 @@ static void FindLambdaCapturePackAccessVisitor(ASTNode* node, void* data,
   if (fields != NULL) {
     VectorDelete(fields);
   }
+  return ((LambdaCapturePackAccessSearch*)data)->found == NULL;
 }
 
 /* The captured-pack member access a pack-expansion pattern expands over.  It
@@ -2080,15 +2098,16 @@ typedef struct {
 static Symbol* PackSourceForReplacement(TemplateFunctionBodyClone* clone,
                                         Symbol* replacement);
 
-static void InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
+static bool InstantiateClonedFunctionTemplateCallVisitor(ASTNode* node,
                                                         void* data,
                                                         int child_id,
                                                         VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL) {
-    return;
+    return true;
   }
   InstantiateClonedFunctionTemplateCall(data, node);
+  return true;
 }
 
 /* Substitute explicit template arguments for one element of a pack
@@ -2165,14 +2184,14 @@ static bool SubstitutePackElementTemplateArguments(
  * pack-symbol references to the element's symbol, and substitutes
  * pack-dependent cast types. Invoked once per element index while expanding
  * `pattern...`. */
-static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
+static bool ReplacePackIdentifierVisitor(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)child_id;
   if (node != NULL) {
     node->flags &= ~kASTPackExpansion;
   }
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   ReplacePackIdentifierData* replace = data;
   if (node->op == AST_OP(identifier)) {
@@ -2276,7 +2295,7 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
     }
   }
   if (node->op != AST_OP(cast) || replace->clone == NULL) {
-    return;
+    return true;
   }
   CastASTNode* cast = (CastASTNode*)node;
   if (!TypeContainsTemplateParameter(cast->cast_type) &&
@@ -2285,7 +2304,7 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
         replace->clone->from_owner != replace->clone->to_owner &&
         TypeChainReferencesStruct(cast->cast_type,
                                   replace->clone->from_owner))) {
-    return;
+    return true;
   }
   int pack_index = -1;
   size_t pack_length = 0;
@@ -2295,7 +2314,7 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
     if (pack_length > 0 && replace->element_index >= pack_length) {
       SyntaxError(replace->clone->parser->syntax,
                   "pack expansion argument packs have different lengths");
-      return;
+      return true;
     }
     cast_type = SubstituteTemplateParametersForPackElement(
         replace->clone->parser, cast->cast_type, replace->clone->args,
@@ -2320,6 +2339,7 @@ static void ReplacePackIdentifierVisitor(ASTNode* node, void* data,
   } else {
     ASTNodeSetType(node, cast_type);
   }
+  return true;
 }
 
 typedef struct {
@@ -2358,7 +2378,7 @@ static Symbol* PackSourceForReplacement(TemplateFunctionBodyClone* clone,
 /* Visitor for the special case of a pack used in a non-expansion context where
  * exactly one element is expected (e.g. a single-element pack): substitute the
  * identifier's template arguments and bind to the concrete instantiation. */
-static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
+static bool ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
                                                       int child_id,
                                                       VisitorMode mode) {
   (void)child_id;
@@ -2374,11 +2394,11 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
         !ClonePatternReferencesUnresolvedPack(clone, node)) {
       node->flags &= ~kASTPackExpansion;
     }
-    return;
+    return true;
   }
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->template_arguments != NULL &&
@@ -2535,6 +2555,7 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
       }
     }
   }
+  return true;
 }
 
 /* Produce one expanded copy of a pack-expansion `pattern` for element
@@ -2544,21 +2565,22 @@ static void ReplaceSingleElementPackIdentifierVisitor(ASTNode* node, void* data,
 /* Deep-copy cast_type on every cast in a pack-expansion pattern clone so each
  * element can substitute its own pack-dependent cast type without mutating the
  * shared TypeRecord that ASTNodeClone only IncRefs. */
-static void DetachClonedPackExpansionCastTypes(ASTNode* node, void* data,
+static bool DetachClonedPackExpansionCastTypes(ASTNode* node, void* data,
                                                int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || node->op != AST_OP(cast)) {
-    return;
+    return true;
   }
   CastASTNode* cast = (CastASTNode*)node;
   if (cast->cast_type == NULL) {
-    return;
+    return true;
   }
   TypeRecord* copy = TypeRecordCopy(cast->cast_type);
   TypeRecordDelete(cast->cast_type);
   cast->cast_type = copy;
   TypeRecordIncRef(cast->cast_type);
+  return true;
 }
 
 static ASTNode* ClonePackExpansionPattern(TemplateFunctionBodyClone* clone,
@@ -2706,7 +2728,7 @@ typedef struct {
 /* Visitor: rewrite a `closure.field`/`closure->field` access naming a captured
  * pack to the synthetic per-element field, fixing the member, offset, and node
  * type (and the parent dereference's type). */
-static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
+static bool ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
                                                  int child_id,
                                                  VisitorMode mode) {
   (void)child_id;
@@ -2714,7 +2736,7 @@ static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
     node->flags &= ~kASTPackExpansion;
   }
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   ReplaceLambdaCapturePackFieldData* replace = data;
   // `std::forward<Args>(args)...` also takes this element of `Args`.
@@ -2729,34 +2751,35 @@ static void ReplaceLambdaCapturePackFieldVisitor(ASTNode* node, void* data,
   }
   ASTNode* access_node = LambdaCapturePackMemberAccess(node);
   if (access_node != node) {
-    return;
+    return true;
   }
   BinaryASTNode* access = (BinaryASTNode*)access_node;
   if (access->right->op == AST_OP(string)) {
     ConstantASTNode* name = (ConstantASTNode*)access->right;
     if (name->value.string == NULL ||
         strcmp(name->value.string->value, replace->from_name) != 0) {
-      return;
+      return true;
     }
     StringSet(name->value.string, replace->to->symbol->name.value);
   } else if (access->right->op == AST_OP(structmember)) {
     StructMemberASTNode* member = (StructMemberASTNode*)access->right;
     if (member->member == NULL || member->member->symbol == NULL ||
         strcmp(member->member->symbol->name.value, replace->from_name) != 0) {
-      return;
+      return true;
     }
     member->member = replace->to;
     member->access = replace->to->access;
     member->byte_offset = replace->to->byte_offset;
     ASTNodeSetType(access->right, replace->to->symbol->type);
   } else {
-    return;
+    return true;
   }
   ASTNodeSetType(node, replace->to->symbol->type);
   if (node->parent != NULL && node->parent->op == AST_OP(contents) &&
       TypeIsPointer(replace->to->symbol->type)) {
     ASTNodeSetType(node->parent, replace->to->symbol->type->next);
   }
+  return true;
 }
 
 /* Produce one expanded copy of a pattern that references a captured pack field,
@@ -3499,7 +3522,7 @@ static void RebindClonedLoweredDependentMemberCall(VectorASTNode* call) {
                                              member->symbol);
 }
 
-static void RebindClonedLoweredDependentMemberCallVisitor(
+static bool RebindClonedLoweredDependentMemberCallVisitor(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
@@ -3513,6 +3536,7 @@ static void RebindClonedLoweredDependentMemberCallVisitor(
     }
     RebindClonedLoweredDependentMemberCall((VectorASTNode*)node);
   }
+  return true;
 }
 
 static void RestoreClonedInlineReferenceActualTypes(VectorASTNode* call) {
@@ -4132,11 +4156,11 @@ static void AddFoldTemplateArgumentPack(FoldPackSearch* search, int pack_index,
                      argument->pack_arguments, pack_length, false);
 }
 
-static void FindFoldPacks(ASTNode* node, void* data, int child_id,
+static bool FindFoldPacks(ASTNode* node, void* data, int child_id,
                           VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   FoldPackSearch* search = data;
   // `(f<N>(sizeof(T)), 0)...` names the type pack only through the operand.
@@ -4159,7 +4183,7 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
       if (replacements != NULL) {
         AddFoldPackBinding(search, kFoldPackFunction, id->symbol, -1, NULL,
                            replacements, replacements->length, false);
-        return;
+        return true;
       }
       TemplateArgument* argument =
           ConcreteTemplateArgumentPack(search->clone, id->symbol);
@@ -4168,10 +4192,10 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
                            id->symbol->template_parameter_index, NULL,
                            argument->pack_arguments,
                            argument->pack_arguments->length, false);
-        return;
+        return true;
       }
       search->unresolved_pack = true;
-      return;
+      return true;
     }
   }
   Vector* template_arguments = NULL;
@@ -4193,6 +4217,7 @@ static void FindFoldPacks(ASTNode* node, void* data, int child_id,
       AddFoldTemplateArgumentPack(search, pack_index, pack_length);
     }
   }
+  return true;
 }
 
 static void CollectFoldPacks(TemplateFunctionBodyClone* clone, ASTNode* pattern,
@@ -4959,13 +4984,13 @@ static Symbol* FindClonedLocalSymbolByDeclarationIdentity(
 static void SubstituteForcedIdentifierType(TemplateFunctionBodyClone* clone,
                                            ASTNode* node);
 
-static void RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
+static bool RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   TemplateFunctionBodyClone* clone = data;
   IdentifierASTNode* id = (IdentifierASTNode*)node;
@@ -5018,6 +5043,7 @@ static void RebindClonedLocalIdentifierVisitor(ASTNode* node, void* data,
       SubstituteForcedIdentifierType(clone, node);
     }
   }
+  return true;
 }
 
 /* True when a cloned `this->Base::member` names a member of some other
@@ -5205,12 +5231,13 @@ static void RebindClonedConcreteMemberAccess(
   }
 }
 
-static void RebindClonedConcreteMemberAccessVisitor(
+static bool RebindClonedConcreteMemberAccessVisitor(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPostChildren) {
     RebindClonedConcreteMemberAccess(data, node);
   }
+  return true;
 }
 
 static bool TemplateArgumentsHaveDependentExpression(Vector* args) {
@@ -5751,17 +5778,18 @@ static bool NodeNamesUnvaluedClonedBodySymbol(ASTNode* node, void* data) {
   return replacement != NULL && !replacement->flags.value_set;
 }
 
-static void RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
+static bool RewriteClonedBodySymbolVisitor(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   Symbol* replacement = ClonedBodySymbolFor(node, data);
   if (replacement != NULL) {
     ((IdentifierASTNode*)node)->symbol = replacement;
     ASTNodeSetType(node, replacement->type);
   }
+  return true;
 }
 
 // `Arr<n>::size` where `n` is a constant local of this body, or a static
@@ -5841,28 +5869,29 @@ typedef struct {
   Vector* seeded;
 } SeedEnclosingFormalsData;
 
-static void SeedEnclosingFormalVisitor(ASTNode* node, void* data,
+static bool SeedEnclosingFormalVisitor(ASTNode* node, void* data,
                                        int child_id, VisitorMode mode) {
   (void)child_id;
   SeedEnclosingFormalsData* seed = data;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol == NULL || !symbol->flags.is_argument ||
       MapFindPointerKey(&seed->clone->symbol_map, symbol) != NULL) {
-    return;
+    return true;
   }
   Symbol* instantiated = EnclosingInstantiatedFormal(seed->owner, symbol);
   if (instantiated == NULL) {
-    return;
+    return true;
   }
   MapKeyValue kv;
   kv.key.p = symbol;
   kv.value.p = instantiated;
   MapInsert(&seed->clone->symbol_map, kv);
   VectorAppend(seed->seeded, symbol);
+  return true;
 }
 
 /* Map the enclosing functions' parameters that the unevaluated `operand`
@@ -8463,16 +8492,16 @@ static void RewriteDeferredConstructorMemberName(VectorASTNode* call) {
   StringSet(member_name->value.string, constructor_name);
 }
 
-static void UndeducedAutoVisitor(ASTNode* node, void* data, int child_id,
+static bool UndeducedAutoVisitor(ASTNode* node, void* data, int child_id,
                                  VisitorMode mode) {
   bool* found = data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || found == NULL || *found) {
-    return;
+    return data == NULL || !*(bool*)data;
   }
   if (node->type != NULL && TypeContainsAuto(node->type)) {
     *found = true;
-    return;
+    return data == NULL || !*(bool*)data;
   }
   if (node->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
@@ -8481,6 +8510,7 @@ static void UndeducedAutoVisitor(ASTNode* node, void* data, int child_id,
       *found = true;
     }
   }
+  return data == NULL || !*(bool*)data;
 }
 
 static bool ExpressionContainsUndeducedAuto(ASTNode* node) {
@@ -10097,21 +10127,21 @@ static ASTNode* ReanalyzeClonedUntypedExpression(
   return analyzed;
 }
 
-static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
+static bool DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
                                          int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(vardecl)) {
-    return;
+    return true;
   }
   VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
   if (decl->symbol == NULL || !TypeContainsAuto(decl->symbol->type) ||
       decl->initializer == NULL) {
-    return;
+    return true;
   }
   if (ASTNodeAny(decl->initializer, NodeIsLambdaWithDependentCapture, NULL)) {
-    return;
+    return true;
   }
   // Earlier clone passes re-analyze the initializer (for example a call whose
   // pack has just been expanded) and mark it analyzed while the variable is
@@ -10120,6 +10150,7 @@ static void DeduceClonedAutoLocalVisitor(ASTNode* node, void* data,
   ASTNodeVisit(decl->initializer, ClearAnalyzedFlagVisitor, 0, NULL);
   node->flags &= ~kASTAnalyzed;
   AnalyzeStatement(node);
+  return true;
 }
 
 /* `decltype(auto_var)` stays opaque while `auto_var` is undeduced.  After
@@ -10181,23 +10212,24 @@ static bool TypeContainsDependentDecltype(TypeRecord* type, Vector* seen) {
   return false;
 }
 
-static void RemapAutoDecltypeIdentifier(ASTNode* node, void* data,
+static bool RemapAutoDecltypeIdentifier(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL) {
-    return;
+    return true;
   }
   Symbol* replacement = MapFindPointerKey((Map*)data, id->symbol);
   if (replacement == NULL || replacement->type == NULL ||
       TypeContainsAuto(replacement->type)) {
-    return;
+    return true;
   }
   id->symbol = replacement;
+  return true;
 }
 
 static void RemapAutoDecltypeSymbols(TypeRecord* type, Map* symbol_map,
@@ -10330,11 +10362,11 @@ static void InstallResolvedAutoDecltype(TemplateFunctionBodyClone* clone,
   TypeRecordIncRef(resolved);
 }
 
-static void ResolveClonedAutoDecltypeVisitor(ASTNode* node, void* data,
+static bool ResolveClonedAutoDecltypeVisitor(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   TemplateFunctionBodyClone* clone = data;
   if (node->op == AST_OP(vardecl)) {
@@ -10352,6 +10384,7 @@ static void ResolveClonedAutoDecltypeVisitor(ASTNode* node, void* data,
     InstallResolvedAutoDecltype(clone, &node->type);
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 typedef struct {
@@ -10495,14 +10528,14 @@ static ASTNode* ReanalyzeDeferredStructuredBindingCondition(
   return node;
 }
 
-static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
+static bool RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   if (symbol != NULL && symbol->type != NULL &&
@@ -10511,9 +10544,10 @@ static void RefreshClonedIdentifierTypeVisitor(ASTNode* node, void* data,
     ASTNodeSetType(node, symbol->type);
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
-static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
+static bool RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)data;
@@ -10521,17 +10555,17 @@ static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
   if (mode != kVisitPostChildren || node == NULL ||
       node->op != AST_OP(cast) ||
       (node->flags & kASTCXXNewExpression) == 0) {
-    return;
+    return true;
   }
   CastASTNode* cast = (CastASTNode*)node;
   if (cast->expr == NULL || cast->expr->op != AST_OP(call)) {
-    return;
+    return true;
   }
   VectorASTNode* allocation = (VectorASTNode*)cast->expr;
   if (allocation->children == NULL || allocation->children->length != 2 ||
       allocation->children->value.p[1] == NULL) {
     node->flags &= ~kASTCXXPlacementNew;
-    return;
+    return true;
   }
   ASTNode* placement = allocation->children->value.p[1];
   if (TypeIsPointer(placement->type)) {
@@ -10539,6 +10573,7 @@ static void RefreshClonedCXXNewMetadataVisitor(ASTNode* node, void* data,
   } else {
     node->flags &= ~kASTCXXPlacementNew;
   }
+  return true;
 }
 
 typedef struct {
@@ -10554,7 +10589,7 @@ static bool NodeIsDirectlyInStmtExpr(ASTNode* node, ASTNode* root) {
   return false;
 }
 
-static void FindClonedNewCastVisitor(ASTNode* node, void* data, int child_id,
+static bool FindClonedNewCastVisitor(ASTNode* node, void* data, int child_id,
                                      VisitorMode mode) {
   (void)child_id;
   ClonedNewDeallocationRebind* rebind = data;
@@ -10562,9 +10597,10 @@ static void FindClonedNewCastVisitor(ASTNode* node, void* data, int child_id,
       node->op != AST_OP(cast) ||
       (node->flags & kASTCXXNewExpression) == 0 ||
       !NodeIsDirectlyInStmtExpr(node, rebind->root)) {
-    return;
+    return true;
   }
   rebind->new_cast = (CastASTNode*)node;
+  return true;
 }
 
 static bool NodeIsInCleanupOnlyStatement(ASTNode* node, ASTNode* root) {
@@ -10574,7 +10610,7 @@ static bool NodeIsInCleanupOnlyStatement(ASTNode* node, ASTNode* root) {
   return false;
 }
 
-static void RebindClonedCleanupDeallocationVisitor(ASTNode* node, void* data,
+static bool RebindClonedCleanupDeallocationVisitor(ASTNode* node, void* data,
                                                    int child_id,
                                                    VisitorMode mode) {
   (void)child_id;
@@ -10582,39 +10618,40 @@ static void RebindClonedCleanupDeallocationVisitor(ASTNode* node, void* data,
   if (mode != kVisitPreChildren || node->op != AST_OP(call) ||
       !NodeIsDirectlyInStmtExpr(node, rebind->root) ||
       !NodeIsInCleanupOnlyStatement(node, rebind->root)) {
-    return;
+    return true;
   }
   VectorASTNode* call = (VectorASTNode*)node;
   if (call->left == NULL || call->left->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* callee = (IdentifierASTNode*)call->left;
   if (callee->symbol == NULL || callee->symbol->name.value == NULL) {
-    return;
+    return true;
   }
   const char* name = callee->symbol->name.value;
   if (strcmp(name, "operator delete") != 0 &&
       strcmp(name, "operator delete[]") != 0) {
-    return;
+    return true;
   }
   Symbol* member = CXXClassUsualAllocationFunction(
       rebind->new_cast->cast_type->next, name);
   if (member != NULL) {
     callee->symbol = member;
   }
+  return true;
 }
 
 // A new-expression whose allocated type was dependent frees its storage on
 // throw with a deallocation function chosen before T was known.  Once the
 // allocation resolved to the class's own operator new, use the class's
 // operator delete to match.
-static void RebindClonedNewDeallocationVisitor(ASTNode* node, void* data,
+static bool RebindClonedNewDeallocationVisitor(ASTNode* node, void* data,
                                                int child_id,
                                                VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPostChildren || node->op != AST_OP(stmt_expr)) {
-    return;
+    return true;
   }
   ClonedNewDeallocationRebind rebind = {node, NULL};
   ASTNodeVisit(node, FindClonedNewCastVisitor, 0, &rebind);
@@ -10623,11 +10660,11 @@ static void RebindClonedNewDeallocationVisitor(ASTNode* node, void* data,
       !TypeIsPointer(rebind.new_cast->cast_type) ||
       rebind.new_cast->expr == NULL ||
       rebind.new_cast->expr->op != AST_OP(call)) {
-    return;
+    return true;
   }
   VectorASTNode* allocation = (VectorASTNode*)rebind.new_cast->expr;
   if (allocation->left == NULL || allocation->left->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   Symbol* allocator = ((IdentifierASTNode*)allocation->left)->symbol;
   bool is_array = (rebind.new_cast->base.flags & kASTCXXArrayNew) != 0;
@@ -10635,12 +10672,13 @@ static void RebindClonedNewDeallocationVisitor(ASTNode* node, void* data,
       allocator != CXXClassUsualAllocationFunction(
                        rebind.new_cast->cast_type->next,
                        is_array ? "operator new[]" : "operator new")) {
-    return;
+    return true;
   }
   ASTNodeVisit(node, RebindClonedCleanupDeallocationVisitor, 0, &rebind);
+  return true;
 }
 
-static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
+static bool RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)data;
@@ -10649,7 +10687,7 @@ static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
       node->op != AST_OP(designated_init) || node->parent == NULL ||
       node->parent->op != AST_OP(braced_init) ||
       !TypeIsStructOrUnion(node->parent->type)) {
-    return;
+    return true;
   }
   DesignatedInitializerASTNode* initializer =
       (DesignatedInitializerASTNode*)node;
@@ -10698,6 +10736,7 @@ static void RebindClonedDesignatorMemberVisitor(ASTNode* node, void* data,
     designator->value.struct_member = concrete;
     aggregate_type = concrete->symbol->type;
   }
+  return true;
 }
 
 /* Clone the body of function template `from` into the concrete instantiation
@@ -11378,11 +11417,11 @@ static void NoteTypeTemplateParameterIndices(TypeRecord* type, int* max_index,
  * inside a member function template is numbered after the enclosing class
  * (`T` at 0, the member's `K` at 1).  Cloning it with only the class arguments
  * leaves `K` unsubstituted. */
-static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
+static bool NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   int* max_index = data;
   // A function template named by a call in the body (`Get(c)`) is typed with
@@ -11412,7 +11451,7 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
         ((SizeofASTNode*)node)->type_operand, max_index, 0);
   }
   if (node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol != NULL) {
@@ -11427,7 +11466,7 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
     }
   }
   if (id->template_arguments == NULL) {
-    return;
+    return true;
   }
   for (size_t i = 0; i < id->template_arguments->length; i++) {
     TemplateArgument* arg = id->template_arguments->value.p[i];
@@ -11437,6 +11476,7 @@ static void NoteBodyTemplateParameterIndex(ASTNode* node, void* data,
     NoteTemplateParameterIndex(arg->template_parameter_index, max_index);
     NoteTypeTemplateParameterIndices(arg->type, max_index, 0);
   }
+  return true;
 }
 
 static int MaxTemplateParameterIndexInFunctionBody(ASTNode* body) {
@@ -12203,21 +12243,21 @@ static bool TemplateArgumentListMentionsUnspecializedNestedClass(Vector* args,
  * the class template (`Outer<int>::State::Rcvr`) after `State<R>` has been
  * instantiated.  The specialization's nested class is a different type, so
  * point the name at that class before the initializer is analyzed again. */
-static void RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
+static bool RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
                                                      int child_id,
                                                      VisitorMode mode) {
   (void)child_id;
   TemplateFunctionBodyClone* clone = data;
   if (mode != kVisitPreChildren || node == NULL || clone == NULL ||
       clone->to_owner == NULL || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   IdentifierASTNode* id = (IdentifierASTNode*)node;
   if (id->symbol == NULL || id->symbol->type == NULL ||
       !TypeIsStructOrUnion(id->symbol->type) ||
       id->symbol->type->info.struct_info == NULL ||
       id->symbol->type->info.struct_info->tag_name == NULL) {
-    return;
+    return true;
   }
   Struct* nested = id->symbol->type->info.struct_info;
   StructMember* member = FindStructMemberByName(clone->to_owner,
@@ -12226,7 +12266,7 @@ static void RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
       member->symbol->type == NULL ||
       !TypeIsStructOrUnion(member->symbol->type) ||
       member->symbol->type->info.struct_info == NULL) {
-    return;
+    return true;
   }
   Struct* target = member->symbol->type->info.struct_info;
   if (nested == target) {
@@ -12238,7 +12278,7 @@ static void RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
       ASTNodeSetType(node, refreshed->type);
       node->flags &= ~kASTAnalyzed;
     }
-    return;
+    return true;
   }
   // Only a nested class of this instantiation's pattern. A same-named class
   // nested in a sibling template is a different type.
@@ -12268,22 +12308,23 @@ static void RetargetConstructorNestedClassIdentifier(ASTNode* node, void* data,
     }
   }
   if (!same_pattern) {
-    return;
+    return true;
   }
   Symbol* replacement =
       target->tag_symbol != NULL ? target->tag_symbol : member->symbol;
   id->symbol = replacement;
   ASTNodeSetType(node, replacement->type);
   node->flags &= ~kASTAnalyzed;
+  return true;
 }
 
-static void RebindMemberCallInstantiatedOnUnspecializedNestedClass(
+static bool RebindMemberCallInstantiatedOnUnspecializedNestedClass(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(structmember) || node->parent == NULL) {
-    return;
+    return true;
   }
   ASTNode* owner_expr = node->parent;
   ASTNode* call = owner_expr;
@@ -12292,26 +12333,26 @@ static void RebindMemberCallInstantiatedOnUnspecializedNestedClass(
   }
   if (call == NULL || call->op != AST_OP(call) ||
       ((VectorASTNode*)call)->left != owner_expr) {
-    return;
+    return true;
   }
   StructMemberASTNode* member_node = (StructMemberASTNode*)node;
   Symbol* symbol =
       member_node->member != NULL ? member_node->member->symbol : NULL;
   if (symbol == NULL || symbol->type == NULL || !TypeIsFunction(symbol->type)) {
-    return;
+    return true;
   }
   Symbol* origin = symbol->type->info.function.template_origin;
   if (origin == NULL || origin->type == NULL || !TypeIsFunction(origin->type) ||
       !origin->flags.is_template) {
-    return;
+    return true;
   }
   if (!TemplateArgumentListMentionsUnspecializedNestedClass(
           symbol->type->template_arguments, 0)) {
-    return;
+    return true;
   }
   Struct* owner = origin->type->info.function.cxx_member_owner;
   if (owner == NULL) {
-    return;
+    return true;
   }
   StructMember* found = NULL;
   for (StructMember* candidate = FindStructMember(owner, &origin->name);
@@ -12322,7 +12363,7 @@ static void RebindMemberCallInstantiatedOnUnspecializedNestedClass(
     }
   }
   if (found == NULL) {
-    return;
+    return true;
   }
   StructMemberASTNodeSetMember(member_node, found);
   if (member_node->template_arguments != NULL) {
@@ -12340,6 +12381,7 @@ static void RebindMemberCallInstantiatedOnUnspecializedNestedClass(
   }
   ASTNodeClearType(call);
   call->flags &= ~(kASTAnalyzed | kASTDependentFunctorCall);
+  return true;
 }
 
 static void AnalyzeInsertedConstructorPreamble(TypeParser* parser,

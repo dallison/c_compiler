@@ -1912,18 +1912,19 @@ static void GenerateVLASizeExpressions(Generator* gen, Vector* prototype) {
   }
 }
 
-static void ResetASTIRLabel(ASTNode* node, void* data, int child_id,
+static bool ResetASTIRLabel(ASTNode* node, void* data, int child_id,
                             VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(label)) {
     ((LabelASTNode*)node)->label = NULL;
   } else if (node->op == AST_OP(case)) {
     ((CaseLabelASTNode*)node)->label = NULL;
   }
+  return true;
 }
 
 bool TypeUsesNativeVectorABI(TypeRecord* type) {

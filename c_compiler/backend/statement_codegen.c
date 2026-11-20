@@ -892,19 +892,20 @@ static Symbol* CleanupReceiverSymbol(ASTNode* dtor_stmt) {
 // Visitor that flags whether a subtree can raise an exception: only a `throw`
 // or a call (which may itself throw) can do so.  Used to decide whether a
 // noexcept function needs a runtime terminate guard at all.
-static void NoexceptMightThrowVisitor(ASTNode* node, void* data, int child_id,
+static bool NoexceptMightThrowVisitor(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !*(bool*)data;
   }
   bool* might_throw = data;
   if (*might_throw) {
-    return;
+    return false;
   }
   if (node->op == AST_OP(throw) || ASTIsCallNode(node)) {
     *might_throw = true;
   }
+  return !*(bool*)data;
 }
 
 static bool FunctionBodyMightThrow(ASTNode* body) {

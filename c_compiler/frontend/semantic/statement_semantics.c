@@ -26,7 +26,7 @@
 #include "constexpr.h"
 #include "debug.h"
 
-static void ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode);
 
 static ASTNode* StatementPruneConstexprIf(ASTNode* node, void* data,
@@ -97,13 +97,14 @@ static ASTNode* StaticAssertIdentityClone(ASTNode* node, void* data) {
   return node;
 }
 
-static void ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearStaticAssertAnalysis(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static bool ExpressionHasSideEffects(ASTNode* node) {
@@ -437,14 +438,14 @@ static bool CXXNodeIsWithinTemporaryCleanup(ASTNode* node) {
 
 // Record the receiver of every destructor call the expression already makes, so
 // CollectCXXTemporarySymbols can leave those temporaries alone.
-static void CollectCXXDestroyedTemporarySymbols(ASTNode* node, void* data,
+static bool CollectCXXDestroyedTemporarySymbols(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier) ||
       !CXXNodeIsWithinTemporaryCleanup(node)) {
-    return;
+    return true;
   }
   CXXTemporaryCollection* collection = data;
   Symbol* sym = ((IdentifierASTNode*)node)->symbol;
@@ -452,6 +453,7 @@ static void CollectCXXDestroyedTemporarySymbols(ASTNode* node, void* data,
       !VectorContainsPointer(&collection->already_destroyed, sym)) {
     VectorAppend(&collection->already_destroyed, sym);
   }
+  return true;
 }
 
 // A prvalue class conditional constructs each in-place arm directly into the
@@ -524,12 +526,12 @@ static void ElidePrvalueConditionalArmTemporaries(
   }
 }
 
-static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
+static bool CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       CXXNodeIsWithinTemporaryCleanup(node)) {
-    return;
+    return true;
   }
   CXXTemporaryCollection* collection = data;
   ElidePrvalueConditionalArmTemporaries(node, collection);
@@ -538,7 +540,7 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
       ((ThrowASTNode*)node)->expr->value_category == kValueCategoryPrvalue) {
     CollectCXXResultTemporaries(((ThrowASTNode*)node)->expr,
                                 &collection->elided);
-    return;
+    return true;
   }
   Symbol* sym = NULL;
   if (node->op == AST_OP(identifier)) {
@@ -546,18 +548,18 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
         child_id == 0 &&
         CXXCompoundLiteralWrapsConstructedTemporary(
             (CompoundLiteralASTNode*)node->parent)) {
-      return;
+      return true;
     }
     sym = ((IdentifierASTNode*)node)->symbol;
     if (sym != NULL && CXXTemporaryIsElidedByDirectInitialization(node, sym)) {
-      return;
+      return true;
     }
     // An inner temporary that a compound literal elides into its own storage is
     // never a live object; destroying it would run a destructor on
     // uninitialized storage.  The enclosing compound literal's temporary is
     // destroyed instead (collected below when the compound literal is visited).
     if (sym != NULL && VectorContainsPointer(&collection->elided, sym)) {
-      return;
+      return true;
     }
   } else if (node->op == AST_OP(compound_literal)) {
     CompoundLiteralASTNode* literal = (CompoundLiteralASTNode*)node;
@@ -571,7 +573,7 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
           VectorAppend(&collection->elided, elided);
         }
       }
-      return;
+      return true;
     }
     // A compound literal that only wraps the construction of an inner temporary
     // does not own storage of its own -- unless the backend elides the
@@ -580,7 +582,7 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
     // destroyed and the inner source temporary must be skipped.
     if (CXXCompoundLiteralWrapsConstructedTemporary(literal)) {
       if (!CXXCompoundLiteralElidesIntoOwnStorage(literal)) {
-        return;
+        return true;
       }
       Symbol* source = CXXTemporaryConstructionResultSymbol(
           CXXSingleExpressionInitializer(literal->initializer));
@@ -592,14 +594,14 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
       sym = ((IdentifierASTNode*)literal->sym)->symbol;
     }
     if (sym != NULL && VectorContainsPointer(&collection->elided, sym)) {
-      return;
+      return true;
     }
   } else {
-    return;
+    return true;
   }
   if (CXXTemporaryNeedsDestructor(sym)) {
     if (VectorContainsPointer(&collection->already_destroyed, sym)) {
-      return;
+      return true;
     }
     // A by-value parameter object is destroyed by the caller at the end of
     // the full-expression, like any other temporary.
@@ -614,6 +616,7 @@ static void CollectCXXTemporarySymbols(ASTNode* node, void* data, int child_id,
       }
     }
   }
+  return true;
 }
 
 // The temporary whose construction `node` completes: a compound literal, an
@@ -655,18 +658,19 @@ typedef struct {
   Vector constructed;  // Symbol*, in the order their constructions complete.
 } CXXConstructionOrder;
 
-static void CollectCXXConstructionOrder(ASTNode* node, void* data,
+static bool CollectCXXConstructionOrder(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL ||
       CXXNodeIsWithinTemporaryCleanup(node)) {
-    return;
+    return true;
   }
   CXXConstructionOrder* order = data;
   Symbol* sym = CXXTemporaryConstructedBy(node);
   if (sym != NULL && !VectorContainsPointer(&order->constructed, sym)) {
     VectorAppend(&order->constructed, sym);
   }
+  return true;
 }
 
 // The pre-order walk that collects temporaries meets an outer temporary
@@ -1354,26 +1358,27 @@ static void ProcessGotoJump(GotoStatementASTNode* go) {
   ASTNodeReplaceChild(jump_parent, child_id, compound, false);
 }
 
-static void CollectJumpStatements(ASTNode* node, void* data, int child_id,
+static bool CollectJumpStatements(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(return) || node->op == AST_OP(break) ||
       node->op == AST_OP(continue) || node->op == AST_OP(goto)) {
     VectorAppend((Vector*)data, node);
   }
+  return true;
 }
 
-static void RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
+static bool RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
                                                   int child_id,
                                                   VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL ||
       node->op != AST_OP(compound)) {
-    return;
+    return true;
   }
   CompoundStatementASTNode* compound = (CompoundStatementASTNode*)node;
   for (size_t i = compound->statements->length; i > 0; i--) {
@@ -1413,6 +1418,7 @@ static void RebuildCompoundFallthroughDestructors(ASTNode* node, void* data,
     statement->parent = node;
     statement->child_id = (int)i;
   }
+  return true;
 }
 
 // Inserts scope-exit destructor calls for automatic objects at every
@@ -1447,19 +1453,20 @@ typedef struct {
   ASTNode* found;
 } InlinedReceiverSearch;
 
-static void FindInlinedReceiverAddress(ASTNode* node, void* data,
+static bool FindInlinedReceiverAddress(ASTNode* node, void* data,
                                        int child_id, VisitorMode mode) {
   (void)child_id;
   InlinedReceiverSearch* search = data;
   if (mode != kVisitPreChildren || search->found != NULL ||
       node->op != AST_OP(address)) {
-    return;
+    return ((InlinedReceiverSearch*)data)->found == NULL;
   }
   ASTNode* sub = ((UnaryASTNode*)node)->sub;
   if (sub != NULL && sub->op == AST_OP(identifier) &&
       ((IdentifierASTNode*)sub)->symbol == search->temporary) {
     search->found = node;
   }
+  return ((InlinedReceiverSearch*)data)->found == NULL;
 }
 
 // `inner` is an inlined constructor of `temporary`; retarget its `this`
@@ -1815,15 +1822,15 @@ typedef struct {
   ASTNode* label;
 } AsmLabelFinder;
 
-static void FindAsmLabel(ASTNode* node, void* data, int child_id,
+static bool FindAsmLabel(ASTNode* node, void* data, int child_id,
                          VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return ((AsmLabelFinder*)data)->label == NULL;
   }
   AsmLabelFinder* finder = data;
   if (finder->label != NULL) {
-    return;
+    return false;
   }
   if (node->op == AST_OP(label)) {
     LabelASTNode* label = (LabelASTNode*)node;
@@ -1831,6 +1838,7 @@ static void FindAsmLabel(ASTNode* node, void* data, int child_id,
       finder->label = node;
     }
   }
+  return ((AsmLabelFinder*)data)->label == NULL;
 }
 
 static void AnalyzeAsmStatement(AsmASTNode* node) {
@@ -1909,12 +1917,12 @@ static bool CXXGenericLambdaCallOperatorHasConcreteFormals(void) {
   return true;
 }
 
-static void ReopenStaleIfConstexprAnalysis(ASTNode* node, void* data, int child_id,
+static bool ReopenStaleIfConstexprAnalysis(ASTNode* node, void* data, int child_id,
                                            VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(if)) {
     IfStatementASTNode* if_node = (IfStatementASTNode*)node;
@@ -1929,6 +1937,7 @@ static void ReopenStaleIfConstexprAnalysis(ASTNode* node, void* data, int child_
   if (node->op == AST_OP(for) && (node->flags & kASTAnalyzed) != 0) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static void AnalyzeIfStatement(IfStatementASTNode* node) {
@@ -2089,7 +2098,7 @@ static void CheckJumpBypassedDeclarations(ASTNode* target, ASTNode* jump,
 // Check for duplicate case labels and defaults in statement.
 // Also fill in the 'cases' vector in the switch statement AST node
 // and the default_node if present.
-static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
+static bool ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   SwitchResolver* resolver = data;
   SwitchStatementASTNode* switch_node = resolver->switch_node;
@@ -2106,7 +2115,7 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
   
   // If we are in a nested switch statememnt stop here.
   if (resolver->switch_level > 1) {
-    return;
+    return true;
   }
   
   if (mode == kVisitPreChildren && node->op == AST_OP(case)) {
@@ -2118,7 +2127,7 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
          SemanticError(node, "Duplicate default in switch statement");
        }
        switch_node->default_node = case_node;
-       return;
+       return true;
      }
 
      // Convert the case expression to the type of the switch controlling
@@ -2139,6 +2148,7 @@ static void ResolveSwitchStatement(ASTNode* node, void* data, int child_id,
      }
      VectorAppend(&switch_node->cases, node);
    }
+  return true;
 }
 
 // Look at all the cases for the switch and determine what integer type
@@ -2695,7 +2705,7 @@ static bool DeduceCurrentFunctionAutoReturn(ASTNode* return_value,
   return true;
 }
 
-static void CollectValueReturns(ASTNode* node, void* data, int child_id,
+static bool CollectValueReturns(ASTNode* node, void* data, int child_id,
                                 VisitorMode mode) {
   (void)child_id;
   (void)mode;
@@ -2703,20 +2713,22 @@ static void CollectValueReturns(ASTNode* node, void* data, int child_id,
       ((CombinedStatementASTNode*)node)->cond != NULL) {
     VectorAppend((Vector*)data, node);
   }
+  return true;
 }
 
-static void ResetStaleDependentReturnExpression(ASTNode* node, void* data,
+static bool ResetStaleDependentReturnExpression(ASTNode* node, void* data,
                                                 int child_id,
                                                 VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   if (node->type == NULL || TypeIsUnknown(node->type) ||
       (node->flags & kASTDependentFunctorCall) != 0) {
     node->flags &= ~(kASTAnalyzed | kASTDependentFunctorCall);
   }
+  return true;
 }
 
 void StatementFinishAutoReturnDeduction(TypeRecord* func,
@@ -2910,11 +2922,11 @@ typedef struct {
   Vector declarations;  // VariableDeclarationASTNode* of NRVO candidates.
 } NamedReturnSearch;
 
-static void CollectNamedReturnUses(ASTNode* node, void* data, int child_id,
+static bool CollectNamedReturnUses(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   NamedReturnSearch* search = data;
   if (node->op == AST_OP(return) &&
@@ -2926,6 +2938,7 @@ static void CollectNamedReturnUses(ASTNode* node, void* data, int child_id,
       VectorAppend(&search->declarations, node);
     }
   }
+  return true;
 }
 
 static Symbol* NamedReturnObject(ASTNode* ret) {
@@ -4078,14 +4091,14 @@ void AnalyzeDeclarationList(DeclarationListASTNode* node) {
   }
 }
 
-static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+static bool FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   GotoStatementASTNode* goto_node = data;
   if (mode != kVisitPreChildren) {
-    return;
+    return ((GotoStatementASTNode*)data)->label == NULL;
   }
   if (goto_node->label != NULL) {
     // Already found, nothing to do.
-    return;
+    return false;
   }
   if (node->op == AST_OP(label)) {
     LabelASTNode* label = (LabelASTNode*)node;
@@ -4093,6 +4106,7 @@ static void FindLabel(ASTNode* node, void* data, int child_id, VisitorMode mode)
       goto_node->label = node;
     }
   }
+  return ((GotoStatementASTNode*)data)->label == NULL;
 }
 
 static bool DeclarationHasAutomaticStorage(VariableDeclarationASTNode* decl) {
@@ -4275,11 +4289,11 @@ typedef struct {
   bool found;
 } DuplicateLabelFinder;
 
-static void FindDuplicateLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+static bool FindDuplicateLabel(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   DuplicateLabelFinder* finder = data;
 
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(label)) {
     LabelASTNode* label = (LabelASTNode*)node;
@@ -4291,6 +4305,7 @@ static void FindDuplicateLabel(ASTNode* node, void* data, int child_id, VisitorM
       finder->found = true;
     }
   }
+  return true;
 }
 
 void AnalyzeLabel(LabelASTNode* node) {
@@ -4343,18 +4358,19 @@ static void AnalyzeTryStatement(TryASTNode* node) {
   }
 }
 
-static void FindUnusedLabel(ASTNode* node, void* data, int child_id,
+static bool FindUnusedLabel(ASTNode* node, void* data, int child_id,
                             VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode != kVisitPreChildren || node->op != AST_OP(label)) {
-    return;
+    return true;
   }
   LabelASTNode* label = (LabelASTNode*)node;
   if (!label->named && (node->flags & kASTLabelUsed) == 0) {
     SemanticWarning(node, "unused-label", "label '%s' defined but not used",
                     label->name.value);
   }
+  return true;
 }
 
 void CheckUnusedLabels(ASTNode* body) {
@@ -4470,13 +4486,13 @@ static bool ConstexprBodyNodeIsExempt(ASTNode* node) {
   return SemanticNodeIsCompilerGenerated(node);
 }
 
-static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
+static bool AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   ConstexprBodyAudit* audit = data;
   if (mode != kVisitPreChildren || audit->reported || node == NULL ||
       ConstexprBodyNodeIsExempt(node)) {
-    return;
+    return true;
   }
   bool cxx11 = !CompilerCXXAtLeast(kLanguageStandardCXX14);
   bool before_cxx20 = !CompilerCXXAtLeast(kLanguageStandardCXX20);
@@ -4486,7 +4502,7 @@ static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
     case AST_OP(static_assert):
     case AST_OP(decl_list):
     case AST_OP(case):
-      return;
+      return true;
     case AST_OP(return):
       audit->returns++;
       if (cxx11 && audit->info->is_constructor) {
@@ -4500,25 +4516,25 @@ static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
                       "before C++14");
         audit->reported = true;
       }
-      return;
+      return true;
     case AST_OP(expr): {
       ExpressionStatementASTNode* stmt = (ExpressionStatementASTNode*)node;
       if (stmt->expr == NULL ||
           (stmt->expr->flags & kASTCXXMemberInitializer) != 0) {
-        return;
+        return true;
       }
       if (cxx11) {
         SemanticError(node,
                       "statement is not allowed in a C++11 constexpr function");
         audit->reported = true;
       }
-      return;
+      return true;
     }
     case AST_OP(vardecl): {
       VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
       if (decl->symbol != NULL &&
           StorageIs(decl->symbol->storage, STO(typedef))) {
-        return;
+        return true;
       }
       if (decl->symbol != NULL &&
           StorageIs(decl->symbol->storage, STO(static) | STO(thread))) {
@@ -4529,41 +4545,41 @@ static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
               "requires C++23");
           audit->reported = true;
         }
-        return;
+        return true;
       }
       if (cxx11) {
         SemanticError(node,
                       "local variable in a constexpr function requires C++14");
         audit->reported = true;
       }
-      return;
+      return true;
     }
     case AST_OP(goto):
       if (before_cxx23) {
         SemanticError(node, "goto in a constexpr function requires C++23");
         audit->reported = true;
       }
-      return;
+      return true;
     case AST_OP(asm):
       if (before_cxx23) {
         SemanticError(node, "asm in a constexpr function requires C++23");
         audit->reported = true;
       }
-      return;
+      return true;
     case AST_OP(label): {
       LabelASTNode* label = (LabelASTNode*)node;
       if (!label->named && before_cxx23) {
         SemanticError(node, "label in a constexpr function requires C++23");
         audit->reported = true;
       }
-      return;
+      return true;
     }
     case AST_OP(try):
       if (before_cxx20) {
         SemanticError(node, "try-block in a constexpr function requires C++20");
         audit->reported = true;
       }
-      return;
+      return true;
     case AST_OP(if):
     case AST_OP(while):
     case AST_OP(do):
@@ -4574,10 +4590,11 @@ static void AuditConstexprFunctionBody(ASTNode* node, void* data, int child_id,
                       "statement is not allowed in a C++11 constexpr function");
         audit->reported = true;
       }
-      return;
+      return true;
     default:
-      return;
+      return true;
   }
+  return true;
 }
 
 void SemanticDiagnoseConstexprFunctionBody(ASTNode* node) {
@@ -4711,11 +4728,11 @@ typedef struct {
   ExpansionStatementASTNode* expansion;
 } ExpansionJumpMarkData;
 
-static void MarkExpansionLoopJumpVisitor(ASTNode* node, void* data, int child_id,
+static bool MarkExpansionLoopJumpVisitor(ASTNode* node, void* data, int child_id,
                                          VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || data == NULL) {
-    return;
+    return true;
   }
   ExpansionJumpMarkData* ctx = data;
   ASTNode* expansion = (ASTNode*)ctx->expansion;
@@ -4728,6 +4745,7 @@ static void MarkExpansionLoopJumpVisitor(ASTNode* node, void* data, int child_id
       node->flags |= kASTExpansionLoopContinue;
     }
   }
+  return true;
 }
 
 void SemanticMarkExpansionLoopJumps(ExpansionStatementASTNode* expansion) {
@@ -4742,11 +4760,11 @@ void SemanticMarkExpansionLoopJumps(ExpansionStatementASTNode* expansion) {
   ASTNodeVisit(expansion->stmt, MarkExpansionLoopJumpVisitor, 0, &data);
 }
 
-static void DiagnoseExpansionLabelVisitor(ASTNode* node, void* data, int child_id,
+static bool DiagnoseExpansionLabelVisitor(ASTNode* node, void* data, int child_id,
                                           VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(label) && data != NULL) {
     LabelASTNode* label = (LabelASTNode*)node;
@@ -4754,6 +4772,7 @@ static void DiagnoseExpansionLabelVisitor(ASTNode* node, void* data, int child_i
                   "A label declared in an expansion statement body is not "
                   "permitted");
   }
+  return true;
 }
 
 void SemanticDiagnoseExpansionEnclosedLabels(ExpansionStatementASTNode* expansion) {

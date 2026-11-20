@@ -61,7 +61,7 @@ typedef struct {
 } ContractFormalUse;
 
 // Visitor callback: sets `use->used` when the predicate references `use->formal`.
-static void FindContractFormalUse(ASTNode* node, void* data, int child_id,
+static bool FindContractFormalUse(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)child_id;
   ContractFormalUse* use = data;
@@ -69,6 +69,7 @@ static void FindContractFormalUse(ASTNode* node, void* data, int child_id,
       ((IdentifierASTNode*)node)->symbol == use->formal) {
     use->used = true;
   }
+  return !((ContractFormalUse*)data)->used;
 }
 
 // Emits an error for each non-const, non-reference parameter of `func` that
@@ -242,10 +243,10 @@ static void HashContractString(ContractExpressionHash* hash,
 
 // Visitor callback: contributes node shape, constants, and stable symbol
 // identities to the contract expression hash in `data`.
-static void HashContractExpressionNode(ASTNode* node, void* data,
+static bool HashContractExpressionNode(ASTNode* node, void* data,
                                        int child_id, VisitorMode mode) {
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   ContractExpressionHash* hash = data;
   HashContractBytes(hash, &node->op, sizeof(node->op));
@@ -278,6 +279,7 @@ static void HashContractExpressionNode(ASTNode* node, void* data,
       HashContractString(hash, &member->symbol->name);
     }
   }
+  return true;
 }
 
 // Returns a hash fingerprint of `assertion`'s predicate for redeclaration

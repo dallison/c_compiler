@@ -4316,11 +4316,11 @@ typedef struct {
 // AST-first evaluation is restricted to pure scalar functions. More involved
 // functions go directly to pcode because the AST evaluator intentionally does
 // not model every object-lifetime and compiler-intrinsic rule.
-static void MeasureConstexprPCodeStaticCost(ASTNode* node, void* data,
+static bool MeasureConstexprPCodeStaticCost(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (node == NULL || mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   ConstexprPCodeStaticCost* measurement = data;
   measurement->cost++;
@@ -4373,6 +4373,7 @@ static void MeasureConstexprPCodeStaticCost(ASTNode* node, void* data,
     default:
       break;
   }
+  return true;
 }
 
 static ConstexprPCodeAutoStats* ConstexprPCodeAutoStatsForCall(ASTNode* node,
@@ -4488,15 +4489,15 @@ static bool PointerExpressionUsesFixedArray(ASTNode* node) {
   }
 }
 
-static void ValidateASTNode(ASTNode* node, void* data, int child_id,
+static bool ValidateASTNode(ASTNode* node, void* data, int child_id,
                             VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   ValidationState* state = data;
   if (!state->ok) {
-    return;
+    return true;
   }
   switch (node->op) {
     case AST_OP(goto):
@@ -4504,13 +4505,13 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
         ValidationReject(
             state, "goto requires C++23 constexpr evaluation rules");
       }
-      return;
+      return true;
     case AST_OP(label):
       if (!CompilerCXXAtLeast(kLanguageStandardCXX23)) {
         ValidationReject(
             state, "labels require C++23 constexpr evaluation rules");
       }
-      return;
+      return true;
     case AST_OP(vardecl): {
       VariableDeclarationASTNode* declaration =
           (VariableDeclarationASTNode*)node;
@@ -4521,29 +4522,29 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
             state,
             "static and thread_local variables require AST constexpr evaluation");
       }
-      return;
+      return true;
     }
     case AST_OP(call): {
       if (PCodeConstexprCallSymbol(node) == NULL) {
         // Indirect calls are linked through expression thunks. If the selected
         // target cannot be resolved into the pcode image, checked execution
         // rejects the path rather than accepting a host address.
-        return;
+        return true;
       }
       if (IsConstexprPCodeRuntimeCallSymbol(PCodeConstexprCallSymbol(node))) {
-        return;
+        return true;
       }
       Symbol* callee =
           PCodeConstexprFunctionDefinition(PCodeConstexprCallSymbol(node));
       if (callee == NULL || callee->type == NULL) {
         // The unresolved call is linked to a trap stub. It therefore rejects
         // the expression only when execution actually reaches this path.
-        return;
+        return true;
       }
-      return;
+      return true;
     }
     case AST_OP(subscript): {
-      return;
+      return true;
     }
     case AST_OP(cast): {
       ASTNode* allocation = ((CastASTNode*)node)->expr;
@@ -4552,7 +4553,7 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
           allocation == NULL || allocation->op != AST_OP(call) ||
           ((VectorASTNode*)allocation)->children == NULL ||
           ((VectorASTNode*)allocation)->children->length < 2) {
-        return;
+        return true;
       }
       // Of the placement forms only the reserved operator new(size_t, void*)
       // may run in a constant expression.
@@ -4570,7 +4571,7 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
                          "selected placement allocation function is not "
                          "permitted in a constant expression");
       }
-      return;
+      return true;
     }
     case AST_OP(dot):
     case AST_OP(arrow): {
@@ -4585,7 +4586,7 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
         // Active-member legality is checked by the semantic overlay before
         // byte-oriented pcode execution.
       }
-      return;
+      return true;
     }
     case AST_OP(plus):
     case AST_OP(minus): {
@@ -4595,11 +4596,12 @@ static void ValidateASTNode(ASTNode* node, void* data, int child_id,
         // Formation bounds are checked by the semantic overlay; checked-memory
         // execution still validates any subsequent access.
       }
-      return;
+      return true;
     }
     default:
-      return;
+      return true;
   }
+  return true;
 }
 
 static bool ValidateFunction(TypeRecord* func, const char** reason) {
@@ -4723,12 +4725,12 @@ static bool PCodeTypeHasAnonymousUnion(TypeRecord* type) {
       TypeIsStructOrUnion(type) ? type->info.struct_info : NULL);
 }
 
-static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
+static bool DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   ConstexprASTOverlayScan* scan = data;
   if (mode != kVisitPreChildren || node == NULL || scan->ast_only) {
-    return;
+    return true;
   }
   if (CompilerCXXAtLeast(kLanguageStandardCXX26) &&
       node->op == AST_OP(throw)) {
@@ -4782,7 +4784,7 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         SymbolHasAttribute(call_symbol, "meta_intrinsic")) {
       scan->required = true;
       scan->ast_only = true;
-      return;
+      return true;
     }
     Symbol* callee = PCodeConstexprFunctionDefinition(
         call_symbol);
@@ -4790,10 +4792,11 @@ static void DetectConstexprASTOverlay(ASTNode* node, void* data, int child_id,
         PCodeIsIndirectCall(node)) {
       scan->required = true;
       scan->ast_only = true;
-      return;
+      return true;
     }
     ScanConstexprFunctionCapabilities(callee, scan);
   }
+  return true;
 }
 
 static void ScanConstexprFunctionCapabilities(
@@ -6832,13 +6835,13 @@ typedef struct {
   bool has_unbound_automatic;
 } ConstexprThunkBindingCheck;
 
-static void CheckConstexprThunkBindings(ASTNode* node, void* data, int child_id,
+static bool CheckConstexprThunkBindings(ASTNode* node, void* data, int child_id,
                                         VisitorMode mode) {
   (void)child_id;
   ConstexprThunkBindingCheck* check = data;
   if (mode != kVisitPreChildren || node == NULL ||
       check->has_unbound_automatic || node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   for (ASTNode* parent = node->parent; parent != NULL;
        parent = parent->parent) {
@@ -6846,7 +6849,7 @@ static void CheckConstexprThunkBindings(ASTNode* node, void* data, int child_id,
       break;
     }
     if ((parent->flags & kASTLambdaExpression) != 0) {
-      return;
+      return true;
     }
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
@@ -6863,6 +6866,7 @@ static void CheckConstexprThunkBindings(ASTNode* node, void* data, int child_id,
        !ConstexprHasBinding(check->ctx, symbol))) {
     check->has_unbound_automatic = true;
   }
+  return true;
 }
 
 static bool ConstexprExpressionHasNoUnboundAutomatic(

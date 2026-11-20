@@ -782,11 +782,12 @@ typedef struct {
   bool found_call;
 } CallFinder;
 
-static void FindCall(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+static bool FindCall(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   CallFinder* finder = data;
   if (node->op == AST_OP(call) || node->op == AST_OP(inline_call)) {
     finder->found_call = true;
   }
+  return !((CallFinder*)data)->found_call;
 }
 
 static bool ContainsCall(ASTNode* node) {
@@ -4054,7 +4055,7 @@ static bool ExpressionReturnsReference(ASTNode* node) {
   return false;
 }
 
-static void FindSideEffect(ASTNode* node, void* data, int child_id,
+static bool FindSideEffect(ASTNode* node, void* data, int child_id,
                            VisitorMode mode) {
   bool* found = data;
   switch (node->op) {
@@ -4085,6 +4086,7 @@ static void FindSideEffect(ASTNode* node, void* data, int child_id,
     default:
       break;
   }
+  return !*(bool*)data;
 }
 
 static bool ContainsSideEffect(ASTNode* node) {

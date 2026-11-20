@@ -154,11 +154,11 @@ static TypeRecord* RemapEnclosingTemplateType(ConstructorInitFormalRemap* remap,
 
 // Pre-order visitor: rewrites parameter identifiers and template arguments
 // in a cloned mem-initializer actual per `ConstructorInitFormalRemap`.
-static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
+static bool RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   ConstructorInitFormalRemap* remap = data;
   if (node->op == AST_OP(identifier)) {
@@ -274,6 +274,7 @@ static void RemapConstructorInitFormalVisitor(ASTNode* node, void* data,
       cast->cast_type = remapped;
     }
   }
+  return true;
 }
 
 // The enclosing class's non-type parameter used as a value, as in `e(E)`.

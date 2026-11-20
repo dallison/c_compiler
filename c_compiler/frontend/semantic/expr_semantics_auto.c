@@ -341,11 +341,11 @@ static bool AutoDeductionOperandIsConcreteClass(ASTNode* operand) {
 // identifier types post-order, then collect expressions that need reanalysis.
 // Contract: Visitor; mutates stale identifier types and appends expressions to
 // the vector in `data`.
-static void CollectStaleAutoExpressions(ASTNode* node, void* data,
+static bool CollectStaleAutoExpressions(ASTNode* node, void* data,
                                         int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(identifier)) {
     Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
@@ -358,10 +358,10 @@ static void CollectStaleAutoExpressions(ASTNode* node, void* data,
       ASTNodeSetType(node, symbol->type);
       node->flags &= ~kASTAnalyzed;
     }
-    return;
+    return true;
   }
   if ((node->flags & kASTAnalyzed) == 0) {
-    return;
+    return true;
   }
   if (node->op == AST_OP(dot) || node->op == AST_OP(arrow)) {
     BinaryASTNode* access = (BinaryASTNode*)node;
@@ -374,10 +374,10 @@ static void CollectStaleAutoExpressions(ASTNode* node, void* data,
         VectorAppend((Vector*)data, node);
       }
     }
-    return;
+    return true;
   }
   if (!AutoDeductionMayChangeOperator(node->op)) {
-    return;
+    return true;
   }
   ASTNodeShape shape = ASTNodeGetShape(node);
   bool has_class_operand = false;
@@ -393,6 +393,7 @@ static void CollectStaleAutoExpressions(ASTNode* node, void* data,
   if (has_class_operand) {
     VectorAppend((Vector*)data, node);
   }
+  return true;
 }
 
 // Contract: Refreshes stale expressions under `current_function->body`, re-runs
@@ -426,11 +427,12 @@ void SemanticReanalyzeAfterAutoDeduction(void) {
 
 // Contract: Visitor pre-hook; clears `kASTAnalyzed` on each visited node so a
 // deferred auto init can be re-analyzed. Does not mutate types or parent links.
-void ClearDeferredAutoInitAnalysis(ASTNode* node, void* data,
+bool ClearDeferredAutoInitAnalysis(ASTNode* node, void* data,
                                           int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }

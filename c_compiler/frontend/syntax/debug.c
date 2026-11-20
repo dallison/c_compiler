@@ -706,7 +706,7 @@ typedef struct {
   int level;
 } LexicalScopeBuilder;
 
-static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
+static bool LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
                                 VisitorMode mode) {
   LexicalScopeBuilder* builder = data;
   if (node->op == AST_OP(compound)) {
@@ -738,6 +738,7 @@ static void LexicalScopeVisitor(ASTNode* node, void* data, int child_id,
       SymbolSetDIE(decl->symbol, die);
     }
   }
+  return true;
 }
 
 static void BuildLexicalScopes(DebugBuilder* builder, TypeRecord* func_type,

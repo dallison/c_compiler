@@ -969,23 +969,24 @@ typedef struct {
 } CXXLocalStaticPreparation;
 
 // Visitor callback: sets `*(bool*)data` when a static-init `init` node appears.
-static void FindCXXLocalStaticConstantInitializer(
+static bool FindCXXLocalStaticConstantInitializer(
     ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL &&
       node->op == AST_OP(init) && (node->flags & kASTStaticInit) != 0) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 // Visitor callback: prepares asm names, init classification, exception guards,
 // and guarded initializers for local and function-local static declarations.
-static void PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id,
+static bool PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id,
                                          VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPostChildren || node == NULL ||
       node->op != AST_OP(vardecl)) {
-    return;
+    return true;
   }
   VariableDeclarationASTNode* declaration =
       (VariableDeclarationASTNode*)node;
@@ -995,11 +996,11 @@ static void PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id
                          StorageIs(symbol->storage, STO(auto)) ||
                          StorageIs(symbol->storage, STO(register)))) {
     GuardCXXAutomaticArrayInitializer(preparation->syntax, declaration);
-    return;
+    return true;
   }
   if (symbol == NULL || !StorageIs(symbol->storage, STO(static)) ||
       StorageIs(symbol->storage, STO(thread))) {
-    return;
+    return true;
   }
 
   SetCXXInlineLocalStaticAsmNameFor(
@@ -1022,11 +1023,12 @@ static void PrepareCXXLocalStaticVisitor(ASTNode* node, void* data, int child_id
   if ((!dynamic && !needs_destructor_registration) ||
       (dynamic && declaration->initializer == NULL) ||
       declaration->local_static_guard != NULL) {
-    return;
+    return true;
   }
   declaration->initializer = NewCXXLocalStaticGuardedInitializer(
       preparation->syntax, preparation->function, declaration, dynamic);
   declaration->initializer->parent = node;
+  return true;
 }
 
 // Walks `function`'s body and transforms function-local static and related

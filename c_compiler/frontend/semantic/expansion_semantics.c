@@ -502,21 +502,21 @@ static ASTNode* StripStaticLocalDeclarations(ASTNode* stmt) {
   return NewCompoundStatementASTNode(kept, compound->base.location);
 }
 
-static void CloneBodyLocalSymbolsVisitor(ASTNode* node, void* data, int child_id,
+static bool CloneBodyLocalSymbolsVisitor(ASTNode* node, void* data, int child_id,
                                          VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL || data == NULL) {
-    return;
+    return true;
   }
   Map* local_map = data;
   if (node->op == AST_OP(vardecl)) {
     VariableDeclarationASTNode* decl = (VariableDeclarationASTNode*)node;
     Symbol* old_symbol = decl->symbol;
     if (old_symbol == NULL || MapFindPointerKey(local_map, old_symbol) != NULL) {
-      return;
+      return true;
     }
     if (IsStaticOrThreadLocalVardecl(node)) {
-      return;
+      return true;
     }
     Symbol* fresh = SemanticCloneExpansionIterationSymbol(old_symbol);
     RegisterFreshBodyLocalSymbol(local_map, old_symbol, fresh);
@@ -524,7 +524,7 @@ static void CloneBodyLocalSymbolsVisitor(ASTNode* node, void* data, int child_id
     decl->symbol = fresh;
     ASTNodeSetType(node, fresh->type);
     node->flags &= ~kASTAnalyzed;
-    return;
+    return true;
   }
   if (node->op == AST_OP(structured_binding)) {
     StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
@@ -551,6 +551,7 @@ static void CloneBodyLocalSymbolsVisitor(ASTNode* node, void* data, int child_id
     }
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static ASTNode* RewriteClonedIdentifier(ASTNode* node, void* data,
@@ -612,13 +613,14 @@ static void AppendHoistedStaticLocals(Vector* statements, Vector* hoisted) {
   }
 }
 
-static void ClearExpansionAnalyzedFlagVisitor(ASTNode* node, void* data,
+static bool ClearExpansionAnalyzedFlagVisitor(ASTNode* node, void* data,
                                               int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 static ASTNode* RewriteExpansionJump(ASTNode* node, void* data,

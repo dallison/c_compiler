@@ -46,7 +46,7 @@ typedef struct {
 } Inliner;
 
 static void AddInlineLocalSymbol(Inliner* inliner, Symbol* symbol);
-static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static ASTNode* InlineFunctionBodyStatement(ASTNode* node, void* data);
 static void CopyArguments(FunctionInfo* info, VectorASTNode* call,
                           Inliner* inliner, Vector* statements,
@@ -56,9 +56,9 @@ static Symbol* InlineMappedSymbol(Inliner* inliner, Symbol* original);
 static ASTNode* NewCallerContractStatement(ContractAssertion* assertion, Inliner* inliner, VectorASTNode* call, TypeRecord* caller_func);
 static void AppendCallerContractStatements(Vector* statements, TypeRecord* func, ContractAssertionKind kind, Inliner* inliner, VectorASTNode* call);
 static bool VirtualCallerContractsRequireNontrivialCopy(TypeRecord* func);
-static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode);
-static void FindNRVOLocal(ASTNode* node, void* data, int child_id, VisitorMode mode);
-static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool FindNRVOLocal(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type);
 static bool IsStdCoroutineHandleControlMethod(FunctionInfo* func);
 static bool MemberBodyCallsMemberFunction(FunctionInfo* func);
@@ -95,11 +95,11 @@ static void AddInlineLocalSymbol(Inliner* inliner, Symbol* symbol) {
 }
 
 // Contract: Visitor; registers locals/catches/temps needing remap during clone.
-static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id,
+static bool CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   Inliner* inliner = data;
   if (node->op == AST_OP(vardecl)) {
@@ -114,6 +114,7 @@ static void CollectInlineLocalSymbols(ASTNode* node, void* data, int child_id,
   } else if (node->op == AST_OP(catch)) {
     AddInlineLocalSymbol(inliner, ((CatchASTNode*)node)->symbol);
   }
+  return true;
 }
 
 // This is called while cloning the function body for inlining.  The
@@ -793,10 +794,10 @@ static bool InlineCallNodeIsInside(ASTNode* node) {
   return false;
 }
 
-static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode) {
+static bool ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   GotoFinder* finder = data;
   if (finder->count_expanded || !InlineCallNodeIsInside(node)) {
@@ -816,6 +817,7 @@ static void ExamineBody(ASTNode* node, void* data, int child_id, VisitorMode mod
   } else if (node->op == AST_OP(call)) {
     finder->found_call_or_loop = true;
   }
+  return true;
 }
 
 typedef struct {
@@ -827,11 +829,11 @@ typedef struct {
 } NRVOFinder;
 
 // Contract: Visitor; sets flag when NRVO marker/local would break inlining.
-static void FindNRVOLocal(ASTNode* node, void* data, int child_id,
+static bool FindNRVOLocal(ASTNode* node, void* data, int child_id,
                           VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return !((NRVOFinder*)data)->found_nrvo;
   }
   NRVOFinder* finder = data;
   if ((node->flags & kASTNrvoMarker) != 0 ||
@@ -840,13 +842,14 @@ static void FindNRVOLocal(ASTNode* node, void* data, int child_id,
        ((VariableDeclarationASTNode*)node)->symbol->is_nrvo)) {
     finder->found_nrvo = true;
   }
+  return !((NRVOFinder*)data)->found_nrvo;
 }
 
 // Contract: Visitor; detects unlowered init/member access/template callees in body.
-static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
+static bool FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   if (mode != kVisitPreChildren) {
-    return;
+    return !((UnresolvedMemberFinder*)data)->found_unresolved;
   }
   UnresolvedMemberFinder* finder = data;
   if ((node->op == AST_OP(dot) || node->op == AST_OP(arrow)) &&
@@ -881,6 +884,7 @@ static void FindUnresolvedMemberAccess(ASTNode* node, void* data, int child_id,
       }
     }
   }
+  return !((UnresolvedMemberFinder*)data)->found_unresolved;
 }
 
 // Does the callee expression name the function it is typed as, rather than hold
@@ -960,11 +964,11 @@ static bool FunctionTypeIsBeingAnalyzed(TypeRecord* func_type) {
 // emitting it.  A template parameter named in the body is a constant only
 // while the callee is compiled; copied into the caller it is an undefined
 // symbol (`RoundUpTo<R>`'s `R`).
-static void FindInlineUnsafeLocal(ASTNode* node, void* data, int child_id,
+static bool FindInlineUnsafeLocal(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return !*(bool*)data;
   }
   bool* found = data;
   if (node->op == AST_OP(vardecl)) {
@@ -981,6 +985,7 @@ static void FindInlineUnsafeLocal(ASTNode* node, void* data, int child_id,
       *found = true;
     }
   }
+  return !*(bool*)data;
 }
 
 static bool InliningBlockedByUnsafeBody(FunctionInfo* func) {
@@ -994,16 +999,17 @@ static bool InliningBlockedByUnsafeBody(FunctionInfo* func) {
 
 // Inlining a noexcept function into its caller drops the terminate boundary.
 // A body with no throw and no call cannot violate the specification.
-static void FindNoexceptEscape(ASTNode* node, void* data, int child_id,
+static bool FindNoexceptEscape(ASTNode* node, void* data, int child_id,
                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return !*(bool*)data;
   }
   if (node->op == AST_OP(throw) || node->op == AST_OP(call) ||
       node->op == AST_OP(inline_call)) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 static bool IsPartialGuardInlineCall(ASTNode* node) {
@@ -1022,7 +1028,7 @@ static bool IsPartialGuardInlineCall(ASTNode* node) {
   return last != NULL && last->op == AST_OP(if);
 }
 
-static void CountInlineCalls(ASTNode* node, void* data, int child_id,
+static bool CountInlineCalls(ASTNode* node, void* data, int child_id,
                              VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node->op == AST_OP(inline_call) &&
@@ -1030,6 +1036,7 @@ static void CountInlineCalls(ASTNode* node, void* data, int child_id,
       (CompilerIsCXX() || !IsPartialGuardInlineCall(node))) {
     *(int*)data += 1;
   }
+  return true;
 }
 
 static bool InliningBlockedByNoexceptBoundary(FunctionInfo* func) {
@@ -1071,21 +1078,22 @@ static bool IsStdCoroutineHandleControlMethod(FunctionInfo* func) {
 
 // True when an analyzed body calls another member function.  Cloning that
 // call takes the address of a member access that is already an address.
-static void FindMemberFunctionCall(ASTNode* node, void* data, int child_id,
+static bool FindMemberFunctionCall(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node->op != AST_OP(call)) {
-    return;
+    return !*(bool*)data;
   }
   ASTNode* callee = ((VectorASTNode*)node)->left;
   if (callee == NULL || callee->op != AST_OP(identifier)) {
-    return;
+    return !*(bool*)data;
   }
   Symbol* symbol = ((IdentifierASTNode*)callee)->symbol;
   if (symbol != NULL && symbol->type != NULL && TypeIsFunction(symbol->type) &&
       symbol->type->info.function.cxx_member_owner != NULL) {
     *(bool*)data = true;
   }
+  return !*(bool*)data;
 }
 
 static bool MemberBodyCallsMemberFunction(FunctionInfo* func) {
@@ -1488,17 +1496,17 @@ static int64_t StaticFunctionUseCount(FunctionInfo* func) {
   return uses != NULL && uses->w > 0 ? uses->w : kManyUses;
 }
 
-static void SumLocalStackBytes(ASTNode* node, void* data, int child_id,
+static bool SumLocalStackBytes(ASTNode* node, void* data, int child_id,
                                VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node->op != AST_OP(vardecl)) {
-    return;
+    return true;
   }
   Symbol* sym = ((VariableDeclarationASTNode*)node)->symbol;
   if (sym == NULL || !sym->flags.is_local ||
       StorageIs(sym->storage, STO(static) | STO(extern) | STO(thread)) ||
       sym->type == NULL) {
-    return;
+    return true;
   }
   if (TypeIsArray(sym->type) || TypeIsStructOrUnion(sym->type) ||
       sym->flags.address_taken) {
@@ -1507,6 +1515,7 @@ static void SumLocalStackBytes(ASTNode* node, void* data, int child_id,
       *(int64_t*)data += sym->type->size;
     }
   }
+  return true;
 }
 
 // Contract: Read-only body inspection and size heuristic; false when goto/unresolved/NRVO
@@ -1700,31 +1709,31 @@ typedef struct {
   bool has_deref_or_member;
 } GuardCondCheck;
 
-static void CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
+static bool CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   GuardCondCheck* chk = data;
   if (chk->bad) {
-    return;
+    return false;
   }
   if (++chk->nodes > 24 || (node->type != NULL && TypeIsVolatile(node->type))) {
     chk->bad = true;
-    return;
+    return false;
   }
   switch (node->op) {
     case AST_OP(number):
     case AST_OP(charconst):
     case AST_OP(charwide):
     case AST_OP(structmember):
-      return;
+      return !chk->bad;
     case AST_OP(identifier): {
       Symbol* sym = ((IdentifierASTNode*)node)->symbol;
       if (sym == NULL || sym->type == NULL || TypeIsVolatile(sym->type)) {
         chk->bad = true;
-        return;
+        return false;
       }
       bool is_formal = false;
       for (size_t i = 0; i < chk->func->prototype.length; i++) {
@@ -1736,14 +1745,14 @@ static void CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
       if (!is_formal) {
         chk->bad = true;
       }
-      return;
+      return !chk->bad;
     }
     case AST_OP(arrow):
     case AST_OP(dot):
     case AST_OP(contents):
     case AST_OP(subscript):
       chk->has_deref_or_member = true;
-      return;
+      return false;
     case AST_OP(not):
     case AST_OP(onescomp):
     case AST_OP(uminus):
@@ -1779,14 +1788,14 @@ static void CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
     case AST_OP(b2i):
     case AST_OP(b2l):
     case AST_OP(b2ll):
-      return;
+      return !chk->bad;
     case AST_OP(cast): {
       CastASTNode* cn = (CastASTNode*)node;
       if (cn->kind == kCastDynamic || cn->kind == kCastBit ||
           TypeIsReference(cn->cast_type)) {
         chk->bad = true;
       }
-      return;
+      return !chk->bad;
     }
     case AST_OP(and):
     case AST_OP(bitor):
@@ -1805,11 +1814,12 @@ static void CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
     case AST_OP(lshift):
     case AST_OP(rshiftl):
     case AST_OP(rshifta):
-      return;
+      return !chk->bad;
     default:
       chk->bad = true;
-      return;
+      return false;
   }
+  return !chk->bad;
 }
 
 static bool StatementIsVoidBareReturn(ASTNode* stmt) {

@@ -224,17 +224,18 @@ static bool NodeIsCompilerGenerated(ASTNode* node) {
   }
 }
 
-static void FindCompilerGeneratedNode(ASTNode* node, void* data, int child_id,
+static bool FindCompilerGeneratedNode(ASTNode* node, void* data, int child_id,
                                       VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren) {
-    return;
+    return !*(bool*)data;
   }
   bool* found = data;
   if (*found) {
-    return;
+    return false;
   }
   *found = NodeIsCompilerGenerated(node);
+  return !*(bool*)data;
 }
 
 bool SemanticNodeIsCompilerGenerated(ASTNode* node) {
@@ -753,11 +754,11 @@ static bool SymbolRequiresLambdaCapture(Symbol* symbol) {
   return global != symbol;
 }
 
-static void CollectLambdaBodyLocal(ASTNode* node, void* data, int child_id,
+static bool CollectLambdaBodyLocal(ASTNode* node, void* data, int child_id,
                                    VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return true;
   }
   Vector* locals = data;
   if (node->op == AST_OP(vardecl)) {
@@ -765,14 +766,14 @@ static void CollectLambdaBodyLocal(ASTNode* node, void* data, int child_id,
     if (symbol != NULL) {
       VectorAppend(locals, symbol);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(catch)) {
     Symbol* symbol = ((CatchASTNode*)node)->symbol;
     if (symbol != NULL) {
       VectorAppend(locals, symbol);
     }
-    return;
+    return true;
   }
   if (node->op == AST_OP(structured_binding)) {
     StructuredBindingASTNode* binding = (StructuredBindingASTNode*)node;
@@ -788,6 +789,7 @@ static void CollectLambdaBodyLocal(ASTNode* node, void* data, int child_id,
       VectorAppend(locals, binding->condition_symbol);
     }
   }
+  return true;
 }
 
 static bool ConstexprIfConditionIsDependent(ASTNode* cond) {

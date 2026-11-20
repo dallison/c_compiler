@@ -42,9 +42,9 @@ static bool CXXTemplateParameterIndexIsPack(Syntax* syntax, int index);
 static TemplateParameter* CXXTemplateParameterForIndex(Syntax* syntax, int index);
 static void ClassifyCXXFoldPackIndex(CXXFoldPackKinds* kinds, int index);
 static void ClassifyCXXFoldTemplateArgument(CXXFoldPackKinds* kinds, TemplateArgument* argument);
-static void ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool CXXFoldMixesConceptAndOtherPacks(Syntax* syntax, ASTNode* pattern);
-static void FindCXXParameterPackExpression(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool FindCXXParameterPackExpression(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool FoldOperatorOpcode(Token token, ASTOpcode* op);
 static bool ParseFoldOperator(Syntax* syntax, ASTOpcode* op);
 static bool FoldExpressionContainsPack(Syntax* syntax, ASTNode* node);
@@ -137,13 +137,18 @@ static void ClassifyCXXFoldTemplateArgument(CXXFoldPackKinds* kinds,
 
 // AST visitor that collects the kinds of packs referenced by a prospective
 // fold pattern.
-static void ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id,
+static bool ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id,
                                  VisitorMode mode) {
   (void)child_id;
-  if (node == NULL || mode != kVisitPreChildren) {
-    return;
-  }
   CXXFoldPackKinds* kinds = data;
+  // Both flags only ever go from false to true, so the mix result is final
+  // once each kind has been seen.
+  if (kinds->concept_template_pack && kinds->other_pack) {
+    return false;
+  }
+  if (node == NULL || mode != kVisitPreChildren) {
+    return true;
+  }
   Vector* arguments = NULL;
   switch (ASTNodeGetShape(node)) {
     case kASTShapeIdentifier: {
@@ -167,6 +172,7 @@ static void ClassifyCXXFoldPacks(ASTNode* node, void* data, int child_id,
   for (size_t i = 0; arguments != NULL && i < arguments->length; i++) {
     ClassifyCXXFoldTemplateArgument(kinds, arguments->value.p[i]);
   }
+  return !(kinds->concept_template_pack && kinds->other_pack);
 }
 
 
@@ -213,21 +219,21 @@ bool CXXTemplateArgumentReferencesParameterPack(
 
 // AST visitor that marks a search as found when a node, type, or template
 // argument refers to a parameter pack.
-static void FindCXXParameterPackExpression(ASTNode* node, void* data,
+static bool FindCXXParameterPackExpression(ASTNode* node, void* data,
                                            int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !((CXXPackExpressionSearch*)data)->found;
   }
   if ((node->flags & kASTReferencesParameterPack) != 0) {
     ((CXXPackExpressionSearch*)data)->found = true;
-    return;
+    return false;
   }
   if ((node->op == AST_OP(sizeof) || node->op == AST_OP(alignof)) &&
       TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
                                 ((SizeofASTNode*)node)->type_operand)) {
     ((CXXPackExpressionSearch*)data)->found = true;
-    return;
+    return false;
   }
   // `static_cast<T (*)()>(nullptr)...` names the pack in the cast type, not
   // in a subexpression.
@@ -235,7 +241,7 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
       TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
                                 node->type)) {
     ((CXXPackExpressionSearch*)data)->found = true;
-    return;
+    return false;
   }
   Vector* template_arguments = NULL;
   ASTNodeShape shape = ASTNodeGetShape(node);
@@ -245,19 +251,19 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
                                   cast->cast_type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
     }
-    return;
+    return !((CXXPackExpressionSearch*)data)->found;
   }
   if (shape == kASTShapeIdentifier) {
     IdentifierASTNode* id = (IdentifierASTNode*)node;
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
       ((CXXPackExpressionSearch*)data)->found = true;
-      return;
+      return false;
     }
     if (id->symbol != NULL &&
         TypeContainsParameterPack(((CXXPackExpressionSearch*)data)->syntax,
                                   id->symbol->type)) {
       ((CXXPackExpressionSearch*)data)->found = true;
-      return;
+      return false;
     }
     template_arguments = id->template_arguments;
   } else if (shape == kASTShapeStructMember) {
@@ -266,7 +272,7 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
   } else if (shape == kASTShapeConstant) {
     template_arguments = ((ConstantASTNode*)node)->template_arguments;
   } else {
-    return;
+    return !((CXXPackExpressionSearch*)data)->found;
   }
   CXXPackExpressionSearch* search = data;
   for (size_t i = 0;
@@ -274,9 +280,10 @@ static void FindCXXParameterPackExpression(ASTNode* node, void* data,
     if (CXXTemplateArgumentReferencesParameterPack(
             search, template_arguments->value.p[i])) {
       search->found = true;
-      return;
+      return false;
     }
   }
+  return !((CXXPackExpressionSearch*)data)->found;
 }
 
 

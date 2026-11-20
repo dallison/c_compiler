@@ -2074,12 +2074,12 @@ static void AddUninitializedLocalStatic(Symbol* symbol) {
   VectorAppend(&compiler->uninitialized_static_variables, var);
 }
 
-static void CollectFunctionLocalStatic(ASTNode* node, void* data, int child_id,
+static bool CollectFunctionLocalStatic(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(vardecl)) {
-    return;
+    return true;
   }
   VariableDeclarationASTNode* declaration =
       (VariableDeclarationASTNode*)node;
@@ -2088,9 +2088,10 @@ static void CollectFunctionLocalStatic(ASTNode* node, void* data, int child_id,
       !StorageIs(declaration->symbol->storage, STO(thread))) {
     VectorAppend((Vector*)data, declaration);
   }
+  return true;
 }
 
-static void FindStaticInitializer(ASTNode* node, void* data, int child_id,
+static bool FindStaticInitializer(ASTNode* node, void* data, int child_id,
                                   VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL &&
@@ -2098,6 +2099,7 @@ static void FindStaticInitializer(ASTNode* node, void* data, int child_id,
       *(BinaryASTNode**)data == NULL) {
     *(BinaryASTNode**)data = (BinaryASTNode*)node;
   }
+  return *(BinaryASTNode**)data == NULL;
 }
 
 // Add all static variable declarations in the current function to the
@@ -2185,7 +2187,7 @@ static void AddThreadLocalStatic(VariableDeclarationASTNode* decl) {
   }
 }
 
-static void CollectFunctionThreadLocal(ASTNode* node, void* data, int child_id,
+static bool CollectFunctionThreadLocal(ASTNode* node, void* data, int child_id,
                                        VisitorMode mode) {
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL &&
@@ -2197,16 +2199,17 @@ static void CollectFunctionThreadLocal(ASTNode* node, void* data, int child_id,
                  STO(extern))) {
     VectorAppend((Vector*)data, node);
   }
+  return true;
 }
 
 /* The per-thread guard NewCXXThreadLocalGuardedInit invents for `guarded`
  * shares its source location. */
-static void RegisterThreadLocalGuard(ASTNode* node, void* data, int child_id,
+static bool RegisterThreadLocalGuard(ASTNode* node, void* data, int child_id,
                                      VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL ||
       node->op != AST_OP(identifier)) {
-    return;
+    return true;
   }
   Symbol* guarded = data;
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
@@ -2216,6 +2219,7 @@ static void RegisterThreadLocalGuard(ASTNode* node, void* data, int child_id,
       !LocalStaticAlreadyRegistered(symbol)) {
     AddUninitializedLocalStatic(symbol);
   }
+  return true;
 }
 
 static void AddLocalStatics(Syntax* syntax, TypeRecord* function) {
@@ -2831,11 +2835,11 @@ typedef struct {
   bool found;
 } UnexpandedPackSearch;
 
-static void FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
+static bool FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
                                              int child_id, VisitorMode mode) {
   (void)child_id;
   if (mode != kVisitPreChildren || node == NULL) {
-    return;
+    return !((UnexpandedPackSearch*)data)->found;
   }
   UnexpandedPackSearch* search = data;
   if (node->op == AST_OP(identifier)) {
@@ -2843,7 +2847,7 @@ static void FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
     if (id->symbol != NULL && id->symbol->flags.is_parameter_pack) {
       search->found = true;
     }
-    return;
+    return !((UnexpandedPackSearch*)data)->found;
   }
   if (node->op == AST_OP(structmember)) {
     StructMemberASTNode* member = (StructMemberASTNode*)node;
@@ -2852,6 +2856,7 @@ static void FindUnexpandedPackInFunctionBody(ASTNode* node, void* data,
       search->found = true;
     }
   }
+  return !((UnexpandedPackSearch*)data)->found;
 }
 
 static bool FunctionBodyContainsUnexpandedPack(ASTNode* body) {
@@ -3086,12 +3091,12 @@ static bool VariableDefinitionNeedsStorage(Symbol* symbol) {
   return SymbolNameIsIn(compiler->referenced_variable_name_index, symbol);
 }
 
-static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
+static bool MarkReferencedSymbolInAST(ASTNode* node, void* data,
                                       int child_id, VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (node == NULL || mode != kVisitPreChildren) {
-    return;
+    return true;
   }
   Symbol* symbol = NULL;
   if (node->op == AST_OP(identifier)) {
@@ -3111,6 +3116,7 @@ static void MarkReferencedSymbolInAST(ASTNode* node, void* data,
   } else if (symbol != NULL) {
     CompilerMarkVariableReferenced(symbol);
   }
+  return true;
 }
 
 static void MarkReferencesInAST(ASTNode* node) {

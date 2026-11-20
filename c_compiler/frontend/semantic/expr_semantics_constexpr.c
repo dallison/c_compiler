@@ -43,9 +43,9 @@ typedef struct {
 } ConstevalContextQuery;
 
 static bool FunctionMayObserveConstantEvaluation( Symbol* symbol, ConstevalContextQuery* query);
-static void FindConstevalContextUse(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool FindConstevalContextUse(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool ExpressionMayObserveConstantEvaluation(ASTNode* node);
-static void FindUnboundAutomatic(ASTNode* node, void* data, int child_id, VisitorMode mode);
+static bool FindUnboundAutomatic(ASTNode* node, void* data, int child_id, VisitorMode mode);
 static bool ExpressionHasUnboundAutomatic(ASTNode* node);
 static bool BitFieldReadAwaitsPromotion(ASTNode* node);
 static ASTNode* FoldConstantExpressionValue(ASTNode* node);
@@ -81,31 +81,32 @@ static bool FunctionMayObserveConstantEvaluation(
 }
 
 // Contract: Visitor; sets `query->found`, may recurse into called function bodies.
-static void FindConstevalContextUse(ASTNode* node, void* data, int child_id,
+static bool FindConstevalContextUse(ASTNode* node, void* data, int child_id,
                                     VisitorMode mode) {
   (void)child_id;
   ConstevalContextQuery* query = data;
   if (mode != kVisitPreChildren || query->found || node == NULL) {
-    return;
+    return !((ConstevalContextQuery*)data)->found;
   }
   if (node->op == AST_OP(if) &&
       ((IfStatementASTNode*)node)->is_consteval) {
     query->found = true;
-    return;
+    return false;
   }
   if (node->op == AST_OP(builtin_is_constant_evaluated)) {
     query->found = true;
-    return;
+    return false;
   }
   if (node->op != AST_OP(call)) {
-    return;
+    return !((ConstevalContextQuery*)data)->found;
   }
   VectorASTNode* call = (VectorASTNode*)node;
   if (call->left == NULL || call->left->op != AST_OP(identifier)) {
-    return;
+    return !((ConstevalContextQuery*)data)->found;
   }
   FunctionMayObserveConstantEvaluation(
       ((IdentifierASTNode*)call->left)->symbol, query);
+  return !((ConstevalContextQuery*)data)->found;
 }
 
 // Contract: Read-only subtree scan; does not mutate the AST.
@@ -139,13 +140,13 @@ typedef struct {
 } UnboundAutomaticFinder;
 
 // Contract: Visitor; sets `finder->found` when an unbound automatic/temp is seen.
-static void FindUnboundAutomatic(ASTNode* node, void* data, int child_id,
+static bool FindUnboundAutomatic(ASTNode* node, void* data, int child_id,
                                  VisitorMode mode) {
   (void)child_id;
   UnboundAutomaticFinder* finder = data;
   if (mode != kVisitPreChildren || finder->found ||
       node->op != AST_OP(identifier)) {
-    return;
+    return !((UnboundAutomaticFinder*)data)->found;
   }
   Symbol* symbol = ((IdentifierASTNode*)node)->symbol;
   // A scalar compiler temporary is equally unbound: folding `tmp = n` to `n`
@@ -159,6 +160,7 @@ static void FindUnboundAutomatic(ASTNode* node, void* data, int child_id,
         !symbol->flags.is_constexpr))) {
     finder->found = true;
   }
+  return !((UnboundAutomaticFinder*)data)->found;
 }
 
 // Contract: Read-only scan via `FindUnboundAutomatic`.

@@ -339,13 +339,14 @@ static bool ExpressionNodeNamesPendingConstexprObject(ASTNode* node,
 
 // Clears `kASTAnalyzed` on each visited node so a cloned static_assert
 // operand can be re-analyzed for constant evaluation.
-static void ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_id,
+static bool ClearStaticAssertExprAnalysis(ASTNode* node, void* data, int child_id,
                                           VisitorMode mode) {
   (void)data;
   (void)child_id;
   if (mode == kVisitPreChildren && node != NULL) {
     node->flags &= ~kASTAnalyzed;
   }
+  return true;
 }
 
 // Returns the function `Symbol` for a call-shaped `node`, including simple

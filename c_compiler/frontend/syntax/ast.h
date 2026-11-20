@@ -289,20 +289,22 @@ typedef struct ASTNode* (*ASTNodeCloner)(
     const struct ASTNode* node, struct ASTNode* (*func)(struct ASTNode*, void*),
     void* data);
 
-// Mode passed to visitor function.  It will be called once or twice per
-// node.  Prechildren will be used once for every node, even if the node
-// has no children.  If the node has children, the function will be called
-// again after the children have been processed with PostChildren mode.
+// Mode passed to an AST visitor callback.  The callback runs once before a
+// node's children, including when there are none.  When the node has children
+// and the callback returns true, it runs again after the children.
 typedef enum {
   kVisitPreChildren,   // Called before any children (also if no children)
-  kVisitPostChildren,  // Called after chilren.
+  kVisitPostChildren,  // Called after children.
 } VisitorMode;
 
-typedef void (*ASTNodeVisitor)(struct ASTNode* node,
-                               void (*func)(struct ASTNode*, void*,
-                                            int, VisitorMode),
-                               int child_id,
-                               void* data);
+// Return true to keep walking.  Return false to stop: a false pre-order
+// result skips that node's children and its post-order call, and every node
+// the walk has not reached yet is skipped.
+typedef bool (*ASTNodeVisitFunc)(struct ASTNode* node, void* data, int child_id,
+                                 VisitorMode mode);
+
+typedef bool (*ASTNodeVisitor)(struct ASTNode* node, ASTNodeVisitFunc func,
+                               int child_id, void* data);
 typedef bool (*ASTNodeUsesValueChecker)(struct ASTNode* node, struct ASTNode* value);
 
 typedef enum {
@@ -536,9 +538,8 @@ bool ASTNodeUsesValue(ASTNode* node, ASTNode* value);
 // Clone the node and call func with data for every node cloned.
 ASTNode* ASTNodeClone(const ASTNode* node, ASTNode* (*func)(ASTNode*, void*),
                       void* data, ASTNode* new_parent);
-void ASTNodeVisit(ASTNode* node,
-                  void (*func)(ASTNode* node, void*, int, VisitorMode),
-                  int child_id,
+// Returns false when `func` stops the walk.  A NULL node does not stop it.
+bool ASTNodeVisit(ASTNode* node, ASTNodeVisitFunc func, int child_id,
                   void* data);
 // Returns true as soon as predicate matches a node, without descending into
 // any remaining subtrees.
