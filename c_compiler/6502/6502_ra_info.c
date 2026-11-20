@@ -586,7 +586,6 @@ static const char* Unsupported(TargetGenerator* gen) {
        inst = TargetNext(inst)) {
     W65C02Opcode op = (W65C02Opcode)inst->opcode;
     switch (op) {
-      case W65C02_OP(asm):
       case W65C02_OP(ssavar):
       case W65C02_OP(phi):
       case W65C02_OP(tmp):
@@ -627,32 +626,17 @@ static const char* Unsupported(TargetGenerator* gen) {
   return NULL;
 }
 
-bool W65C02UseColoringAllocator(W65C02Generator* g) {
-  if (getenv("DAVECC_OLD_RA") != NULL ||
-      (!OptLevel1() && getenv("DAVECC_NEW_RA") == NULL)) {
-    return false;
-  }
-  const char* only = getenv("DAVECC_NEW_RA_FUNC");
-  if (only != NULL && strcmp(only, g->base.function_name.value) != 0) {
-    return false;
-  }
-  const char* limit = getenv("DAVECC_NEW_RA_LIMIT");
-  if (limit != NULL) {
-    static int count;
-    return count++ < atoi(limit);
-  }
-  return true;
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
 }
 
-bool W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator) {
+void W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator) {
   TargetGenerator* gen = &allocator->g->base;
   const char* reason = Unsupported(gen);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   TargetRegAllocDesc desc = {
@@ -682,7 +666,7 @@ bool W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator) {
     TargetRACheck(gen, &kInfo, NULL, stderr, 3);
   }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
   for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
        inst = TargetNext(inst)) {
@@ -694,5 +678,4 @@ bool W65C02AllocateRegistersByColoring(W65C02RegisterAllocator* allocator) {
       inst->reg = inst->operand[0]->reg;
     }
   }
-  return true;
 }

@@ -694,6 +694,10 @@ static IROpcode IntConstOpcode(TypeRecord* type) {
     size = compiler->short_size;
   } else if (TypeIsBool(type)) {
     size = compiler->bool_size;
+  } else if (TypeIsChar16(type)) {
+    size = 2;
+  } else if (TypeIsChar32(type)) {
+    size = 4;
   } else if (TypeIsCharFamily(type)) {
     size = 1;
   } else if (TypeIsLong(type)) {

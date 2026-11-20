@@ -776,6 +776,12 @@ static void InitInteger(ASTNode* expr,
           free(init_out);
           return;
       }
+    } else if (TypeIsChar16(type)) {
+      init_out->type = kInitTypeHalf;
+      init_out->value.half = (uint16_t)value;
+    } else if (TypeIsChar32(type)) {
+      init_out->type = kInitTypeWord;
+      init_out->value.word = (uint32_t)value;
     } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
       init_out->type = kInitTypeByte;
       init_out->value.byte = (uint8_t)value;

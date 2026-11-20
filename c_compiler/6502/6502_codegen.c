@@ -5539,6 +5539,7 @@ static struct {
 } push_map[] = {
     {TypeIsInt, 2, 2},      {TypeIsShort, 2, 2},
     {TypeIsWchar, 2, 2},
+    {TypeIsChar16, 2, 2},   {TypeIsChar32, 4, 4},
     {TypeIsCharFamily, 1, 2},
     {TypeIsLong, 4, 4},
     {TypeIsLongLong, 8, 8},
@@ -5893,7 +5894,9 @@ static TargetInstruction* CallIntrinsic(W65C02Generator* g, IRNode* node) {
       jsr(g, in->symbol);   // Call intrinsic, result in A.
       SetIndexReg(g, result, result, 0);
       sta(g, result, 0);
-      stz(g, result, 1);
+      if (Sizeof(node->type) > 1) {
+        stz(g, result, 1);
+      }
       return FinishIntrinsicResult(g, node, result, destination);
     }
        break;
@@ -7024,6 +7027,13 @@ static void LowerAsm(W65C02Generator* g, IRNode* node) {
         Materialize(g, input_node, Sizeof(operand->expr->type), true);
     asm_inst->zp_operands[operand_index] = temp;
     TargetAddUser(temp, &asm_inst->base);
+  }
+  // The asm reads its cells as it runs, but they are not its operands, so
+  // these say they are read here.
+  for (int i = 0; i < asm_inst->num_operands; i++) {
+    if (asm_inst->zp_operands[i] != NULL) {
+      AddReloadPoint(g, asm_inst->zp_operands[i]);
+    }
   }
 
   TargetInstruction* result = Emit(g, &asm_inst->base);
@@ -8260,6 +8270,10 @@ static RegisterVariableSet* TypeToRegisterVarSet(W65C02Generator* g, TypeRecord*
   W65C02RegisterType reg_type;
   if (TypeIsFloatingPoint(type)) {
     reg_type = k6502RegTypeF;
+  } else if (TypeIsChar16(type)) {
+    reg_type = k6502RegTypeI;
+  } else if (TypeIsChar32(type)) {
+    reg_type = k6502RegTypeL;
   } else if (TypeIsCharFamily(type) || TypeIsBool(type)) {
     reg_type = k6502RegTypeB;
   } else if (TypeIsBitInt(type)) {
