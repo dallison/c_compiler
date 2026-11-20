@@ -3449,23 +3449,8 @@ static void ReloadStructReturnRegisterAtLandingPad(X86Emitter* emitter,
     ReloadStructReturnRegisterAtLandingPadI386(emitter, fp);
     return;
   }
-  // The coloring allocator does not keep the struct return pointer in its
-  // conventional register.
-  if (emitter->rv->struct_return_reg < 0 || emitter->rv->colored) {
-    return;
-  }
-
-  bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
-                 !emitter->rv->not_leaf;
-  int struct_return_slot = (is_leaf ? (X86_P(emitter->rv)->first_leaf_int_reg_var)
-                                    : (X86_P(emitter->rv)->first_int_reg_var)) +
-                           emitter->rv->struct_return_reg;
-  char buf[8];
-  fprintf(fp, "\tmovq %d(%%rbp), ", emitter->rv->struct_return_spill_offset);
-  PrintPercentReg(fp, X86RegisterNameFromNum(
-                          struct_return_slot, kX86RegTypeInt,
-                          buf, sizeof(buf)));
-  fprintf(fp, "\n");
+  // The coloring allocator does not keep the struct return pointer in a fixed
+  // register, so there is nothing to reload.
 }
 
 

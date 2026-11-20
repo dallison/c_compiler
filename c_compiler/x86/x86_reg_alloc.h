@@ -30,35 +30,14 @@ typedef struct X86Register {
 } X86Register;
 
 typedef struct {
-  X86RegisterType type;
-  int start;
-  int end;
-  const char* prefix;
-  int base;
-  bool temp;
-} X86RegisterRange;
-
-#define X86_MAX_ALLOCATION_DEPTH 4
-#define X86_NUM_REGISTER_RANGES 11
-
-typedef struct {
   struct X86Generator* rv;
   X86Register int_regs[X86_MAX_INT_REGS];
   X86Register float_regs[X86_MAX_FLOAT_REGS];
-  X86RegisterRange register_ranges[X86_NUM_REGISTER_RANGES];
-  int num_register_ranges;
 
   BitSet used_int_regs;
   BitSet used_float_regs;
   int current_spilled_region_size;
   int max_spilled_region_size;
-  BitSet preserved_instructions;
-  Map varreg_spills;
-  bool spill_after_definition;
-  unsigned pinned_int_phys;
-  unsigned pinned_float_phys;
-  TargetInstruction* allocating[X86_MAX_ALLOCATION_DEPTH];
-  size_t allocating_depth;
 } X86RegisterAllocator;
 
 void X86RegisterAllocatorInit(X86RegisterAllocator* alloc,

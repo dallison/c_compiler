@@ -644,7 +644,6 @@ void X86GeneratorInitWithProfile(X86Generator* rv, Generator* gen,
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->not_leaf = false;
-  rv->colored = false;
   rv->has_incoming_stack_args = false;
   rv->named_stack_arg_end = 0;
   rv->incoming_stack_arg_bytes = 0;
@@ -1393,27 +1392,6 @@ static X86Opcode IR2X86(IROpcode op) {
       assert(false);
       return 0;
   }
-}
-
-// Number of integer variables that can be pinned to a distinct physical
-// register.  Mirrors the usable fixed slots in X86VarRegSlot(): both leaf and
-// non-leaf functions use callee-saved r12-r15 (4 of them).  Leaf functions
-// cannot pin to r8/r9: those are incoming SysV argument registers, and a
-// five- or six-argument leaf would clobber a still-live parameter.  Beyond
-// this, additional variables must live on the stack -- otherwise they would
-// be allocated to caller-saved temporaries and silently clobbered across the
-// calls they span, or alias another register variable.
-#define X86_MAX_LEAF_INT_REG_VARS 4
-#define X86_MAX_NONLEAF_INT_REG_VARS 4
-
-static bool X86HasFreeIntRegVar(X86Generator* rv) {
-  if (rv->colored) {
-    return true;
-  }
-  bool is_leaf = rv->base.num_calls == 0 && compiler->optimize;
-  int limit = is_leaf ? X86_MAX_LEAF_INT_REG_VARS
-                      : X86_MAX_NONLEAF_INT_REG_VARS;
-  return rv->num_int_reg_vars < limit;
 }
 
 static bool UseRegisterForVariable(X86Generator* rv, IRNode* var_node) {
@@ -6126,18 +6104,6 @@ static int DwarfRegister(TargetGenerator* gen, TargetRegister* reg) {
                                 reg);
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it, it was spilled, or
-// splitting moved it over part of the function.
-static int DebugRegister(X86Generator* rv, RegisterVariable* var) {
-  TargetRegister* reg = var->inst->reg;
-  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
-      (var->split_location != NULL && var->split_location->reg != reg)) {
-    return -1;
-  }
-  return DwarfRegister(&rv->base, reg);
-}
-
 // The frame base offset of spill slot |slot|, which the emitter addresses
 // 8 + |slot| bytes below the local variables and saved arguments.
 static int SpillSlotFrameOffset(X86Generator* rv, int slot) {
@@ -6173,20 +6139,8 @@ static void SetDebugRegisterLocations(X86Generator* rv) {
     }
     // The coloring allocator reuses a variable's register where the variable
     // is dead.
-    if (rv->colored) {
-      colored[num_colored++] = (TargetDebugVariable){
-          symbol, {var->inst, var->split_location}, var->holds_address};
-      continue;
-    }
-    int reg = DebugRegister(rv, var);
-    if (reg < 0) {
-      continue;
-    }
-    if (var->holds_address) {
-      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
-    } else {
-      VariableDIESetRegister(SymbolDIE(symbol), reg);
-    }
+    colored[num_colored++] = (TargetDebugVariable){
+        symbol, {var->inst, var->split_location}, var->holds_address};
   }
   if (num_colored != 0) {
     TargetSetDebugLocationLists(&rv->base, X86RAInfo(), colored, num_colored,
@@ -6543,8 +6497,7 @@ static void AssignRegisterOrOffset(X86Generator* rv, PoolEntry* entry,
     entry->pooled->data.ptr = inst;
   } else {
     // Integer or pointer.
-    if (UseRegisterForVariable(rv, entry->pooled) &&
-        X86HasFreeIntRegVar(rv)) {
+    if (UseRegisterForVariable(rv, entry->pooled)) {
       int reg = rv->num_int_reg_vars++;
       entry->pooled->data.ivalue = X86_REG_VAR | reg;
       if (is_arg) {
@@ -6720,8 +6673,6 @@ void X86Lower(X86Generator* rv, Generator* gen) {
     return;
   }
   TrapLower(&gen->func->info.function.symbol->name);
-  rv->colored = true;
-
   // If the function returns in memory, allocate the struct result
   // register now.
   if (TypeReturnedThroughHiddenPointer(gen->func->next)) {

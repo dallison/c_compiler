@@ -366,10 +366,6 @@ typedef struct X86Generator {
   int struct_return_reg;
   int struct_return_spill_offset;
   bool not_leaf;
-  // The coloring allocator allocates the registers (on x86-64), so variables
-  // need not fit the dominator walk's fixed pool of variable registers, and
-  // are not kept in their conventional registers.
-  bool colored;
   // Set when the function reads an incoming argument passed on the stack.  Such
   // arguments are addressed relative to the frame pointer, so the prologue must
   // establish a frame even for an otherwise leaf/empty function.
