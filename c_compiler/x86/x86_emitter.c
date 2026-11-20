@@ -4613,8 +4613,10 @@ static void PrintIdivFamilyI386(FILE* fp, X86Opcode opcode,
     char div_reg[32];
     X86RegisterName((X86Register*)inst->operand[1]->reg, div_reg,
                        sizeof(div_reg));
-    if (strcmp(div_reg, "rax") == 0 || strcmp(div_reg, "rdx") == 0) {
-      fprintf(fp, "\tmovl %%%s, %%ebx\n", div_reg);
+    if (strcmp(div_reg, "eax") == 0 || strcmp(div_reg, "edx") == 0) {
+      // ecx is the emitter's address register, which the allocator never
+      // assigns, so the divisor can go there whatever else is live.
+      fprintf(fp, "\tmovl %%%s, %%ecx\n", div_reg);
       divisor_moved = true;
     }
   }
@@ -4637,7 +4639,7 @@ static void PrintIdivFamilyI386(FILE* fp, X86Opcode opcode,
   }
   fprintf(fp, "\t%s ", div_mnemonic);
   if (divisor_moved) {
-    fprintf(fp, "%%ebx");
+    fprintf(fp, "%%ecx");
   } else {
     PrintAttOperandI386(fp, inst->operand[1], buf1, sizeof(buf1));
   }
@@ -6116,36 +6118,30 @@ static void PrintInstructionI386(X86Emitter* emitter, TargetInstruction* inst,
         src0 = src1;
         src1 = tmp;
       } else if (src1_in_dest && is_sub) {
-        // Non-commutative subtract with the subtrahend in the destination
-        // register.  Compute dest = src0 - src1 as "neg dest ; add src0, dest"
-        // to avoid clobbering src1.
-        fprintf(fp, "\tnegl ");
+        // The subtrahend lives in the destination.  Copy it to %ecx (the
+        // reserved scratch, never allocated), load the minuend into the
+        // destination, then subtract.  Neither mov changes the flags, so the
+        // borrow chain of subl/sbbl survives.  The negate-and-add form this
+        // replaces clobbered CF, which corrupts the high word of a 64-bit
+        // subtract.
+        fprintf(fp, "\tmovl ");
+        PrintPercentRegFromInstI386(fp, src1, buf1, sizeof(buf1));
+        fprintf(fp, ", %%ecx\n");
+        if (TargetIsConst(src0)) {
+          fprintf(fp, "\tmovl ");
+          PrintAsmImmediate(fp, TargetIntValue(src0));
+        } else if (src0_is_zero) {
+          fprintf(fp, "\tmovl $0");
+        } else {
+          fprintf(fp, "\tmovl ");
+          PrintPercentRegFromInstI386(fp, src0, buf1, sizeof(buf1));
+        }
+        fprintf(fp, ", ");
         PrintPercentRegI386(fp, X86RegisterName((X86Register*)dest_reg, buf2,
                                                sizeof(buf2)));
-        if (!src0_is_zero) {
-          fprintf(fp, "\n\taddl ");
-          if (TargetIsConst(src0)) {
-            PrintAsmImmediate(fp, TargetIntValue(src0));
-          } else {
-            PrintPercentRegFromInstI386(fp, src0, buf1, sizeof(buf1));
-          }
-          fprintf(fp, ", ");
-          PrintPercentRegI386(fp,
-                          X86RegisterName((X86Register*)dest_reg, buf2,
-                                             sizeof(buf2)));
-        }
-        if ((X86Opcode)inst->opcode == X86_OP(subl)) {
-          // The assembler currently has only a 64-bit unary negate. Preserve
-          // the zero-extension semantics that a 32-bit subtraction provides.
-          fprintf(fp, "\n\tmovl ");
-          PrintPercentRegI386(fp,
-                          X86RegisterName((X86Register*)dest_reg, buf2,
-                                             sizeof(buf2)));
-          fprintf(fp, ", ");
-          PrintPercentRegI386(fp,
-                          X86RegisterName((X86Register*)dest_reg, buf2,
-                                             sizeof(buf2)));
-        }
+        fprintf(fp, "\n\t%s %%ecx, ", op);
+        PrintPercentRegI386(fp, X86RegisterName((X86Register*)dest_reg, buf2,
+                                               sizeof(buf2)));
         fprintf(fp, "\n");
         break;
       }

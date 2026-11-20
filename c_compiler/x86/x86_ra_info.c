@@ -18,8 +18,15 @@
 #include "target_reg_alloc.h"
 
 // Physical register keys: the integer registers by hardware number (rax=0,
-// rcx=1, ... r15=15) and xmm0..xmm15 as 64..79.
+// rcx=1, ... r15=15) and xmm0..xmm15 as 64..79.  On i386 the integer keys are
+// eax..edi (0..7) and the xmm keys are xmm0..xmm7 (64..71).
 enum { kFloatKeyBase = 64 };
+
+// The allocator's callbacks take no context.  A run compiles for one target,
+// and the allocation sets the register-name profile to that target's.
+static bool Is64Bit(void) { return X86CurrentRegisterNameProfile()->is_64bit; }
+static int NumIntKeys(void) { return Is64Bit() ? 16 : 8; }
+static int NumFloatKeys(void) { return Is64Bit() ? 16 : 8; }
 
 enum { kIntClass, kFloatClass };
 
@@ -94,11 +101,14 @@ enum { kNumFloatArgKeys = 8 };
 
 static int LocationKey(TargetInstruction* inst) {
   X86Opcode op = (X86Opcode)inst->opcode;
+  // i386 passes every argument on the stack, so its argument pseudo-registers
+  // name no register.  The codegen still writes them for the copy helpers,
+  // which then pass the values on the stack.
   if (op >= X86_OP(a0) && op <= X86_OP(a5)) {
-    return kIntArgKeys[op - X86_OP(a0)];
+    return Is64Bit() ? kIntArgKeys[op - X86_OP(a0)] : -1;
   }
   if (op >= X86_OP(fa0) && op <= X86_OP(fa7)) {
-    return kFloatKeyBase + (int)(op - X86_OP(fa0));
+    return Is64Bit() ? kFloatKeyBase + (int)(op - X86_OP(fa0)) : -1;
   }
   switch (op) {
     case X86_OP(sp):
@@ -106,7 +116,8 @@ static int LocationKey(TargetInstruction* inst) {
     case X86_OP(fp):
       return X86_REG_RBP;
     case X86_OP(t0):
-      return X86_REG_R10;
+      // The emitter's temporary: r10, or eax on i386.
+      return Is64Bit() ? X86_REG_R10 : X86_REG_EAX;
     case X86_OP(asm_bx):
       return X86_REG_RBX;
     case X86_OP(resulti):
@@ -137,6 +148,9 @@ static int WrittenOperand(TargetInstruction* inst) {
 }
 
 static bool IsSavedInt(int r) {
+  if (!Is64Bit()) {
+    return r == X86_REG_EBX || r == X86_REG_ESI || r == X86_REG_EDI;
+  }
   return r == X86_REG_RBX || (r >= X86_REG_R12 && r <= X86_REG_R15);
 }
 
@@ -172,8 +186,12 @@ static const int kIntSlot[16] = {
     21, // r15
 };
 
-// The integer register that logical slot |slot| names.
+// The integer register that logical slot |slot| names.  The i386 logical file
+// is the hardware file.
 static int SlotKey(int slot) {
+  if (!Is64Bit()) {
+    return slot >= 0 && slot < 8 ? slot : -1;
+  }
   for (int r = 0; r < 16; r++) {
     if (kIntSlot[r] == slot) {
       return r;
@@ -181,6 +199,9 @@ static int SlotKey(int slot) {
   }
   return -1;
 }
+
+// The logical slot that integer register key |key| is.
+static int IntSlotOf(int key) { return Is64Bit() ? kIntSlot[key] : key; }
 
 static bool IsExtendedAsm(TargetInstruction* inst) {
   return (X86Opcode)inst->opcode == X86_OP(asm) &&
@@ -196,15 +217,17 @@ static int CalleeSavedClobbers(TargetInstruction* inst, int* keys,
   static const struct {
     const char* name;
     int key;
-  } kSaved[] = {{"rbx", X86_REG_RBX}, {"r12", X86_REG_R12},
-                {"r13", X86_REG_R13}, {"r14", X86_REG_R14},
-                {"r15", X86_REG_R15}};
+  } kSaved[] = {{"rbx", X86_REG_RBX}, {"ebx", X86_REG_EBX},
+                {"esi", X86_REG_ESI}, {"edi", X86_REG_EDI},
+                {"r12", X86_REG_R12}, {"r13", X86_REG_R13},
+                {"r14", X86_REG_R14}, {"r15", X86_REG_R15}};
   Vector* clobbers = &((X86AsmInstruction*)inst)->asm_node->clobbers;
   int n = 0;
   for (size_t i = 0; i < clobbers->length && n < max_keys; i++) {
     const char* name = ((String*)clobbers->value.p[i])->value;
     for (size_t r = 0; r < sizeof(kSaved) / sizeof(kSaved[0]); r++) {
-      if (strcmp(name, kSaved[r].name) == 0) {
+      // A name the target does not save, such as esi on x86-64, is not one.
+      if (IsSavedInt(kSaved[r].key) && strcmp(name, kSaved[r].name) == 0) {
         keys[n++] = kSaved[r].key;
       }
     }
@@ -259,12 +282,12 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
     case X86_OP(rcall):
     case X86_OP(callf):
     case X86_OP(rcallf):
-      for (int r = 0; r < 16 && n < max_keys; r++) {
+      for (int r = 0; r < NumIntKeys() && n < max_keys; r++) {
         if (!IsSavedInt(r) && r != X86_REG_RSP && r != X86_REG_RBP) {
           keys[n++] = r;
         }
       }
-      for (int r = 0; r < 16 && n < max_keys; r++) {
+      for (int r = 0; r < NumFloatKeys() && n < max_keys; r++) {
         keys[n++] = kFloatKeyBase + r;
       }
       n += CalleeSavedClobbers(inst, keys + n, max_keys - n);
@@ -276,7 +299,7 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
       keys[n++] = X86_REG_RDX;
       return n;
     case X86_OP(restore):
-      for (int r = 0; r < 16 && n < max_keys; r++) {
+      for (int r = 0; r < NumIntKeys() && n < max_keys; r++) {
         if (IsSavedInt(r)) {
           keys[n++] = r;
         }
@@ -310,6 +333,7 @@ const TargetRAInfo* X86RAInfo(void) { return &kInfo; }
 typedef struct {
   X86RegisterAllocator* allocator;
   bool returns_int;
+  bool returns_hi;  // A 64-bit result's high half, in edx.
   bool returns_float;
   int spill_size;
 } ColoringContext;
@@ -408,6 +432,10 @@ static TargetRACopyKind CopyKind(TargetInstruction* inst) {
 }
 
 static int ArgumentKeys(int* keys, int max_keys) {
+  // i386 passes every argument on the stack.
+  if (!Is64Bit()) {
+    return 0;
+  }
   int n = 0;
   for (int r = 0; r < kNumIntArgKeys && n < max_keys; r++) {
     keys[n++] = kIntArgKeys[r];
@@ -448,6 +476,9 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
     case X86_OP(ret):
       if (c->returns_int && n < max_keys) {
         keys[n++] = X86_REG_RAX;
+      }
+      if (c->returns_hi && n < max_keys) {
+        keys[n++] = X86_REG_RDX;
       }
       if (c->returns_float && n < max_keys) {
         keys[n++] = kFloatKeyBase;
@@ -585,7 +616,7 @@ static void Assign(void* ctx, TargetInstruction* inst, int key) {
     }
     return;
   }
-  int slot = kIntSlot[key];
+  int slot = IntSlotOf(key);
   inst->reg = &allocator->int_regs[slot].base;
   if (IsSavedInt(key)) {
     BitSetInsert(&allocator->used_int_regs, (size_t)slot);
@@ -644,17 +675,23 @@ static bool HasPrintedThroughAddress(TargetInstruction* inst) {
 }
 
 static const char* Unsupported(X86Generator* rv) {
+  bool is64 = rv->profile->is_64bit;
   FOR_EACH_INSTRUCTION(&rv->base, inst) {
     X86Opcode op = (X86Opcode)inst->opcode;
     switch (op) {
       case X86_OP(spill):
       case X86_OP(reload):
-      case X86_OP(atomic64):
+      case X86_OP(movslq):
       case X86_OP(a6):
       case X86_OP(a7):
-      case X86_OP(resulth):
-      case X86_OP(movslq):
         return X86OpcodeName((int)op);
+      case X86_OP(atomic64):
+      case X86_OP(resulth):
+        // i386 has these, which saves the pair's registers itself.
+        if (is64) {
+          return X86OpcodeName((int)op);
+        }
+        break;
       default:
         break;
     }
@@ -701,10 +738,12 @@ static void FindResults(TargetGenerator* gen, ColoringContext* c) {
       continue;
     }
     bool writes_int = false;
+    bool writes_hi = false;
     for (TargetInstruction* inst = block->code; inst != NULL;
          inst = NextInBlock(block, inst)) {
       if (IsCompareExchange(inst) || IsExtendedAsm(inst)) {
         writes_int = false;
+        writes_hi = false;
         continue;
       }
       if (inst->dest == NULL) {
@@ -713,12 +752,15 @@ static void FindResults(TargetGenerator* gen, ColoringContext* c) {
       X86Opcode op = (X86Opcode)inst->dest->opcode;
       if (op == X86_OP(resulti)) {
         writes_int = true;
+      } else if (op == X86_OP(resulth)) {
+        writes_hi = true;
       } else if (op == X86_OP(resultf) || op == X86_OP(resultd) ||
                  op == X86_OP(resultv)) {
         c->returns_float = true;
       }
     }
     c->returns_int |= writes_int;
+    c->returns_hi |= writes_hi;
   }
 }
 
@@ -770,12 +812,21 @@ void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
       X86_REG_RDX, X86_REG_RSI, X86_REG_RDI, X86_REG_RBX, X86_REG_R12,
       X86_REG_R13, X86_REG_R14, X86_REG_R15,
   };
+  // i386: ecx is the emitter's address register, so it is not allocated.  The
+  // xmm registers 6 and 7 are the emitter's scratch.
+  static const int kIntOrder32[] = {
+      X86_REG_EAX, X86_REG_EDX, X86_REG_EBX, X86_REG_ESI, X86_REG_EDI,
+  };
+  const int* int_order = Is64Bit() ? kIntOrder : kIntOrder32;
+  size_t num_int_order = Is64Bit() ? sizeof(kIntOrder) / sizeof(kIntOrder[0])
+                                   : sizeof(kIntOrder32) / sizeof(kIntOrder32[0]);
   TargetRAClass* ints = &desc.classes[kIntClass];
-  for (size_t i = 0; i < sizeof(kIntOrder) / sizeof(kIntOrder[0]); i++) {
-    ints->regs[ints->num_regs++] = kIntOrder[i];
+  for (size_t i = 0; i < num_int_order; i++) {
+    ints->regs[ints->num_regs++] = int_order[i];
   }
   TargetRAClass* floats = &desc.classes[kFloatClass];
-  for (int r = 0; r < 14; r++) {
+  int num_float_regs = Is64Bit() ? 14 : 6;
+  for (int r = 0; r < num_float_regs; r++) {
     floats->regs[floats->num_regs++] = kFloatKeyBase + r;
   }
 
@@ -794,13 +845,18 @@ void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
     int keys[16];
     int num_keys = CalleeSavedClobbers(inst, keys, 16);
     for (int k = 0; k < num_keys; k++) {
-      BitSetInsert(&allocator->used_int_regs, (size_t)kIntSlot[keys[k]]);
+      BitSetInsert(&allocator->used_int_regs, (size_t)IntSlotOf(keys[k]));
     }
   }
   allocator->current_spilled_region_size = ctx.spill_size;
   allocator->max_spilled_region_size = ctx.spill_size;
   if (ctx.spill_size > 0) {
     // The spill slots are in the frame, which a leaf need not have.
+    rv->not_leaf = true;
+  }
+  if (!Is64Bit()) {
+    // i386 passes arguments on the stack, which the body reads through ebp,
+    // and its prologue saves the callee-saved registers.  Both need a frame.
     rv->not_leaf = true;
   }
 }

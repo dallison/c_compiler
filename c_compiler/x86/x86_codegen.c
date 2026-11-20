@@ -1105,6 +1105,29 @@ static TargetInstruction* StoreImmediate(X86Generator* rv, X86Opcode opcode,
 
 }
 
+// i386 passes every argument on the stack, so the block helpers cannot use
+// the a0..a2 pseudo-registers.  Copy each word into a fresh value first (the
+// stack pointer is about to move), push the words into a 16-byte block below
+// %esp, call the helper, and pop the block again.  The block sits below the
+// caller's outgoing argument area, so that area is left alone.
+static TargetInstruction* I386CallWithStackWords(X86Generator* rv,
+                                                 TargetInstruction* fn,
+                                                 TargetInstruction* words[3]) {
+  TargetInstruction* stable[3];
+  for (int i = 0; i < 3; i++) {
+    stable[i] = Emit(rv, NewInstruction1(X86_OP(mv), words[i]));
+  }
+  TargetInstruction* newsp = AddImmediate(rv, StackPointer(rv), -16);
+  TargetSetDest(newsp, StackPointer(rv));
+  for (int i = 0; i < 3; i++) {
+    StoreImmediate(rv, X86_OP(storel), stable[i], StackPointer(rv), 4 * i);
+  }
+  TargetInstruction* call = Emit(rv, NewInstruction2(X86_OP(call), fn, NULL));
+  TargetInstruction* restore = AddImmediate(rv, StackPointer(rv), 16);
+  TargetSetDest(restore, StackPointer(rv));
+  return call;
+}
+
 static TargetInstruction* Memcpy(X86Generator* rv, TargetInstruction* dest_addr,
                                  TargetInstruction* src_addr, int length,
                                  int src_offset, int dest_offset, bool count_as_call) {
@@ -1142,6 +1165,21 @@ static TargetInstruction* Memcpy(X86Generator* rv, TargetInstruction* dest_addr,
     return result;
   }
   // TODO: generate a loop for intermediate lengths?
+
+  if (!X86_IS_64BIT(rv)) {
+    if (src_offset != 0) {
+      src_addr = OffsetFrom(rv, src_addr, src_offset);
+    }
+    if (dest_offset != 0) {
+      dest_addr = OffsetFrom(rv, dest_addr, dest_offset);
+    }
+    TargetInstruction* size = Emit(
+        rv, NewInstruction1(X86_OP(mov),
+                            GetIntConstant(rv, NULL, kTargetType32Bit, length)));
+    TargetInstruction* words[3] = {dest_addr, src_addr, size};
+    return I386CallWithStackWords(rv, GetSymbol(rv, NULL, rv->base.memcpy),
+                                  words);
+  }
 
   // Length in a2.
   TargetInstruction* size = Emit(
@@ -1205,6 +1243,15 @@ static TargetInstruction* Memzero(X86Generator* rv, TargetInstruction* dest_addr
   TargetInstruction* size = Emit(
       rv, NewInstruction1(X86_OP(mov),
                           GetIntConstant(rv, NULL, kTargetType32Bit, length)));
+  if (!X86_IS_64BIT(rv)) {
+    // The address is folded in first, as for the x86-64 path below.
+    if (offset != 0) {
+      dest_addr = OffsetFrom(rv, dest_addr, offset);
+    }
+    TargetInstruction* words[3] = {dest_addr, Zero(rv), size};
+    return I386CallWithStackWords(rv, GetSymbol(rv, NULL, rv->base.memset),
+                                  words);
+  }
   TargetInstruction* arg2 = SetDestOrMoveToArgReg(
       rv, NULL, size, IntArgumentRegister(rv, 2), X86_OP(mv));
   //TargetInstruction* arg2 =
@@ -6673,8 +6720,8 @@ void X86Lower(X86Generator* rv, Generator* gen) {
     return;
   }
   TrapLower(&gen->func->info.function.symbol->name);
-  rv->colored = X86_IS_64BIT(rv);
-  
+  rv->colored = true;
+
   // If the function returns in memory, allocate the struct result
   // register now.
   if (TypeReturnedThroughHiddenPointer(gen->func->next)) {
