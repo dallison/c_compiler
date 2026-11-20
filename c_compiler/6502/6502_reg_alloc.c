@@ -274,6 +274,7 @@ static void ExpandCopies(W65C02RegisterAllocator* allocator) {
 void W65C02AllocateRegisters(W65C02RegisterAllocator* allocator) {
   W65C02AllocateRegistersByColoring(allocator);
   ExpandCopies(allocator);
+  W65C02ShrinkWrap(allocator);
 }
 
 uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc) {

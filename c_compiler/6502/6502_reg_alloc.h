@@ -81,6 +81,7 @@ uint32_t W65C02RegisterAllocatorBuildRegMask(W65C02RegisterAllocator* alloc);
 const char* W65C02RegisterAllocatorPrintRegMask(uint32_t mask, char* buf);
 
 void W65C02AllocateRegisters(W65C02RegisterAllocator* emitter);
+void W65C02ShrinkWrap(W65C02RegisterAllocator* allocator);
 W65C02RegisterType W65C02InstructionRegisterType(TargetInstruction* inst);
 
 // The coloring allocator in 6502_ra_info.c.
