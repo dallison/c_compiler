@@ -7,8 +7,10 @@
 //  target_reg_alloc.h.
 //
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "x86_reg_alloc.h"
 #include "x86_codegen.h"
 #include "x86_machine.h"
@@ -149,11 +151,102 @@ static bool IsCompareExchange(TargetInstruction* inst) {
   }
 }
 
+// The logical register slot that names each integer register.  The logical
+// file aliases the 16 registers, and the emitter compares registers by slot.
+static const int kIntSlot[16] = {
+    1,  // rax
+    13, // rcx
+    12, // rdx
+    9,  // rbx
+    2,  // rsp
+    8,  // rbp
+    11, // rsi
+    10, // rdi
+    14, // r8
+    15, // r9
+    5,  // r10
+    3,  // r11
+    18, // r12
+    19, // r13
+    20, // r14
+    21, // r15
+};
+
+// The integer register that logical slot |slot| names.
+static int SlotKey(int slot) {
+  for (int r = 0; r < 16; r++) {
+    if (kIntSlot[r] == slot) {
+      return r;
+    }
+  }
+  return -1;
+}
+
+static bool IsExtendedAsm(TargetInstruction* inst) {
+  return (X86Opcode)inst->opcode == X86_OP(asm) &&
+         (inst->flags & X86_INST_EXTENDED_ASM) != 0;
+}
+
+// The callee-saved registers named in an asm clobber list.
+static int CalleeSavedClobbers(TargetInstruction* inst, int* keys,
+                               int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  static const struct {
+    const char* name;
+    int key;
+  } kSaved[] = {{"rbx", X86_REG_RBX}, {"r12", X86_REG_R12},
+                {"r13", X86_REG_R13}, {"r14", X86_REG_R14},
+                {"r15", X86_REG_R15}};
+  Vector* clobbers = &((X86AsmInstruction*)inst)->asm_node->clobbers;
+  int n = 0;
+  for (size_t i = 0; i < clobbers->length && n < max_keys; i++) {
+    const char* name = ((String*)clobbers->value.p[i])->value;
+    for (size_t r = 0; r < sizeof(kSaved) / sizeof(kSaved[0]); r++) {
+      if (strcmp(name, kSaved[r].name) == 0) {
+        keys[n++] = kSaved[r].key;
+      }
+    }
+  }
+  return n;
+}
+
+// The registers codegen put an asm's operands in.  The outputs come first,
+// and an immediate input has no register.
+static int AsmOperandKeys(TargetInstruction* inst, bool outputs, int* keys,
+                          int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  X86AsmInstruction* asm_inst = (X86AsmInstruction*)inst;
+  Vector* asm_outputs = &asm_inst->asm_node->outputs;
+  int n = 0;
+  for (int i = 0; i < asm_inst->num_operands && n < max_keys; i++) {
+    bool is_output = (size_t)i < asm_outputs->length;
+    if (outputs ? !is_output
+                : is_output &&
+                      !((AsmOperand*)asm_outputs->value.p[i])->is_readwrite) {
+      continue;
+    }
+    int key = asm_inst->reg_nums[i] == INT_MIN
+                  ? -1
+                  : SlotKey(asm_inst->reg_nums[i]);
+    if (key >= 0) {
+      keys[n++] = key;
+    }
+  }
+  return n;
+}
+
 // A call overwrites the SysV caller-saved registers, which are all of the xmm
 // registers.  The divide family leaves rax and rdx holding its quotient and
 // remainder, and cmpxchg leaves rax holding the value it found.  The epilogue
 // reloads the callee-saved registers, so a value read after it, such as the
-// target of an indirect tail call, must be in none of them.
+// target of an indirect tail call, must be in none of them.  Inline asm is
+// lowered with its operands in fixed registers, and the registers its text
+// uses are unknown, so it clobbers what a call does, its outputs and whatever
+// callee-saved registers it names.
 static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   int n = 0;
   if (IsCompareExchange(inst)) {
@@ -161,6 +254,7 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
     return n;
   }
   switch ((X86Opcode)inst->opcode) {
+    case X86_OP(asm):
     case X86_OP(call):
     case X86_OP(rcall):
     case X86_OP(callf):
@@ -173,7 +267,8 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
       for (int r = 0; r < 16 && n < max_keys; r++) {
         keys[n++] = kFloatKeyBase + r;
       }
-      return n;
+      n += CalleeSavedClobbers(inst, keys + n, max_keys - n);
+      return n + AsmOperandKeys(inst, true, keys + n, max_keys - n);
     case X86_OP(idiv):
     case X86_OP(div):
     case X86_OP(mod):
@@ -334,6 +429,8 @@ static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
     return n;
   }
   switch ((X86Opcode)inst->opcode) {
+    case X86_OP(asm):
+      return AsmOperandKeys(inst, false, keys, max_keys);
     case X86_OP(save):
       // The prologue stores incoming argument registers to the frame.
       return ArgumentKeys(keys, max_keys);
@@ -473,27 +570,6 @@ static TargetInstruction* CreateJump(void* ctx, TargetInstruction* label) {
   return TargetNewInstruction1((TargetOpcode)X86_OP(jmp), label);
 }
 
-// The logical register slot that names each integer register.  The logical
-// file aliases the 16 registers, and the emitter compares registers by slot.
-static const int kIntSlot[16] = {
-    1,  // rax
-    13, // rcx
-    12, // rdx
-    9,  // rbx
-    2,  // rsp
-    8,  // rbp
-    11, // rsi
-    10, // rdi
-    14, // r8
-    15, // r9
-    5,  // r10
-    3,  // r11
-    18, // r12
-    19, // r13
-    20, // r14
-    21, // r15
-};
-
 // The dominator walk keeps values in xmm8-xmm15 across calls, so those are
 // saved in the prologue here too, for its callers.
 enum { kFirstSavedFloat = 8 };
@@ -571,7 +647,6 @@ static const char* Unsupported(X86Generator* rv) {
   FOR_EACH_INSTRUCTION(&rv->base, inst) {
     X86Opcode op = (X86Opcode)inst->opcode;
     switch (op) {
-      case X86_OP(asm):
       case X86_OP(spill):
       case X86_OP(reload):
       case X86_OP(atomic64):
@@ -590,56 +665,35 @@ static const char* Unsupported(X86Generator* rv) {
   return NULL;
 }
 
-// The allocator reads `mv loc, src` as `mv src -> loc`.  Records each move and
-// the location it wrote in |moves| for RestoreWrittenMoves.
-static void RewriteWrittenMoves(TargetGenerator* gen, Vector* moves) {
+// The allocator reads `mv loc, src` as `mv src -> loc`.
+static void RewriteWrittenMoves(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if (WrittenOperand(inst) != 0) {
       continue;
     }
     TargetInstruction* location = inst->operand[0];
-    VectorAppend(moves, inst);
-    VectorAppend(moves, location);
     TargetReplaceOperand(inst, 0, inst->operand[1]);
     TargetReplaceOperand(inst, 1, NULL);
     inst->dest = location;
   }
 }
 
-static void RestoreWrittenMoves(Vector* moves) {
-  for (size_t i = 0; i + 1 < moves->length; i += 2) {
-    TargetInstruction* inst = moves->value.p[i];
-    TargetInstruction* location = moves->value.p[i + 1];
-    TargetReplaceOperand(inst, 1, inst->operand[0]);
-    TargetReplaceOperand(inst, 0, location);
-    inst->dest = NULL;
-  }
-}
-
 // xadd leaves its result in its delta's register, which the lowering says by
 // making the delta its dest, although the delta is a value.  Here the result
 // gets a register of its own, and the emitter copies the delta into it.
-// Records each xadd in |xadds| for RestoreXaddDests.
-static void DetachXaddDests(TargetGenerator* gen, Vector* xadds) {
+static void DetachXaddDests(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((X86Opcode)inst->opcode == X86_OP(atomic_fetch_add_sub) &&
         inst->dest != NULL && inst->dest == inst->operand[1]) {
-      VectorAppend(xadds, inst);
       inst->dest = NULL;
     }
   }
 }
 
-static void RestoreXaddDests(Vector* xadds) {
-  for (size_t i = 0; i < xadds->length; i++) {
-    TargetInstruction* inst = xadds->value.p[i];
-    inst->dest = inst->operand[1];
-  }
-}
-
 // Notes which result registers the function returns values in.  The lowering
-// also moves a compare-exchange's expected value into rax, so a write to rax
-// that a compare-exchange follows in its block is not a result.
+// also moves a compare-exchange's expected value and an asm's `a` operand into
+// rax, so a write to rax that one of those follows in its block is not a
+// result.
 static void FindResults(TargetGenerator* gen, ColoringContext* c) {
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[b];
@@ -649,7 +703,7 @@ static void FindResults(TargetGenerator* gen, ColoringContext* c) {
     bool writes_int = false;
     for (TargetInstruction* inst = block->code; inst != NULL;
          inst = NextInBlock(block, inst)) {
-      if (IsCompareExchange(inst)) {
+      if (IsCompareExchange(inst) || IsExtendedAsm(inst)) {
         writes_int = false;
         continue;
       }
@@ -668,16 +722,18 @@ static void FindResults(TargetGenerator* gen, ColoringContext* c) {
   }
 }
 
-bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
+}
+
+void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
   X86Generator* rv = allocator->rv;
   TargetGenerator* gen = &rv->base;
   const char* reason = Unsupported(rv);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   ColoringContext ctx = {.allocator = allocator};
@@ -723,27 +779,22 @@ bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
     floats->regs[floats->num_regs++] = kFloatKeyBase + r;
   }
 
-  Vector moves;
-  VectorInit(&moves);
-  RewriteWrittenMoves(gen, &moves);
-  Vector xadds;
-  VectorInit(&xadds);
-  DetachXaddDests(gen, &xadds);
+  RewriteWrittenMoves(gen);
+  DetachXaddDests(gen);
   if (getenv("DAVECC_RA_CHECK") != NULL) {
     TargetRACheck(gen, &kInfo, NULL, stderr, 3);
   }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
-    RestoreXaddDests(&xadds);
-    RestoreWrittenMoves(&moves);
-    VectorDestruct(&xadds);
-    VectorDestruct(&moves);
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
-  VectorDestruct(&xadds);
-  VectorDestruct(&moves);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((X86Opcode)inst->opcode == X86_OP(spill)) {
       inst->reg = inst->operand[0]->reg;
+    }
+    int keys[16];
+    int num_keys = CalleeSavedClobbers(inst, keys, 16);
+    for (int k = 0; k < num_keys; k++) {
+      BitSetInsert(&allocator->used_int_regs, (size_t)kIntSlot[keys[k]]);
     }
   }
   allocator->current_spilled_region_size = ctx.spill_size;
@@ -752,6 +803,4 @@ bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator) {
     // The spill slots are in the frame, which a leaf need not have.
     rv->not_leaf = true;
   }
-  rv->colored = true;
-  return true;
 }

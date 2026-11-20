@@ -449,7 +449,7 @@ void X86Optimize(X86Generator* rv) {
   // RVPrintBasicBlocks(rv, stdout);
   // Rebuild the basic block input and outputs for the dominator walk and the
   // back end listing.  The coloring allocator finds its own liveness.
-  if (!rv->try_coloring || compiler->print_back_end ||
+  if (!rv->colored || compiler->print_back_end ||
       compiler->ir_output_file != stdout) {
     TargetBuildBasicBlockInputsAndOutputs(&rv->base);
   }

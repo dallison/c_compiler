@@ -644,7 +644,6 @@ void X86GeneratorInitWithProfile(X86Generator* rv, Generator* gen,
   rv->zero = NULL;
   rv->tmp = NULL;
   rv->not_leaf = false;
-  rv->try_coloring = false;
   rv->colored = false;
   rv->has_incoming_stack_args = false;
   rv->named_stack_arg_end = 0;
@@ -1361,7 +1360,7 @@ static X86Opcode IR2X86(IROpcode op) {
 #define X86_MAX_NONLEAF_INT_REG_VARS 4
 
 static bool X86HasFreeIntRegVar(X86Generator* rv) {
-  if (rv->try_coloring) {
+  if (rv->colored) {
     return true;
   }
   bool is_leaf = rv->base.num_calls == 0 && compiler->optimize;
@@ -6669,24 +6668,12 @@ static void LowerVariables(X86Generator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
-// The coloring allocator leaves inline assembly to the dominator walk.
-static bool ColoringHandlesFunction(Generator* gen) {
-  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
-       node = IRNext(node)) {
-    if (node->opcode == IR_OP(asm)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 void X86Lower(X86Generator* rv, Generator* gen) {
   if (!X86_IS_64BIT(rv) && !X86I386ValidateFunction(rv, gen)) {
     return;
   }
   TrapLower(&gen->func->info.function.symbol->name);
-  rv->try_coloring = X86_IS_64BIT(rv) && X86UseColoringAllocator(rv) &&
-                     ColoringHandlesFunction(gen);
+  rv->colored = X86_IS_64BIT(rv);
   
   // If the function returns in memory, allocate the struct result
   // register now.

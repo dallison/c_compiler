@@ -85,12 +85,7 @@ int X86RegisterDwarfNumber(X86RegisterAllocator* allocator,
 // How the shared allocator code reads x86-64 instructions.
 const TargetRAInfo* X86RAInfo(void);
 
-// Whether to try the coloring allocator on the function |rv| is starting.
-// Call once per function.
-bool X86UseColoringAllocator(struct X86Generator* rv);
-
-// Allocates the current function with the shared coloring allocator.  Returns
-// false, leaving the function untouched, if it cannot.
-bool X86AllocateRegistersByColoring(X86RegisterAllocator* allocator);
+// Allocates the current function with the shared coloring allocator.
+void X86AllocateRegistersByColoring(X86RegisterAllocator* allocator);
 
 #endif /* x86_reg_alloc_h */
