@@ -72,10 +72,6 @@ typedef enum {
 // Atomic pseudo metadata in the target-instruction flag word.
 #define ARM_ATOMIC_SIZE_SHIFT 18
 #define ARM_ATOMIC_SIZE_MASK (3 << ARM_ATOMIC_SIZE_SHIFT)
-// The high half of a wide operand is a user of its low half.
-#define ARM_WIDE_HI (1 << 9)
-// The high half of a wide atomic result is a user of the atomic instruction.
-#define ARM_WIDE_RESULT (1 << 10)
 #define ARM_ATOMIC_WEAK (1 << 20)
 #define ARM_ATOMIC_ORDER_SHIFT 26
 #define ARM_ATOMIC_ORDER_MASK (7 << ARM_ATOMIC_ORDER_SHIFT)
@@ -472,7 +468,6 @@ typedef struct ARMGenerator {
                             // epilogue must restore sp from fp.
   int saved_arg_size;     // Bytes used by register-passed argument homes.
   bool wide_result;       // Returns a 64-bit integer in r0:r1.
-  bool colored;           // The coloring allocator allocated the registers.
   
   Vector saved_regs;
   Vector offsets;         // Pointers to Offset.

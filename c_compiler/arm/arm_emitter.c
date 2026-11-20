@@ -256,13 +256,6 @@ static bool OmitFramePointer(ARMEmitter* emitter) {
          emitter->g->saved_regs.length == 0;
 }
 
-// The coloring allocator keeps the hidden result pointer like any other value.
-static bool NeedsStructReturnHome(ARMEmitter* emitter) {
-  return emitter->g->struct_return_reg >= 0 && !emitter->g->colored &&
-         (emitter->g->base.num_calls > 0 ||
-          emitter->g->exception_ranges.length > 0);
-}
-
 static bool HasCanonicalFrameRecord(ARMEmitter* emitter);
 
 // The integer callee-save block sits between the AAPCS frame record and local
@@ -303,12 +296,6 @@ static int StackFrameSize(ARMEmitter* emitter) {
   stack_frame_size += CanonicalIntSavePadding(emitter);
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += emitter->spill_region_size;
-  if (NeedsStructReturnHome(emitter)) {
-    // Keep a stable home for the hidden result pointer.  Besides exception
-    // landing pads, this protects post-call uses from a callee that exhausts
-    // or corrupts the register save area in a deep variadic call chain.
-    stack_frame_size += 8;
-  }
   
   stack_frame_size = (stack_frame_size + 7) & ~7;  // Aligned to 8 bytes.
 
@@ -397,25 +384,6 @@ static void EmitIntRegBlock(FILE* fp, const char* op, const char* base,
                                    sizeof(buf)));
   }
   fprintf(fp, "}\n");
-}
-
-static int StructReturnPhysicalRegister(ARMEmitter* emitter) {
-  if (emitter->g->struct_return_reg < 0 || emitter->g->colored) {
-    return -1;
-  }
-  bool is_leaf = emitter->g->base.num_calls == 0 && compiler->optimize;
-  return (is_leaf ? ARM_FIRST_LEAF_INT_REG_VAR : ARM_FIRST_INT_REG_VAR) +
-         emitter->g->struct_return_reg;
-}
-
-static void ReloadStructReturnAfterCall(ARMEmitter* emitter, FILE* fp) {
-  int reg = StructReturnPhysicalRegister(emitter);
-  if (reg < 0) {
-    return;
-  }
-  assert(emitter->struct_return_fp_offset < 0);
-  LoadRegisterFromFrame(emitter, reg, -emitter->struct_return_fp_offset,
-                        false, "hidden result pointer", fp);
 }
 
 static int CollectUsedIntRegisters(ARMEmitter* emitter, int* regs) {
@@ -779,18 +747,6 @@ static void SaveRegisters(ARMEmitter* emitter, FILE* fp) {
             offset);
     BitSetIteratorNext(&it);
   }
-  if (NeedsStructReturnHome(emitter)) {
-    assert(saved_reg_offset >= 0);
-    fprintf(fp, "\tstr r0, [sp, #%d]\t// hidden result pointer\n",
-            saved_reg_offset);
-    // This slot remains sp-relative at the bottom of the completed frame. The
-    // canonical frame record moves fp down by eight bytes, but relocating the
-    // integer save block does not move this slot.
-    emitter->struct_return_fp_offset =
-        saved_reg_offset - stack_frame_size + space_above_frame_pointer +
-        (canonical_frame ? ARM_STACK_FRAME_HEADER_SIZE : 0);
-  }
-
   if (!is_leaf) {
     fprintf(fp, "\t// End of stack frame\n");
   }
@@ -934,24 +890,8 @@ static void RestoreExceptionLandingState(ARMEmitter* emitter, FILE* fp) {
   // them.  Their frame slots hold the *caller's* values, stored on entry, but a
   // handler needs the values this function itself had at the call that threw,
   // and reloading the slots would overwrite exactly those.  The unwinder
-  // installs them from its virtual register set instead.  Skip their slots to
-  // reach the hidden result pointer, which is this function's own.
-  int int_regs[ARM_NUM_INT_REGS];
-  int num_int = CollectUsedIntRegisters(emitter, int_regs);
-  int offset = emitter->saved_reg_offset - 4 * num_int;
-  if (num_int > 0) {
-    offset -= 4;
-  }
-  offset -= 8 * BitSetCount(&emitter->regs->used_float_regs);
-  int struct_return_phys = StructReturnPhysicalRegister(emitter);
-  if (struct_return_phys >= 0) {
-    char buf[8];
-    assert(offset >= 0);
-    fprintf(fp, "\tldr %s, [sp, #%d]\t// hidden result pointer\n",
-            ARMRegisterNameFromNum(struct_return_phys, kARMRegTypeInt,
-                                   kSize32Bit, buf, sizeof(buf)),
-            offset);
-  }
+  // installs them from its virtual register set instead.  The allocator keeps
+  // the hidden result pointer live across the calls.
 }
 
 // In arm_codegen.c.
@@ -1313,19 +1253,6 @@ static int ArmRegNum(TargetInstruction* inst) {
   return inst->reg->num;
 }
 
-static TargetInstruction* FlaggedUser(TargetInstruction* inst, int flag) {
-  if (inst == NULL) {
-    return NULL;
-  }
-  for (size_t i = 0; i < inst->users.length; i++) {
-    TargetInstruction* user = inst->users.value.p[i];
-    if (user != NULL && (user->flags & flag) != 0) {
-      return user;
-    }
-  }
-  return NULL;
-}
-
 static const char* ArmRegText(TargetInstruction* inst, char* buf, size_t n) {
   if (inst == NULL || inst->reg == NULL) {
     return "r0";
@@ -1334,9 +1261,10 @@ static const char* ArmRegText(TargetInstruction* inst, char* buf, size_t n) {
 }
 
 // LDREXD/STREXD sequence for an 8-byte atomic.  r4:r5 is the exclusive pair,
-// r3 is the status/temp, and ip holds the address.  All three are saved across
-// the sequence; a result that the allocator placed in one of them is written
-// after that restore.
+// r6 is the status and ip holds the address.  r0-r6 are saved across the
+// sequence; the result is written after that restore, its low half in the
+// atomic's register and its high half in r1.  A compare-exchange by value
+// finds the high half of its desired value in r3.
 static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
                           FILE* fp) {
   int order = AtomicOrder(inst);
@@ -1358,14 +1286,15 @@ static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
   bool returns_bool = is_cas && !returns_value;
 
   TargetInstruction* result_lo = inst;
-  TargetInstruction* result_hi = NULL;
+  bool has_result_hi = false;
   TargetInstruction* addr = inst->operand[0];
   TargetInstruction* a_lo = NULL;
   TargetInstruction* a_hi = NULL;
   TargetInstruction* b_lo = NULL;
   TargetInstruction* b_hi = NULL;
+  bool b_hi_in_r3 = false;
   if (is_load) {
-    result_hi = inst->operand[1];
+    has_result_hi = true;
   } else if (is_store) {
     a_lo = inst->operand[0];
     a_hi = inst->operand[1];
@@ -1374,7 +1303,7 @@ static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
   } else if (is_add || is_sub) {
     a_lo = inst->operand[1];
     a_hi = inst->operand[2];
-    result_hi = inst->operand[3];
+    has_result_hi = true;
   } else if (expected_is_pointer) {
     a_lo = inst->operand[1];
     b_lo = inst->operand[2];
@@ -1384,21 +1313,18 @@ static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
     a_lo = inst->operand[1];
     a_hi = inst->operand[2];
     b_lo = inst->operand[3];
-    b_hi = FlaggedUser(b_lo, ARM_WIDE_HI);
-    if (returns_value) {
-      result_hi = FlaggedUser(inst, ARM_WIDE_RESULT);
-    }
+    b_hi_in_r3 = true;
+    has_result_hi = returns_value;
   }
 
   char naddr[16], na_lo[16], na_hi[16], nb_lo[16], nb_hi[16];
-  char nlo[16], nhi[16];
+  char nlo[16];
   const char* saddr = ArmRegText(addr, naddr, sizeof(naddr));
   const char* slo = result_lo == NULL ? NULL
                                       : ArmRegText(result_lo, nlo, sizeof(nlo));
-  const char* shi = result_hi == NULL ? NULL
-                                      : ArmRegText(result_hi, nhi, sizeof(nhi));
+  const char* shi = has_result_hi ? "r1" : NULL;
   int lo_num = ArmRegNum(result_lo);
-  int hi_num = ArmRegNum(result_hi);
+  int hi_num = has_result_hi ? 1 : -1;
 
   if (order == 5 || (release && !is_load)) {
     fprintf(fp, "\tdmb ish\n");
@@ -1418,9 +1344,9 @@ static void PrintAtomic64(TargetInstruction* inst, const char* func_name,
     fprintf(fp, "\tstr %s, [sp, #12]\n",
             ArmRegText(b_lo, nb_lo, sizeof(nb_lo)));
   }
-  if (b_hi != NULL) {
+  if (b_hi != NULL || b_hi_in_r3) {
     fprintf(fp, "\tstr %s, [sp, #16]\n",
-            ArmRegText(b_hi, nb_hi, sizeof(nb_hi)));
+            b_hi_in_r3 ? "r3" : ArmRegText(b_hi, nb_hi, sizeof(nb_hi)));
   }
   fprintf(fp, "\tstr r0, [sp, #40]\n");
   fprintf(fp, "\tstr r1, [sp, #44]\n");
@@ -2111,7 +2037,6 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       char symbuf[256];
       fprintf(fp, "\t%-12s%s\n", "bl",
               TargetSymbolName(sym->symbol, symbuf, sizeof(symbuf)));
-      ReloadStructReturnAfterCall(emitter, fp);
       return;
     }
 
@@ -2567,7 +2492,6 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       fprintf(fp, "\tblx %s\n",
               GetRegisterName(inst->operand[0], reg_size, buf1,
                              sizeof(buf1)));
-      ReloadStructReturnAfterCall(emitter, fp);
       break;
 
     case ARM_OP(movw):
@@ -2575,15 +2499,13 @@ static void PrintInstruction(ARMEmitter* emitter, TargetInstruction* inst,
       bool high = (ARMOpcode)inst->opcode == ARM_OP(movt);
       TargetInstruction* sym = high ? inst->operand[1] : inst->operand[0];
       const char* reg = GetRegisterName(inst, reg_size, buf1, sizeof(buf1));
-      // The coloring allocator gives movw and movt their own registers, so a
-      // movt in another register sets both halves.
-      if (emitter->g->colored) {
-        if (!high && OnlyFeedsMovtElsewhere(inst)) {
-          break;
-        }
-        if (high && inst->operand[0]->reg != WrittenRegister(inst)) {
-          PrintMovHalf(false, reg, sym, fp);
-        }
+      // The allocator gives movw and movt their own registers, so a movt in
+      // another register sets both halves.
+      if (!high && OnlyFeedsMovtElsewhere(inst)) {
+        break;
+      }
+      if (high && inst->operand[0]->reg != WrittenRegister(inst)) {
+        PrintMovHalf(false, reg, sym, fp);
       }
       PrintMovHalf(high, reg, sym, fp);
       break;
@@ -2679,7 +2601,6 @@ void ARMEmitterInit(ARMEmitter* emitter, ARMGenerator* g) {
   emitter->saved_reg_offset = 0;
   emitter->spill_region_size = g->register_allocator.max_spilled_region_size;
   emitter->first_spill_offset = 0;
-  emitter->struct_return_fp_offset = 0;
   emitter->current_block = NULL;
 }
 

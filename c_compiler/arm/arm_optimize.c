@@ -641,8 +641,11 @@ void ARMOptimize(ARMGenerator* rv) {
   // ARMPrintBasicBlocks(rv, stdout);
 
   // ARMPrintBasicBlocks(rv, stdout);
-  // Rebuild the basic block input and outputs.
-  TargetBuildBasicBlockInputsAndOutputs(&rv->base);
+  // Rebuild the basic block input and outputs for the back end listing.  The
+  // allocator finds its own liveness.
+  if (compiler->print_back_end || compiler->ir_output_file != stdout) {
+    TargetBuildBasicBlockInputsAndOutputs(&rv->base);
+  }
 }
 
 

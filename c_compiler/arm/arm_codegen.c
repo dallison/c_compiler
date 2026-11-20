@@ -713,7 +713,6 @@ void ARMGeneratorInit(ARMGenerator* g, Generator* gen) {
   g->uses_dynamic_stack = false;
   g->saved_arg_size = 0;
   g->wide_result = false;
-  g->colored = false;
   g->zero = NULL;
   g->tmp = NULL;
   g->lsl = NULL;
@@ -5478,34 +5477,37 @@ static void MarkWideHalf(TargetInstruction* lo, TargetInstruction* hi) {
     return;
   }
   PairWideHalves(lo, hi);
-  hi->flags |= ARM_WIDE_HI;
 }
 
+// A 64-bit atomic leaves its result in r0:r1, like a call.  Both halves are
+// copied out at once.
 static TargetInstruction* FinishWideAtomic(ARMGenerator* g, IRNode* node,
-                                           TargetInstruction* lo,
-                                           TargetInstruction* hi) {
+                                           TargetInstruction* inst) {
+  Emit(g, inst);
+  TargetInstruction* r1 = Emit(g, NewInstruction(ARM_OP(r1)));
+  TargetInstruction* hi = Emit(g, NewInstruction1(ARM_OP(mov), r1));
+  TargetInstruction* lo = Emit(g, NewInstruction1(ARM_OP(mov), inst));
+  PairWideHalves(lo, hi);
   SetLoweredHi(node, hi);
   RouteWideResultToDest(g, node, lo, hi);
   return SetLoweredNode(node, lo);
 }
 
-// 64-bit atomics use LDREXD/STREXD.  The two halves stay in ordinary registers;
-// the emitter stages the exclusive pair through r4/r5.
+// 64-bit atomics use LDREXD/STREXD, which the emitter stages through r4/r5.
+// Every input is an operand except the high half of the desired value of a
+// compare-exchange by value, which is passed in r3.
 static TargetInstruction* LowerAtomic64(ARMGenerator* g, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   TypeRecord* value_type = addr_node->type->next;
   TargetInstruction* addr = AtomicAddress(g, addr_node);
   TargetInstruction* inst = NULL;
-  TargetInstruction* result_hi = NULL;
 
   switch (node->opcode) {
     case IR_OP(atomic_load): {
-      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
-      inst = NewInstruction2(ARM_OP(atomic_load), addr, result_hi);
+      inst = NewInstruction1(ARM_OP(atomic_load), addr);
       SetAtomicMetadata(inst, value_type,
                         AtomicIRConstant(node->inputs.value.p[1]), 0, false);
-      Emit(g, inst);
-      return FinishWideAtomic(g, node, inst, result_hi);
+      return FinishWideAtomic(g, node, inst);
     }
     case IR_OP(atomic_store): {
       TargetInstruction *value_lo, *value_hi;
@@ -5532,12 +5534,10 @@ static TargetInstruction* LowerAtomic64(ARMGenerator* g, IRNode* node) {
       TargetInstruction *delta_lo, *delta_hi;
       MaterializeWide(g, node->inputs.value.p[1], &delta_lo, &delta_hi);
       MarkWideHalf(delta_lo, delta_hi);
-      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
-      inst = NewInstruction4(opcode, addr, delta_lo, delta_hi, result_hi);
+      inst = NewInstruction3(opcode, addr, delta_lo, delta_hi);
       SetAtomicMetadata(inst, value_type,
                         AtomicIRConstant(node->inputs.value.p[2]), 0, false);
-      Emit(g, inst);
-      return FinishWideAtomic(g, node, inst, result_hi);
+      return FinishWideAtomic(g, node, inst);
     }
     case IR_OP(atomic_compare_exchange_bool):
     case IR_OP(atomic_compare_exchange_val):
@@ -5567,6 +5567,7 @@ static TargetInstruction* LowerAtomic64(ARMGenerator* g, IRNode* node) {
         MaterializeWide(g, node->inputs.value.p[2], &desired_lo, &desired_hi);
         MarkWideHalf(expected_lo, expected_hi);
         MarkWideHalf(desired_lo, desired_hi);
+        SetDestOrMove(g, desired_hi, IntArgumentRegister(g, 3), ARM_OP(mov));
         inst = NewInstruction4(opcode, addr, expected_lo, expected_hi,
                                desired_lo);
       }
@@ -5574,14 +5575,17 @@ static TargetInstruction* LowerAtomic64(ARMGenerator* g, IRNode* node) {
           inst, value_type,
           AtomicIRConstant(node->inputs.value.p[order_index]),
           AtomicIRConstant(node->inputs.value.p[order_index + 1]), weak);
-      if (!returns_value) {
-        return FinishAtomicValue(g, node, inst);
+      if (returns_value) {
+        return FinishWideAtomic(g, node, inst);
       }
+      CopyOrSetInstructionSize(node, inst);
       Emit(g, inst);
-      result_hi = Emit(g, NewInstruction(ARM_OP(tmp)));
-      result_hi->flags |= ARM_WIDE_RESULT;
-      TargetAddUser(inst, result_hi);
-      return FinishWideAtomic(g, node, inst, result_hi);
+      TargetInstruction* result = Emit(g, NewInstruction1(ARM_OP(mov), inst));
+      TargetInstruction* dest = GetDestInstruction(g, node);
+      if (dest != NULL) {
+        result = SetDestOrMove(g, result, dest, ARM_OP(mov));
+      }
+      return SetLoweredNode(node, result);
     }
     default:
       assert(false);
@@ -6386,15 +6390,6 @@ static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
   return reg->base.num;
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it or it was spilled.
-static int DebugRegister(RegisterVariable* var) {
-  if ((var->inst->flags & TARGET_INST_SPILLED) != 0) {
-    return -1;
-  }
-  return DwarfRegister(NULL, var->inst->reg);
-}
-
 // Points each register variable's debug information at the registers
 // allocation chose for it.  The emitter places spill slots, so a spilled
 // variable has no location.
@@ -6411,22 +6406,9 @@ static void SetDebugRegisterLocations(ARMGenerator* g) {
     if (symbol == NULL || var->spilled) {
       continue;
     }
-    // The coloring allocator reuses a variable's register where the variable
-    // is dead.
-    if (g->colored) {
-      colored[num_colored++] = (TargetDebugVariable){
-          symbol, {var->inst, var->split_location}, var->holds_address};
-      continue;
-    }
-    int reg = DebugRegister(var);
-    if (reg < 0) {
-      continue;
-    }
-    if (var->holds_address) {
-      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
-    } else {
-      VariableDIESetRegister(SymbolDIE(symbol), reg);
-    }
+    // The allocator reuses a variable's register where the variable is dead.
+    colored[num_colored++] = (TargetDebugVariable){
+        symbol, {var->inst, var->split_location}, var->holds_address};
   }
   if (num_colored != 0) {
     TargetSetDebugLocationLists(&g->base, ARMRAInfo(), colored, num_colored,

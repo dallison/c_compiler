@@ -7,6 +7,7 @@
 //  target_reg_alloc.h.
 //
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "arm_reg_alloc.h"
@@ -20,7 +21,12 @@
 // allocated to the even ones.
 enum { kFloatKeyBase = 64 };
 
-enum { kIntClass, kFloatClass };
+enum { kIntClass, kFloatClass, kQuadClass };
+
+// A quad register is four s-registers.  Quad values live within one
+// statement, so a function that has them gives q2 and q3 (s8-s15) over to
+// them, and no other value aliases them.
+enum { kQuadFirst = 8, kQuadLast = 15 };
 
 static bool IsCondition(ARMOpcode op) {
   return op >= ARM_OP(eq) && op <= ARM_OP(al);
@@ -121,12 +127,93 @@ static bool MovesDoubleToCorePair(TargetInstruction* inst) {
   return key >= 0 && key < kFloatKeyBase;
 }
 
+// The atomic pseudos keep their size and memory orders in flag bits that
+// other instructions use for other things.  Their results are all integers.
+static bool IsAtomic(TargetInstruction* inst) {
+  ARMOpcode op = (ARMOpcode)inst->opcode;
+  return op >= ARM_OP(atomic_load) && op <= ARM_OP(atomic_fence);
+}
+
+static int AtomicSizeLog2(TargetInstruction* inst) {
+  return (int)((inst->flags & ARM_ATOMIC_SIZE_MASK) >> ARM_ATOMIC_SIZE_SHIFT);
+}
+
+// A 64-bit atomic leaves its result in r0:r1, like a call.
+static bool IsWideAtomic(TargetInstruction* inst) {
+  return IsAtomic(inst) && AtomicSizeLog2(inst) == 3;
+}
+
+// A compare-exchange by value finds the high half of its desired value in r3.
+static bool ReadsDesiredHighFromR3(TargetInstruction* inst) {
+  ARMOpcode op = (ARMOpcode)inst->opcode;
+  return IsWideAtomic(inst) && (op == ARM_OP(atomic_compare_exchange_bool) ||
+                                op == ARM_OP(atomic_compare_exchange_val));
+}
+
+static bool IsExtendedAsm(TargetInstruction* inst) {
+  return (ARMOpcode)inst->opcode == ARM_OP(asm) &&
+         (inst->flags & kARMExtendedAsm) != 0;
+}
+
+// r9 is the codegen's scratch register and r11 the frame pointer; the
+// prologue saves neither as a callee-saved register.
+static bool IsSavedAllocatable(int key) {
+  return key >= ARM_INT_SAVED_START && key <= ARM_INT_SAVED_END &&
+         key != ARM_TMP_REG && key != ARM_FP_REG;
+}
+
+// The callee-saved registers named in an asm clobber list.
+static int CalleeSavedClobbers(TargetInstruction* inst, int* keys,
+                               int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  Vector* clobbers = &((ARMAsmInstruction*)inst)->asm_node->clobbers;
+  int n = 0;
+  for (size_t i = 0; i < clobbers->length && n < max_keys; i++) {
+    const char* name = ((String*)clobbers->value.p[i])->value;
+    if (name[0] != 'r') {
+      continue;
+    }
+    char* end;
+    long num = strtol(name + 1, &end, 10);
+    if (end != name + 1 && *end == '\0' && IsSavedAllocatable((int)num)) {
+      keys[n++] = (int)num;
+    }
+  }
+  return n;
+}
+
+// Whether an asm names lr as a clobber, so that the prologue must save it.
+static bool ClobbersLinkRegister(TargetInstruction* inst) {
+  if (!IsExtendedAsm(inst)) {
+    return false;
+  }
+  Vector* clobbers = &((ARMAsmInstruction*)inst)->asm_node->clobbers;
+  for (size_t i = 0; i < clobbers->length; i++) {
+    const char* name = ((String*)clobbers->value.p[i])->value;
+    if (strcmp(name, "lr") == 0 || strcmp(name, "r14") == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Inline asm is lowered with its operands in fixed registers, and the
+// registers its text uses are unknown, so it clobbers what a call does and
+// whatever callee-saved registers it names.
 static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   if (MovesDoubleToCorePair(inst)) {
     keys[0] = LocationKey(inst->operand[0]);
     return 1;
   }
-  if (!ARMIsCall(inst)) {
+  if (IsWideAtomic(inst) && max_keys >= 2) {
+    keys[0] = ARM_INT_RETURN_REG;
+    keys[1] = ARM_INT_RETURN_VALUE_1;
+    return 2;
+  }
+  bool is_asm = (ARMOpcode)inst->opcode == ARM_OP(asm);
+  if (!ARMIsCall(inst) && !is_asm) {
     return 0;
   }
   int n = 0;
@@ -142,7 +229,7 @@ static int Clobbers(TargetInstruction* inst, int* keys, int max_keys) {
   for (int r = ARM_FP_TEMP_START; r <= ARM_FP_TEMP_END && n < max_keys; r++) {
     keys[n++] = kFloatKeyBase + r;
   }
-  return n;
+  return n + CalleeSavedClobbers(inst, keys + n, max_keys - n);
 }
 
 static bool ReadsThrough(TargetInstruction* operand) {
@@ -172,16 +259,13 @@ typedef struct {
   int spill_size;
 } ColoringContext;
 
-// The atomic pseudos keep their size and memory orders in flag bits that
-// other instructions use for other things.  Their results are all integers.
-static bool IsAtomic(TargetInstruction* inst) {
-  ARMOpcode op = (ARMOpcode)inst->opcode;
-  return op >= ARM_OP(atomic_load) && op <= ARM_OP(atomic_fence);
-}
-
 static int RegClass(TargetInstruction* inst) {
   if ((ARMOpcode)inst->opcode == ARM_OP(reload)) {
     return RegClass(inst->operand[0]->operand[0]);
+  }
+  if (Kind(inst) != kTargetRANone && !IsAtomic(inst) &&
+      ARMGetRegisterSize(inst) == kSize128Bit) {
+    return kQuadClass;
   }
   if (ARMIsCall(inst)) {
     return (inst->flags & kARMFpReturn) != 0 ? kFloatClass : kIntClass;
@@ -199,6 +283,9 @@ static int RegClass(TargetInstruction* inst) {
 }
 
 static int FixedValueKey(TargetInstruction* inst) {
+  if (IsWideAtomic(inst) && (ARMOpcode)inst->opcode != ARM_OP(atomic_store)) {
+    return ARM_INT_RETURN_REG;
+  }
   if (!ARMIsCall(inst)) {
     return -1;
   }
@@ -290,11 +377,39 @@ static bool IsTailCall(TargetInstruction* inst) {
   }
 }
 
+// The registers codegen loaded an asm's inputs and read-write outputs into.
+// An immediate input has no register.
+static int AsmReadKeys(TargetInstruction* inst, int* keys, int max_keys) {
+  if (!IsExtendedAsm(inst)) {
+    return 0;
+  }
+  ARMAsmInstruction* asm_inst = (ARMAsmInstruction*)inst;
+  Vector* outputs = &asm_inst->asm_node->outputs;
+  int n = 0;
+  for (int i = 0; i < asm_inst->num_operands && n < max_keys; i++) {
+    bool is_output = (size_t)i < outputs->length;
+    if (is_output && !((AsmOperand*)outputs->value.p[i])->is_readwrite) {
+      continue;
+    }
+    int num = asm_inst->reg_nums[i];
+    if (num != INT_MIN) {
+      keys[n++] = asm_inst->is_fp[i] ? kFloatKeyBase + num : num;
+    }
+  }
+  return n;
+}
+
 static int ImplicitUses(void* ctx, TargetInstruction* inst, int* keys,
                         int max_keys) {
   ColoringContext* c = ctx;
   int n = 0;
+  if (ReadsDesiredHighFromR3(inst) && max_keys > 0) {
+    keys[0] = ARM_INT_ARG_START + 3;
+    return 1;
+  }
   switch ((ARMOpcode)inst->opcode) {
+    case ARM_OP(asm):
+      return AsmReadKeys(inst, keys, max_keys);
     case ARM_OP(save):
       // The prologue stores incoming argument registers to the frame.
       return ArgumentKeys(keys, max_keys);
@@ -371,11 +486,13 @@ static RegisterVariable* FindVariable(ColoringContext* c,
 }
 
 // The emitter addresses slot |s| 8 + |s| bytes below the local variables, so
-// slot |s| is the 8 bytes at depth |s|.
+// slot |s| is the 8 bytes at depth |s|, and a 16-byte quad slot at depth |d|
+// is numbered |d| + 8.
 static int NewSlot(void* ctx, TargetInstruction* value) {
   ColoringContext* c = ctx;
-  int slot = c->spill_size;
-  c->spill_size += 8;
+  int bytes = RegClass(value) == kQuadClass ? 16 : 8;
+  int slot = c->spill_size + bytes - 8;
+  c->spill_size += bytes;
   RegisterVariable* var = FindVariable(c, value);
   if (var != NULL) {
     var->spill_slot = var->spilled && var->spill_slot != slot ? -1 : slot;
@@ -402,8 +519,12 @@ static TargetInstruction* CreateReload(void* ctx, TargetInstruction* spill) {
 }
 
 // Variable registers are TargetSymbols; this one stands for no variable.
+// Quad values are never split.
 static TargetInstruction* CreateLocation(void* ctx, TargetInstruction* like) {
   ColoringContext* c = ctx;
+  if (RegClass(like) == kQuadClass) {
+    return NULL;
+  }
   bool fp = RegClass(like) == kFloatClass;
   TargetSymbol* location = calloc(1, sizeof(TargetSymbol));
   TargetInitInstruction(
@@ -427,13 +548,6 @@ static TargetInstruction* CreateJump(void* ctx, TargetInstruction* label) {
   ColoringContext* c = ctx;
   return TargetNewInstruction2((TargetOpcode)ARM_OP(b),
                                ARMAlwaysCondition(c->allocator->g), label);
-}
-
-// r9 is the codegen's scratch register and r11 the frame pointer; the
-// prologue saves neither as a callee-saved register.
-static bool IsSavedAllocatable(int key) {
-  return key >= ARM_INT_SAVED_START && key <= ARM_INT_SAVED_END &&
-         key != ARM_TMP_REG && key != ARM_FP_REG;
 }
 
 static void Assign(void* ctx, TargetInstruction* inst, int key) {
@@ -467,15 +581,11 @@ static TargetInstruction* NextInBlock(TargetBasicBlock* block,
       for (TargetInstruction* inst = block_->code; inst != NULL;            \
            inst = NextInBlock(block_, inst))
 
-static int AtomicSizeLog2(TargetInstruction* inst) {
-  return (int)((inst->flags & ARM_ATOMIC_SIZE_MASK) >> ARM_ATOMIC_SIZE_SHIFT);
-}
-
+// These only come from allocation or from the peepholes that run after it.
 static const char* Unsupported(ARMGenerator* g) {
   FOR_EACH_INSTRUCTION(&g->base, inst) {
     ARMOpcode op = (ARMOpcode)inst->opcode;
     switch (op) {
-      case ARM_OP(asm):
       case ARM_OP(ldp):
       case ARM_OP(ldpsw):
       case ARM_OP(stp):
@@ -488,39 +598,37 @@ static const char* Unsupported(ARMGenerator* g) {
       default:
         break;
     }
-    // A 64-bit atomic finds the high halves of its operands and result
-    // through their users rather than its operands.
-    if (IsAtomic(inst) && AtomicSizeLog2(inst) == 3) {
-      return "64-bit atomic";
-    }
-    // A quad register is four s-registers.
-    if (Kind(inst) != kTargetRANone && ARMGetRegisterSize(inst) == kSize128Bit) {
-      return "128-bit";
-    }
   }
   return NULL;
+}
+
+static bool HasQuads(TargetGenerator* gen) {
+  FOR_EACH_INSTRUCTION(gen, inst) {
+    if (RegClass(inst) == kQuadClass) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // movt replaces the high half of the register movw wrote, and codegen ties
 // the two together by making movt movw's dest.  The allocator gives them
 // their own registers instead, and the emitter repeats the movw in movt's
-// register when they differ.  Records each movw in |undo| for Restore.
-static void UntieMovw(TargetGenerator* gen, Vector* undo) {
+// register when they differ.
+static void UntieMovw(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((ARMOpcode)inst->opcode != ARM_OP(movw) || inst->dest == NULL ||
         (ARMOpcode)inst->dest->opcode != ARM_OP(movt)) {
       continue;
     }
-    VectorAppend(undo, inst);
-    VectorAppend(undo, inst->dest);
     inst->dest = NULL;
   }
 }
 
 // An argument list keeps the argument registers live up to the call.  Where
 // it names the value moved into one rather than the register itself, it
-// names the register.  Records each change in |undo| for Restore.
-static void ReadArgumentRegisters(TargetGenerator* gen, Vector* undo) {
+// names the register.
+static void ReadArgumentRegisters(TargetGenerator* gen) {
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((ARMOpcode)inst->opcode != ARM_OP(regarg)) {
       continue;
@@ -530,34 +638,22 @@ static void ReadArgumentRegisters(TargetGenerator* gen, Vector* undo) {
         LocationKey(arg->dest) < 0) {
       continue;
     }
-    VectorAppend(undo, inst);
-    VectorAppend(undo, arg);
     TargetReplaceOperand(inst, 1, arg->dest);
   }
 }
 
-static void Restore(Vector* undo) {
-  for (size_t i = 0; i + 1 < undo->length; i += 2) {
-    TargetInstruction* inst = undo->value.p[i];
-    TargetInstruction* was = undo->value.p[i + 1];
-    if ((ARMOpcode)inst->opcode == ARM_OP(movw)) {
-      inst->dest = was;
-    } else {
-      TargetReplaceOperand(inst, 1, was);
-    }
-  }
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
 }
 
-bool ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator) {
+void ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator) {
   ARMGenerator* g = allocator->g;
   TargetGenerator* gen = &g->base;
   const char* reason = Unsupported(g);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   ColoringContext ctx = {.allocator = allocator};
@@ -577,7 +673,7 @@ bool ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator) {
   TargetRegAllocDesc desc = {
       .info = &kInfo,
       .ctx = &ctx,
-      .num_classes = 2,
+      .num_classes = 3,
       .reg_class = RegClass,
       .fixed_value_key = FixedValueKey,
       .defines_register = DefinesRegister,
@@ -608,9 +704,12 @@ bool ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator) {
       ints->regs[ints->num_regs++] = r;
     }
   }
+  bool has_quads = HasQuads(gen);
   TargetRAClass* floats = &desc.classes[kFloatClass];
   for (int r = 2 * ARM_NUM_FP_ARGS; r <= ARM_FP_TEMP_END; r += 2) {
-    floats->regs[floats->num_regs++] = kFloatKeyBase + r;
+    if (!has_quads || r < kQuadFirst || r > kQuadLast) {
+      floats->regs[floats->num_regs++] = kFloatKeyBase + r;
+    }
   }
   for (int r = 0; r < ARM_NUM_FP_ARGS; r++) {
     floats->regs[floats->num_regs++] =
@@ -619,27 +718,33 @@ bool ARMAllocateRegistersByColoring(ARMRegisterAllocator* allocator) {
   for (int r = ARM_FP_SAVED_START; r <= ARM_FP_SAVED_END; r += 2) {
     floats->regs[floats->num_regs++] = kFloatKeyBase + r;
   }
+  // A key belongs to one class, so the quad registers are the float class's
+  // unless the function has quads.
+  TargetRAClass* quads = &desc.classes[kQuadClass];
+  for (int r = kQuadFirst; has_quads && r <= kQuadLast; r += 4) {
+    quads->regs[quads->num_regs++] = kFloatKeyBase + r;
+  }
 
-  Vector undo;
-  VectorInit(&undo);
-  UntieMovw(gen, &undo);
-  ReadArgumentRegisters(gen, &undo);
+  UntieMovw(gen);
+  ReadArgumentRegisters(gen);
   if (getenv("DAVECC_RA_CHECK") != NULL) {
     TargetRACheck(gen, &kInfo, NULL, stderr, 3);
   }
   if (!TargetAllocateRegisters(gen, &desc, NULL)) {
-    Restore(&undo);
-    VectorDestruct(&undo);
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
-  VectorDestruct(&undo);
   FOR_EACH_INSTRUCTION(gen, inst) {
     if ((ARMOpcode)inst->opcode == ARM_OP(spill)) {
       inst->reg = inst->operand[0]->reg;
     }
+    if (ClobbersLinkRegister(inst)) {
+      g->not_leaf = true;
+    }
+    int keys[ARM_NUM_INT_REGS];
+    int num_keys = CalleeSavedClobbers(inst, keys, sizeof(keys) / sizeof(keys[0]));
+    for (int k = 0; k < num_keys; k++) {
+      BitSetInsert(&allocator->used_int_regs, (size_t)keys[k]);
+    }
   }
-  allocator->current_spilled_region_size = ctx.spill_size;
   allocator->max_spilled_region_size = ctx.spill_size;
-  g->colored = true;
-  return true;
 }

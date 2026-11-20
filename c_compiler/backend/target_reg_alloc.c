@@ -8,6 +8,7 @@
 
 #include "target_reg_alloc.h"
 
+#include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2308,6 +2309,7 @@ bool TargetAllocateRegisters(TargetGenerator* gen,
     ra->k[c] = desc->classes[c].num_regs;
     for (int r = 0; r < desc->classes[c].num_regs; r++) {
       int key = desc->classes[c].regs[r];
+      assert(ra->key_class[key] < 0);
       ra->key_class[key] = c;
       ra->key_index[key] = r;
     }
