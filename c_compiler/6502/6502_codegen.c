@@ -2326,9 +2326,15 @@ static void GetAddressXY(W65C02Generator* g, IRNode* addr_node) {
   }
 }
 
+// Whether |node| has a destination that takes its value.  A value given to a
+// void destination, such as the result of a ?: with a void arm, is discarded.
+static bool HasValueDest(IRNode* node) {
+  return node->dest != NULL && !TypeIsVoid(node->dest->type);
+}
+
 static TargetInstruction* GetDestAddress(W65C02Generator* g, IRNode* node, bool put_in_zero_page) {
   // TODO: multiple destinations?
-  if (node->dest != NULL) {
+  if (HasValueDest(node)) {
     IRNode* dest = node->dest;
     LowerIRNode(g, dest);
     return GetAddress(g, dest, put_in_zero_page);
@@ -2342,6 +2348,10 @@ static TargetInstruction* GetDestAddress(W65C02Generator* g, IRNode* node, bool 
 //      node->opcode == IR_OP(rmovd)) {
 //    return GetAddress(g, node->inputs.value.p[0], put_in_zero_page);
 //  }
+  // An address is two bytes, whatever the type says it points into.
+  if (node->opcode == IR_OP(adda)) {
+    return TempRegister(g, node->type, 2);
+  }
   return TempRegister(g, node->type, Sizeof(node->type));
 }
 
@@ -6342,7 +6352,7 @@ static void LowerCall(W65C02Generator* g, IRNode* node) {
     result = GetLoweredNode(push->inputs.value.p[0]);   // Arg value.
   } else if (!TypeIsVoid(node->type)) {
     result_size = Sizeof(node->type);
-    if (node->dest != NULL) {
+    if (HasValueDest(node)) {
       LowerIRNode(g, node->dest);
       result = GetLoweredNode(node->dest);
       if (W65C02IsExpression(result)) {
