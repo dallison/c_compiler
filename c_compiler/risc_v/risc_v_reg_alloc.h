@@ -15,7 +15,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "bitset.h"
-#include "map.h"
 #include "risc_v_machine.h"
 #include "target_generator.h"
 #include "target_ra_ir.h"
@@ -41,7 +40,6 @@ typedef struct RVRegister {
 #define RV_INT_RETURN_REG RV_INT_ARG_START  // Integer return value register.
 #define RV_FLOAT_RETURN_REG \
   RV_FP_ARG_START  // Float/Double return value register.
-#define RV_MAX_ALLOCATION_DEPTH 32
 
 typedef struct {
   struct RVGenerator* rv;
@@ -56,20 +54,7 @@ typedef struct {
   BitSet used_float_regs;
   BitSet used_vector_regs;
   
-  int current_spilled_region_size;
   int max_spilled_region_size;
-  BitSet preserved_instructions;    // Instructions needing preserved regs.
-  // Reassignable values (variable registers and merge temporaries) need their
-  // spill slot refreshed after every target instruction that defines them.
-  Map reassignable_spills;
-  // Instructions whose own allocation is in progress.  Allocating one can spill
-  // another value, and once the reload pass for an in-flight instruction has
-  // run, a read of that value has to be repaired rather than retargeted:
-  // pointing the operand at the spill slot then leaves it naming a register the
-  // spill has given away.
-  TargetInstruction* allocating[RV_MAX_ALLOCATION_DEPTH];
-  bool allocating_reloaded[RV_MAX_ALLOCATION_DEPTH];
-  size_t allocating_depth;
 } RVRegisterAllocator;
 
 void RVRegisterAllocatorInit(RVRegisterAllocator* alloc,
@@ -84,20 +69,14 @@ void RVRegisterAllocatorDelete(RVRegisterAllocator* alloc);
 void RVAllocateRegisters(RVRegisterAllocator* emitter);
 const char* RVRegisterName(RVRegister* reg, char* buf, size_t len);
 
-// The register file the dominator walk gives |inst|'s result.  The float
-// compares write an integer register but report float; the walk handles them
-// separately.
+// The register file of |inst|'s result.  The float compares write an integer
+// register but report float.
 RVRegisterType RVResultRegisterType(TargetInstruction* inst);
 
 // How the shared allocator code reads RISC-V instructions.
 const TargetRAInfo* RVRAInfo(void);
 
-// Whether to try the coloring allocator on the function |rv| is starting.
-// Call once per function.
-bool RVUseColoringAllocator(struct RVGenerator* rv);
-
-// Allocates the current function with the shared coloring allocator.  Returns
-// false, leaving the function untouched, if it cannot.
-bool RVAllocateRegistersByColoring(RVRegisterAllocator* allocator);
+// Allocates the current function with the shared coloring allocator.
+void RVAllocateRegistersByColoring(RVRegisterAllocator* allocator);
 
 #endif /* risc_v_reg_alloc_h */

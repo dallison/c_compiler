@@ -142,11 +142,6 @@ static const char* SymbolName(TargetSymbol* sym, char* buf, size_t len) {
 
 // This is the size of the stack frame including the space
 // for the local variables.
-static bool HasExceptionStructReturn(RVEmitter* emitter) {
-  return emitter->rv->struct_return_reg >= 0 &&
-         emitter->rv->exception_ranges.length > 0;
-}
-
 static int StackFrameSize(RVEmitter* emitter) {
   // Start off with local variable space.  This also includes
   // 16 bytes for the saved ra and s0.
@@ -173,9 +168,6 @@ static int StackFrameSize(RVEmitter* emitter) {
   stack_frame_size += BitSetCount(&emitter->regs->used_float_regs) * 8;
   stack_frame_size += BitSetCount(&emitter->regs->used_vector_regs) * RV_VLEN_BYTES;
   stack_frame_size += emitter->spill_region_size;
-  if (HasExceptionStructReturn(emitter)) {
-    stack_frame_size += 8;
-  }
   
   stack_frame_size = (stack_frame_size + 15) & ~15;  // Aligned to 16 bytes.
 
@@ -522,11 +514,6 @@ static void SaveRegisters(RVEmitter* emitter, FILE* fp) {
     BitSetIteratorNext(&it);
   }
 
-  if (HasExceptionStructReturn(emitter)) {
-    fprintf(fp, "\tsd a0, %d(sp)\t// hidden result pointer\n",
-            saved_reg_offset);
-  }
-
   if (!is_leaf) {
     fprintf(fp, "\t// End of stack frame\n");
   }
@@ -626,32 +613,13 @@ static void RestoreExceptionLandingState(RVEmitter* emitter, FILE* fp) {
   fprintf(fp, "\tmv sp, s0\n");
   DecrementStackPointer(emitter, StackFrameSize(emitter), fp);
 
-  int struct_return_phys = -1;
-  if (emitter->rv->struct_return_reg >= 0 && !emitter->rv->colored) {
-    bool is_leaf = emitter->rv->base.num_calls == 0 && OptLevel1() &&
-                   !emitter->rv->not_leaf;
-    struct_return_phys =
-        (is_leaf ? RV_FIRST_LEAF_INT_REG_VAR : RV_FIRST_INT_REG_VAR) +
-        emitter->rv->struct_return_reg;
-  }
   // The callee-saved registers are deliberately left as the unwinder delivered
   // them.  Their frame slots hold the *caller's* values, stored on entry, but a
   // handler needs the values this function itself had at the call that threw,
   // and reloading the slots would overwrite exactly those.  The unwinder
   // reconstructs them from the CFI of the frames it pops, which is why the FDE
-  // has to describe where the prologue put them.  Skip their slots to reach the
-  // hidden result pointer, which is this function's own.
-  int offset = emitter->saved_reg_offset -
-               8 * BitSetCount(&emitter->regs->used_int_regs) -
-               8 * BitSetCount(&emitter->regs->used_float_regs) -
-               RV_VLEN_BYTES * BitSetCount(&emitter->regs->used_vector_regs);
-  if (struct_return_phys >= 0 && HasExceptionStructReturn(emitter)) {
-    char buf[8];
-    fprintf(fp, "\tld %s, %d(sp)\t// hidden result pointer\n",
-            RVRegisterNameFromNum(struct_return_phys, kRVRegTypeInt, buf,
-                                  sizeof(buf)),
-            offset);
-  }
+  // has to describe where the prologue put them.  The allocator keeps the
+  // hidden result pointer live across the calls.
 }
 
 // The rmov instructions are an explicit mov from operand[1] to

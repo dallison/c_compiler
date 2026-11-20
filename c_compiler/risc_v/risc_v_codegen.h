@@ -430,13 +430,6 @@ typedef struct RVGenerator {
   int struct_return_reg;
   bool not_leaf;          // Not a leaf procedure.
   bool stages_tail_target;  // An indirect tail call stages its target in t2.
-  // The coloring allocator will be tried, so variables need not fit the
-  // dominator walk's fixed pool of variable registers.
-  bool try_coloring;
-  // Registers came from the coloring allocator, which does not keep register
-  // variables in their conventional registers.
-  bool colored;
-  
   Vector saved_regs;
   
   TargetInstruction* int_argument_registers[RV_NUM_INT_ARGS];

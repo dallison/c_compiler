@@ -889,8 +889,6 @@ void RVGeneratorInit(RVGenerator* rv, Generator* gen) {
   rv->tmp2 = NULL;
   rv->not_leaf = false;
   rv->stages_tail_target = false;
-  rv->try_coloring = false;
-  rv->colored = false;
   memset(rv->int_argument_registers, 0, sizeof(rv->int_argument_registers));
   memset(rv->fp_argument_registers, 0, sizeof(rv->fp_argument_registers));
   VectorInit(&rv->var_regs);
@@ -1489,25 +1487,13 @@ static RVOpcode IR2RV(IROpcode op) {
 }
 
 static int MaxIntRegisterVariables(RVGenerator* rv) {
-  if (rv->try_coloring) {
-    return INT_MAX;
-  }
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
-  if (is_leaf) {
-    return RV_LAST_LEAF_INT_REG_VAR - RV_FIRST_LEAF_INT_REG_VAR + 1;
-  }
-  return RV_LAST_INT_REG_VAR - RV_FIRST_INT_REG_VAR + 1;
+  (void)rv;
+  return INT_MAX;
 }
 
 static int MaxFpRegisterVariables(RVGenerator* rv) {
-  if (rv->try_coloring) {
-    return INT_MAX;
-  }
-  bool is_leaf = rv->base.num_calls == 0 && OptLevel1() && !rv->not_leaf;
-  if (is_leaf) {
-    return RV_LAST_LEAF_FP_REG_VAR - RV_FIRST_LEAF_FP_REG_VAR + 1;
-  }
-  return RV_LAST_FP_REG_VAR - RV_FIRST_FP_REG_VAR + 1;
+  (void)rv;
+  return INT_MAX;
 }
 
 static bool UseRegisterForVariable(RVGenerator* rv, IRNode* var_node) {
@@ -5179,18 +5165,6 @@ static int DwarfRegister(TargetGenerator* gen, TargetRegister* r) {
   }
 }
 
-// The DWARF number of the one register that holds |var| wherever it is live,
-// or -1 if there is none: optimization removed it, it was spilled, or
-// splitting moved it over part of the function.
-static int DebugRegister(RegisterVariable* var) {
-  TargetRegister* reg = var->inst->reg;
-  if (reg == NULL || (var->inst->flags & TARGET_INST_SPILLED) != 0 ||
-      (var->split_location != NULL && var->split_location->reg != reg)) {
-    return -1;
-  }
-  return DwarfRegister(NULL, reg);
-}
-
 // The frame base offset of spill slot |slot|, which the emitter addresses
 // 8 + |slot| bytes below the local variables.
 static int SpillSlotFrameOffset(RVGenerator* rv, int slot) {
@@ -5223,22 +5197,9 @@ static void SetDebugRegisterLocations(RVGenerator* rv) {
       }
       continue;
     }
-    // The coloring allocator reuses a variable's register where the variable
-    // is dead.
-    if (rv->colored) {
-      colored[num_colored++] = (TargetDebugVariable){
-          symbol, {var->inst, var->split_location}, var->holds_address};
-      continue;
-    }
-    int reg = DebugRegister(var);
-    if (reg < 0) {
-      continue;
-    }
-    if (var->holds_address) {
-      VariableDIESetAddressInRegister(SymbolDIE(symbol), reg);
-    } else {
-      VariableDIESetRegister(SymbolDIE(symbol), reg);
-    }
+    // The allocator reuses a variable's register where the variable is dead.
+    colored[num_colored++] = (TargetDebugVariable){
+        symbol, {var->inst, var->split_location}, var->holds_address};
   }
   if (num_colored != 0) {
     TargetSetDebugLocationLists(&rv->base, RVRAInfo(), colored, num_colored,
@@ -5702,22 +5663,8 @@ static void LowerVariables(RVGenerator* rv, Generator* gen) {
   VectorDestruct(&local_vars);
 }
 
-// The coloring allocator leaves inline assembly and vector code to the
-// dominator walk.
-static bool ColoringHandlesFunction(Generator* gen) {
-  for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
-       node = IRNext(node)) {
-    if (node->opcode == IR_OP(asm) ||
-        (node->opcode >= IR_OP(vadd) && node->opcode <= IR_OP(vcmpgeu))) {
-      return false;
-    }
-  }
-  return true;
-}
-
 void RVLower(RVGenerator* rv, Generator* gen) {
   TrapLower(&gen->func->info.function.symbol->name);
-  rv->try_coloring = RVUseColoringAllocator(rv) && ColoringHandlesFunction(gen);
   
   // If the function returns in memory, allocate the struct result
   // register now.
