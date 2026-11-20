@@ -65,11 +65,7 @@ const char* PCodeRegisterName(PCodeRegister* reg, char* buf, size_t len);
 // The register file an instruction's result goes in.
 PCodeRegisterType PCodeInstructionRegisterType(TargetInstruction* inst);
 
-// Whether to try the coloring allocator in p_code_ra_info.c before the linear
-// one.
-bool PCodeUseColoringAllocator(struct PCodeGenerator* pcode);
-// Allocates with the coloring allocator.  Returns false, with the code
-// untouched, for a function it does not handle.
-bool PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator);
+// Allocates with the coloring allocator.
+void PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator);
 
 #endif /* p_code_reg_alloc_h */

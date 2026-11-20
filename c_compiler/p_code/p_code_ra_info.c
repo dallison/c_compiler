@@ -385,15 +385,11 @@ static TargetInstruction* NextInBlock(TargetBasicBlock* block,
       for (TargetInstruction* inst = block_->code; inst != NULL;            \
            inst = NextInBlock(block_, inst))
 
+// These only come from allocation.
 static const char* Unsupported(PCodeGenerator* pcode) {
-  // Spill slots are addressed from fp.
-  if (pcode->frame_setup == NULL || pcode->frame_setup->block == NULL) {
-    return "no-frame";
-  }
   FOR_EACH_INSTRUCTION(&pcode->base, inst) {
     PCodeOpcode op = (PCodeOpcode)inst->opcode;
     switch (op) {
-      case P_OP(asm):
       case P_OP(spill):
       case P_OP(reload):
         return PCodeOpcodeName((int)op);
@@ -424,16 +420,18 @@ static void GrowFrame(PCodeGenerator* pcode, int spill_size) {
   TargetBasicBlockEmitAfter(gen, setup->block, decsp, setup);
 }
 
-bool PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator) {
+static void CannotAllocate(TargetGenerator* gen, const char* reason) {
+  fprintf(stderr, "Internal error: cannot allocate registers for %s: %s\n",
+          gen->function_name.value, reason);
+  abort();
+}
+
+void PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator) {
   PCodeGenerator* pcode = allocator->pcode;
   TargetGenerator* gen = &pcode->base;
   const char* reason = Unsupported(pcode);
   if (reason != NULL) {
-    if (getenv("DAVECC_NEW_RA_STATS") != NULL) {
-      fprintf(stderr, "new-ra-fallback\t%s\t%s\n", gen->function_name.value,
-              reason);
-    }
-    return false;
+    CannotAllocate(gen, reason);
   }
 
   ColoringContext ctx = {.allocator = allocator,
@@ -503,7 +501,7 @@ bool PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator) {
   current = saved;
   TargetRAIndexDestruct(&ctx.tmp_classes);
   if (!colored) {
-    return false;
+    CannotAllocate(gen, "the shared allocator gave up");
   }
   // A write to a spilled location goes to the value's own register, which the
   // allocator stores after it.
@@ -513,7 +511,10 @@ bool PCodeAllocateRegistersByColoring(PCodeRegisterAllocator* allocator) {
     }
   }
   if (ctx.spill_size > 0) {
+    // Spill slots are addressed from fp.
+    if (pcode->frame_setup == NULL || pcode->frame_setup->block == NULL) {
+      CannotAllocate(gen, "spills without a frame");
+    }
     GrowFrame(pcode, ctx.spill_size);
   }
-  return true;
 }
