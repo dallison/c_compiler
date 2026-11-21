@@ -175,6 +175,63 @@ static void RemoveUnusedExpressions(X86Generator* rv) {
 // to form an address can be folded into the load/store offset when the sum
 // fits in an immediate field.
 
+static bool SameX86Register(TargetInstruction* a, TargetInstruction* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  if (X86IsFixedRegister(a) && X86IsFixedRegister(b) && !X86IsCall(a) &&
+      !X86IsCall(b)) {
+    return a->opcode == b->opcode;
+  }
+  if (X86IsResult(a) && X86IsResult(b)) {
+    return a->opcode == b->opcode;
+  }
+  return false;
+}
+
+static bool IsRedefinableX86Value(TargetInstruction* value) {
+  if (value == NULL || value->opcode == (TargetOpcode)X86_OP(fp) ||
+      value->opcode == (TargetOpcode)X86_OP(x0)) {
+    return false;
+  }
+  return X86IsVarRegister(value) || X86IsFixedRegister(value) ||
+         X86IsResult(value) || X86IsCall(value) ||
+         value->opcode == (TargetOpcode)X86_OP(tmp) || value->dest != NULL;
+}
+
+static bool ClobbersX86ForwardedValue(TargetInstruction* p,
+                                      TargetInstruction* forwarded) {
+  if (SameX86Register(p->dest, forwarded)) {
+    return true;
+  }
+  if (p->opcode == (TargetOpcode)X86_OP(mv) && p->operand[1] != NULL &&
+      SameX86Register(p->operand[0], forwarded)) {
+    return true;
+  }
+  return (X86IsFixedRegister(forwarded) || X86IsResult(forwarded) ||
+          X86IsCall(forwarded)) &&
+         (X86IsCall(p) || p->opcode == (TargetOpcode)X86_OP(asm) ||
+          (X86IsCall(forwarded) && p->dest != NULL &&
+           (X86IsFixedRegister(p->dest) || X86IsResult(p->dest))));
+}
+
+static bool ValueUnclobberedBetween(X86Generator* rv,
+                                    TargetInstruction* def,
+                                    TargetInstruction* use,
+                                    TargetInstruction* forwarded) {
+  if (def == NULL || use == NULL || forwarded == NULL) {
+    return false;
+  }
+  if (!IsRedefinableX86Value(forwarded)) {
+    return true;
+  }
+  return TargetPathUnclobberedBetween(&rv->base, def, use, forwarded,
+                                      ClobbersX86ForwardedValue);
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   X86Generator* rv = opt_data->rv;
@@ -213,7 +270,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         int offset = X86IntValue(inst->operand[1]);
         int immed = X86IntValue(base->operand[1]);
         if (base->users.length == 1 && base->dest == NULL &&
-            X86IsPossibleImmediate(offset + immed)) {
+            X86IsPossibleImmediate(offset + immed) &&
+            ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
           TargetReplaceOperand(inst, 0, base->operand[0]);
           TargetReplaceOperand(inst, 1, TargetGetIntConstant(
                                                              &rv->base,
@@ -245,7 +303,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         int offset = X86IntValue(inst->operand[2]);
         int immed = X86IntValue(base->operand[1]);
         if (base->users.length == 1 && base->dest == NULL &&
-            X86IsPossibleImmediate(offset + immed)) {
+            X86IsPossibleImmediate(offset + immed) &&
+            ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
           TargetReplaceOperand(inst, 1, base->operand[0]);
           TargetReplaceOperand(inst, 2, TargetGetIntConstant(
                                                              &rv->base,

@@ -144,7 +144,10 @@ static TargetInstruction** BranchTarget(void* ctx, TargetInstruction* inst) {
   (void)ctx;
   X86Opcode op = (X86Opcode)inst->opcode;
   if (op == X86_OP(jmp)) {
-    return &inst->operand[0];
+    return inst->operand[0] != NULL &&
+                   inst->operand[0]->opcode == (TargetOpcode)X86_OP(label)
+               ? &inst->operand[0]
+               : NULL;
   }
   if (op == X86_OP(jz) || op == X86_OP(jnz)) {
     return &inst->operand[1];
@@ -227,8 +230,16 @@ static TargetSWKind Classify(void* ctx, TargetInstruction* inst, bool allow_save
     }
     return kTargetSWReload;
   }
+  if ((inst->flags & (TARGET_INST_TABLE_JUMP | X86_INST_TABLE_ENTRY)) != 0) {
+    return kTargetSWBad;
+  }
   if (IsMeta(ctx, inst)) {
     return kTargetSWMeta;
+  }
+  if (op == X86_OP(jmp) &&
+      (inst->operand[0] == NULL ||
+       inst->operand[0]->opcode != (TargetOpcode)X86_OP(label))) {
+    return kTargetSWBad;
   }
   switch (op) {
     case X86_OP(call):

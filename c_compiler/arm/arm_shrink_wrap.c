@@ -214,6 +214,7 @@ static TargetSWKind Classify(void* ctx, TargetInstruction* inst, bool allow_save
   switch (op) {
     case ARM_OP(bl):
     case ARM_OP(blr):
+    case ARM_OP(br):
     case ARM_OP(save):
     case ARM_OP(restore):
     case ARM_OP(ret):
@@ -458,7 +459,7 @@ static TargetInstruction* CloneReload(void* ctx, TargetGenerator* gen,
                                      TargetInstruction* reload, int src_reg_id) {
   int wide = ARMGetRegisterSize(reload) == kSize32Bit ? 0 : 1;
   TargetInstruction* src = RegProxy(ctx, gen, src_reg_id, wide);
-  TargetInstruction* cp = TargetNewInstruction1((TargetOpcode)ARM_OP(mv), src);
+  TargetInstruction* cp = TargetNewInstruction1((TargetOpcode)ARM_OP(mov), src);
   cp->reg = reload->reg;
   cp->flags = TARGET_INST_PROCESSED | ((ARMGetRegisterSize(reload) & 3) << 16);
   return cp;
@@ -470,7 +471,7 @@ static TargetInstruction* CreateMove(void* ctx, int saved_reg_id,
   (void)slow_proxy;
   ARMSW* sw = ctx;
   TargetInstruction* mv =
-      TargetNewInstruction1((TargetOpcode)ARM_OP(mv), fast_proxy);
+      TargetNewInstruction1((TargetOpcode)ARM_OP(mov), fast_proxy);
   mv->reg = &sw->allocator->int_regs[saved_reg_id].base;
   mv->flags = TARGET_INST_PROCESSED | (kSize32Bit << 16);
   return mv;

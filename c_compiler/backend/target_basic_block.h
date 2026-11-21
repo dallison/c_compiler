@@ -132,4 +132,12 @@ void TargetBasicBlockReachableAfter(TargetGenerator* gen,
                                     TargetBasicBlock* block,
                                     BitSet* reachable);
 
+// True when |def| reaches |use| and no definition-free-of-|def| path from
+// TargetNext(def) to |use| executes an instruction for which |clobbers| returns
+// true.  |gen| may be NULL when only same-block forwarding is permitted.
+bool TargetPathUnclobberedBetween(
+    TargetGenerator* gen, TargetInstruction* def, TargetInstruction* use,
+    TargetInstruction* forwarded,
+    bool (*clobbers)(TargetInstruction* inst, TargetInstruction* forwarded));
+
 #endif /* risc_v_basic_block_h */

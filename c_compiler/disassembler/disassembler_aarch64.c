@@ -430,14 +430,23 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     int rd = inst & 0x1f;
     int rn = (inst >> 5) & 0x1f;
     int rm = (inst >> 16) & 0x1f;
+    int shift = (inst >> 22) & 3;
+    int amount = (inst >> 10) & 0x3f;
+    static const char* shifts[] = {"lsl", "lsr", "asr", "ror"};
     const char* base[] = {"and", "orr", "eor", "ands"};
     const char* op = base[opc];
     if (n && opc == 0) op = "bic";
     if (n && opc == 1) op = "orn";
     if (n && opc == 2) op = "eon";
     if (n && opc == 3) op = "bics";
-    DAsmFormat(out, "%s %s, %s, %s", op, XReg(rd, sf, false),
-               XReg(rn, sf, false), XReg(rm, sf, false));
+    if (shift != 0 || amount != 0) {
+      DAsmFormat(out, "%s %s, %s, %s, %s #%d", op, XReg(rd, sf, false),
+                 XReg(rn, sf, false), XReg(rm, sf, false), shifts[shift],
+                 amount);
+    } else {
+      DAsmFormat(out, "%s %s, %s, %s", op, XReg(rd, sf, false),
+                 XReg(rn, sf, false), XReg(rm, sf, false));
+    }
     return true;
   }
   if ((inst & 0x1f800000u) == 0x13000000u && ((inst >> 29) & 3) != 3) {

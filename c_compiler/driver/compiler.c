@@ -3026,6 +3026,29 @@ static bool FunctionDefinitionIsODRDiscardable(TypeRecord* type) {
           type->info.function.template_origin != NULL);
 }
 
+static bool StaticFunctionIsDiscardable(Symbol* symbol, TypeRecord* type) {
+  if (!OptLevel1() || symbol == NULL || type == NULL || !TypeIsFunction(type) ||
+      !StorageIs(symbol->storage, STO(static)) || symbol->flags.invented ||
+      compiler->lto_ir_only || compiler->toplevel_asm.length != 0) {
+    return false;
+  }
+  if (SymbolHasAttribute(symbol, "used") ||
+      SymbolHasAttribute(symbol, "retain") ||
+      SymbolHasAttribute(symbol, "constructor") ||
+      SymbolHasAttribute(symbol, "destructor") ||
+      SymbolHasAttribute(symbol, "section") ||
+      SymbolHasAttribute(symbol, "alias") ||
+      SymbolHasAttribute(symbol, "ifunc")) {
+    return false;
+  }
+  return true;
+}
+
+static bool FunctionDefinitionIsDiscardable(Symbol* symbol, TypeRecord* type) {
+  return FunctionDefinitionIsODRDiscardable(type) ||
+         StaticFunctionIsDiscardable(symbol, type);
+}
+
 static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
 
 // A function template, or a member or hidden friend of a class template
@@ -3050,10 +3073,10 @@ static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
       !StorageIs(symbol->storage, STO(static))) {
     return true;
   }
-  // C inline linkage has different rules from C++ ODR emission.  Preserve the
-  // existing C behavior; this reachability pass is specifically for C++ inline
-  // definitions.
-  if (!FunctionDefinitionIsODRDiscardable(type)) {
+  // Preserve non-static C inline linkage rules; ODR-discardable C++ inline
+  // definitions and optimizing-mode internal-linkage static functions are
+  // emitted only when reachable from the translation unit's roots.
+  if (!FunctionDefinitionIsDiscardable(symbol, type)) {
     return true;
   }
   // A module/header-unit object must provide exported inline definitions for
@@ -3511,10 +3534,10 @@ static void CompileFunctionDefinitionNode(
   if (decl->base.type == NULL || !TypeIsFunction(decl->base.type)) {
     return;
   }
-  // Reference closure only controls which ODR-discardable definitions reach
-  // code generation. A syntax-only compilation returns before that phase.
+  // Reference closure controls which discardable definitions reach code
+  // generation. A syntax-only compilation returns before that phase.
   if (!compiler->syntax_only &&
-      !FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+      !FunctionDefinitionIsDiscardable(decl->symbol, decl->base.type)) {
     MarkFunctionsReferencedByBody(decl->base.type);
   }
   if (!(decl->base.type->info.function.is_consteval ||
@@ -3992,7 +4015,9 @@ static DefinitionReferenceState MarkReferencesOfNeededDefinition(
     return kDefinitionNotDiscardable;
   }
   if (IsFunctionOrInlineDefinition(decl->symbol) && decl->base.type != NULL &&
-      FunctionDefinitionIsODRDiscardable(decl->base.type)) {
+      TypeIsFunction(decl->base.type) &&
+      decl->base.type->info.function.body != NULL &&
+      FunctionDefinitionIsDiscardable(decl->symbol, decl->base.type)) {
     // Whether or not it is still needed, a body whose references are marked
     // has nothing more to add.
     if (decl->base.type->info.function.references_marked) {
@@ -4182,7 +4207,9 @@ static void CompileReferencedInlineFunctionsWithClosure(
         if (decl == NULL || decl->symbol == NULL ||
             !IsFunctionOrInlineDefinition(decl->symbol) ||
             decl->base.type == NULL ||
-            !FunctionDefinitionIsODRDiscardable(decl->base.type) ||
+            !TypeIsFunction(decl->base.type) ||
+            decl->base.type->info.function.body == NULL ||
+            !FunctionDefinitionIsDiscardable(decl->symbol, decl->base.type) ||
             decl->base.type->info.function.native_code_emitted ||
             !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {
           continue;

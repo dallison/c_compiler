@@ -241,6 +241,63 @@ static void RemoveUnusedExpressions(RV32Generator* rv) {
 // ld x, (n+a)(x2)
 // as long as n+a is a possible immediate value.
 
+static bool SameRV32Register(TargetInstruction* a, TargetInstruction* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  if (RV32IsFixedRegister(a) && RV32IsFixedRegister(b) && !RV32IsCall(a) &&
+      !RV32IsCall(b)) {
+    return a->opcode == b->opcode;
+  }
+  if (RV32IsResult(a) && RV32IsResult(b)) {
+    return a->opcode == b->opcode;
+  }
+  return false;
+}
+
+static bool IsRedefinableRV32Value(TargetInstruction* value) {
+  if (value == NULL || value->opcode == (TargetOpcode)RV32_OP(fp) ||
+      value->opcode == (TargetOpcode)RV32_OP(x0)) {
+    return false;
+  }
+  return RV32IsVarRegister(value) || RV32IsFixedRegister(value) ||
+         RV32IsResult(value) || RV32IsCall(value) ||
+         value->opcode == (TargetOpcode)RV32_OP(tmp) || value->dest != NULL;
+}
+
+static bool ClobbersRV32ForwardedValue(TargetInstruction* p,
+                                       TargetInstruction* forwarded) {
+  if (SameRV32Register(p->dest, forwarded)) {
+    return true;
+  }
+  if (p->opcode == (TargetOpcode)RV32_OP(mv) && p->operand[1] != NULL &&
+      SameRV32Register(p->operand[0], forwarded)) {
+    return true;
+  }
+  return (RV32IsFixedRegister(forwarded) || RV32IsResult(forwarded) ||
+          RV32IsCall(forwarded)) &&
+         (RV32IsCall(p) || p->opcode == (TargetOpcode)RV32_OP(asm) ||
+          (RV32IsCall(forwarded) && p->dest != NULL &&
+           (RV32IsFixedRegister(p->dest) || RV32IsResult(p->dest))));
+}
+
+static bool ValueUnclobberedBetween(RV32Generator* rv,
+                                    TargetInstruction* def,
+                                    TargetInstruction* use,
+                                    TargetInstruction* forwarded) {
+  if (def == NULL || use == NULL || forwarded == NULL) {
+    return false;
+  }
+  if (!IsRedefinableRV32Value(forwarded)) {
+    return true;
+  }
+  return TargetPathUnclobberedBetween(&rv->base, def, use, forwarded,
+                                      ClobbersRV32ForwardedValue);
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   RV32Generator* rv = opt_data->rv;
@@ -272,7 +329,9 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= RV32_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 1, label);
         inst->flags |= RV32_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)RV32_OP(addi)) {
+      } else if (base->opcode == (TargetOpcode)RV32_OP(addi) &&
+                 base->dest == NULL &&
+                 ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         // Load from an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = RV32IntValue(inst->operand[1]);
@@ -313,7 +372,9 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= RV32_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 2, label);
         inst->flags |= RV32_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)RV32_OP(addi)) {
+      } else if (base->opcode == (TargetOpcode)RV32_OP(addi) &&
+                 base->dest == NULL &&
+                 ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         // Store to an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = RV32IntValue(inst->operand[2]);

@@ -1727,3 +1727,135 @@ bool TargetBasicBlockDominatedBy(TargetGenerator* gen, TargetBasicBlock* dom, Ta
   }
   return false;
 }
+
+bool TargetPathUnclobberedBetween(
+    TargetGenerator* gen, TargetInstruction* def, TargetInstruction* use,
+    TargetInstruction* forwarded,
+    bool (*clobbers)(TargetInstruction* inst, TargetInstruction* forwarded)) {
+  if (def == NULL || use == NULL || forwarded == NULL ||
+      def->block == NULL || use->block == NULL) {
+    return false;
+  }
+  if (def == use) {
+    return true;
+  }
+  if (def->block == use->block) {
+    if (TargetBasicBlockIsEmpty(def->block)) {
+      return false;
+    }
+    bool saw_def = false;
+    TargetInstruction* end = TargetBasicBlockEnd(def->block);
+    for (TargetInstruction* p = TargetBasicBlockBegin(def->block);
+         p != end && p != NULL; p = TargetNext(p)) {
+      if (!saw_def) {
+        if (p == use) {
+          return false;
+        }
+        if (p == def) {
+          saw_def = true;
+        }
+        continue;
+      }
+      if (p == use) {
+        return true;
+      }
+      if (clobbers(p, forwarded)) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  if (gen == NULL || TargetBasicBlockIsEmpty(def->block) ||
+      TargetBasicBlockIsEmpty(use->block)) {
+    return false;
+  }
+
+  bool saw_use = false;
+  TargetInstruction* use_end = TargetBasicBlockEnd(use->block);
+  for (TargetInstruction* p = TargetBasicBlockBegin(use->block);
+       p != use_end && p != NULL; p = TargetNext(p)) {
+    if (p == use) {
+      saw_use = true;
+      break;
+    }
+    if (clobbers(p, forwarded)) {
+      return false;
+    }
+  }
+  if (!saw_use) {
+    return false;
+  }
+
+  size_t num_blocks = gen->basic_blocks.length;
+  if (num_blocks == 0) {
+    return false;
+  }
+  bool* visited = calloc(num_blocks, sizeof(bool));
+  size_t* queue = malloc(num_blocks * sizeof(size_t));
+  size_t head = 0;
+  size_t tail = 0;
+  bool reached_def_block = false;
+  bool ok = true;
+
+  for (size_t i = 0; i < use->block->in_edges.length; i++) {
+    int32_t pred_id = use->block->in_edges.value.w[i];
+    if (pred_id >= 0 && (size_t)pred_id < num_blocks && !visited[pred_id]) {
+      visited[pred_id] = true;
+      queue[tail++] = (size_t)pred_id;
+    }
+  }
+
+  while (head < tail) {
+    size_t bid = queue[head++];
+    TargetBasicBlock* b = gen->basic_blocks.value.p[bid];
+    if (b == NULL) {
+      continue;
+    }
+    if (b == def->block) {
+      reached_def_block = true;
+      bool saw_def = false;
+      TargetInstruction* def_end = TargetBasicBlockEnd(def->block);
+      for (TargetInstruction* p = TargetBasicBlockBegin(def->block);
+           p != def_end && p != NULL; p = TargetNext(p)) {
+        if (!saw_def) {
+          if (p == def) {
+            saw_def = true;
+          }
+          continue;
+        }
+        if (clobbers(p, forwarded)) {
+          ok = false;
+          goto done;
+        }
+      }
+      if (!saw_def) {
+        ok = false;
+        goto done;
+      }
+      continue;
+    }
+    if (!TargetBasicBlockIsEmpty(b)) {
+      TargetInstruction* b_end = TargetBasicBlockEnd(b);
+      for (TargetInstruction* p = TargetBasicBlockBegin(b);
+           p != b_end && p != NULL; p = TargetNext(p)) {
+        if (clobbers(p, forwarded)) {
+          ok = false;
+          goto done;
+        }
+      }
+    }
+    for (size_t i = 0; i < b->in_edges.length; i++) {
+      int32_t pred_id = b->in_edges.value.w[i];
+      if (pred_id >= 0 && (size_t)pred_id < num_blocks && !visited[pred_id]) {
+        visited[pred_id] = true;
+        queue[tail++] = (size_t)pred_id;
+      }
+    }
+  }
+
+done:
+  free(queue);
+  free(visited);
+  return ok && reached_def_block;
+}

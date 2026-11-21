@@ -459,7 +459,8 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
   if (((AARCH64Opcode)inst->opcode == AARCH64_OP(orr) ||
        (AARCH64Opcode)inst->opcode == AARCH64_OP(and) ||
        (AARCH64Opcode)inst->opcode == AARCH64_OP(eor)) &&
-      inst->operand[0] != NULL && inst->operand[1] != NULL) {
+      inst->operand[0] != NULL && inst->operand[1] != NULL &&
+      inst->operand[2] == NULL) {
     int left = KnownZeroExtendedBytes(inst->operand[0]);
     int right = KnownZeroExtendedBytes(inst->operand[1]);
     if (left < 8 && right < 8) {

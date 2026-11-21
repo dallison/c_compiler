@@ -1867,6 +1867,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
   }
   assert(node->inputs.length <= 2);
   TargetInstruction* inst = NULL;
+  bool swapped_add_operands = false;
   bool ref_counts_ok =
       false;  // True if we don't need to update operand ref counts.
                 
@@ -1899,6 +1900,7 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
           inst = (TargetInstruction*)NewInstruction(RV_OP(addi));
           inst->operand[0] = Materialize(rv, op2);
           inst->operand[1] = GetLoweredNode(op1);
+          swapped_add_operands = true;
         }
       }
       break;
@@ -2134,6 +2136,32 @@ static TargetInstruction* LowerExpression(RVGenerator* rv, IRNode* node) {
     for (size_t i = 0; i < node->inputs.length; i++) {
       IRNode* input = node->inputs.value.p[i];
       inst->operand[i] = Materialize(rv, input);
+    }
+  }
+  if ((node->opcode == IR_OP(adda) || node->opcode == IR_OP(suba)) &&
+      node->inputs.length == 2 && inst->opcode != (TargetOpcode)RV_OP(mv)) {
+    for (int i = 0; i < 2; i++) {
+      IRNode* offset = node->inputs.value.p[i];
+      if (IRIsConst(offset) || offset->type == NULL ||
+          !TypeIsIntegral(offset->type) || offset->type->size != 4) {
+        continue;
+      }
+      int offset_op = swapped_add_operands ? (1 - i) : i;
+      TargetInstruction* off_inst = inst->operand[offset_op];
+      if (off_inst == NULL || TargetIsConst(off_inst)) {
+        continue;
+      }
+      if (TypeIsUnsigned(offset->type)) {
+        TargetInstruction* shl = Emit(
+            rv, NewInstruction2(RV_OP(slli), off_inst,
+                                GetIntConstant(rv, NULL, kTargetType32Bit, 32)));
+        inst->operand[offset_op] = Emit(
+            rv, NewInstruction2(RV_OP(srli), shl,
+                                GetIntConstant(rv, NULL, kTargetType32Bit, 32)));
+      } else {
+        inst->operand[offset_op] =
+            Emit(rv, NewInstruction1(RV_OP(sext_w), off_inst));
+      }
     }
   }
   if (!ref_counts_ok) {
@@ -4193,7 +4221,12 @@ static TargetInstruction* LowerComputedBranch(RVGenerator* rv, IRNode* node) {
   // A constant index (Duff's device folds `count % 8` to 7) must be in a
   // register.  slli's source is a register operand; printing the constant
   // there yields `slli t1, 7, 2`, which the assembler rejects.
-  TargetInstruction* value = Materialize(rv, node->inputs.value.p[0]);
+  IRNode* idx = node->inputs.value.p[0];
+  TargetInstruction* value = Materialize(rv, idx);
+  if (!IRIsConst(idx) && idx->type != NULL && TypeIsIntegral(idx->type) &&
+      idx->type->size == 4) {
+    value = Emit(rv, NewInstruction1(RV_OP(sext_w), value));
+  }
   TargetInstruction* slli =
       Emit(rv, NewInstruction2(RV_OP(slli), value,
                                GetIntConstant(rv, NULL, kTargetType32Bit, 2)));

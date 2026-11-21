@@ -221,6 +221,7 @@ static TargetSWKind Classify(void* ctx, TargetInstruction* inst, bool allow_save
   switch (op) {
     case RV32_OP(jal):
     case RV32_OP(jalr):
+    case RV32_OP(jr):
     case RV32_OP(call):
     case RV32_OP(rcall):
     case RV32_OP(callf):

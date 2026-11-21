@@ -456,6 +456,7 @@ bool CXXConstructorCallElidesPrvalueSource(VectorASTNode* call) {
 //    to the arguments with references to the new symbols.
 // 5. Emit end_label.
 ASTNode* InlineFunctionCall(FunctionInfo* info, VectorASTNode* call) {
+  info->has_been_inlined = true;
   Vector* statements = NewVector();
   SourceLocation location = call->base.location;
   Inliner inliner;
@@ -1528,9 +1529,9 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
                                                  int64_t static_uses) {
   const int kMaxInlineNodeCount = OptLevel3() ? 250 : 100;
   const int kMaxUnmarkedInlineNodeCount = 40;
-  const int kMaxLeafInlineNodeCount = 75;
+  const int kMaxLeafInlineNodeCount = 90;
   const int kMaxSingleUseInlineNodeCount = 300;
-  const int kMaxSingleUseInLoopNodeCount = 600;
+  const int kMaxSingleUseInLoopNodeCount = 1000;
   const int kMaxTwoUseInlineNodeCount = 200;
   const int kMaxFewUseInlineNodeCount = CompilerIsCXX() ? 80 : 120;
   GotoFinder finder = {0, false, false, false, false};
@@ -1591,12 +1592,17 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
     GotoFinder expanded = {0, false, false, false, true};
     ASTNodeVisit(func->body, ExamineBody, 0, &expanded);
     if (static_uses > 1) {
-      int mult = CompilerIsCXX() ? 2 : 3;
-      int min_cap = CompilerIsCXX() ? kMaxUnmarkedInlineNodeCount
-                                    : kMaxFewUseInlineNodeCount;
-      if (expanded.node_count > node_count * mult &&
-          expanded.node_count >= min_cap) {
-        node_count = expanded.node_count;
+      bool first_inline_of_two_use =
+          !CompilerIsCXX() && is_static && static_uses == 2 &&
+          !func->has_been_inlined && expanded.node_count <= 2500;
+      if (!first_inline_of_two_use) {
+        int mult = CompilerIsCXX() ? 2 : 3;
+        int min_cap = CompilerIsCXX() ? kMaxUnmarkedInlineNodeCount
+                                      : kMaxFewUseInlineNodeCount;
+        if (expanded.node_count > node_count * mult &&
+            expanded.node_count >= min_cap) {
+          node_count = expanded.node_count;
+        }
       }
     } else if (!CompilerIsCXX() && compiler->loop_analysis_depth == 0 &&
                expanded.node_count > max_nodes * 2) {

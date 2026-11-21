@@ -285,6 +285,63 @@ static bool FrameOffsetFoldable(TargetInstruction* memory,
          (base->flags & kARMFrameOffsetFlags) == 0;
 }
 
+static bool SameARMRegister(TargetInstruction* a, TargetInstruction* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  if (ARMIsFixedRegister(a) && ARMIsFixedRegister(b) && !ARMIsCall(a) &&
+      !ARMIsCall(b)) {
+    return a->opcode == b->opcode;
+  }
+  if (ARMIsResult(a) && ARMIsResult(b)) {
+    return a->opcode == b->opcode;
+  }
+  return false;
+}
+
+static bool IsRedefinableARMValue(TargetInstruction* value) {
+  if (value == NULL || value->opcode == (TargetOpcode)ARM_OP(fp) ||
+      value->opcode == (TargetOpcode)ARM_OP(zr)) {
+    return false;
+  }
+  return ARMIsVarRegister(value) || ARMIsFixedRegister(value) ||
+         ARMIsResult(value) || ARMIsCall(value) ||
+         value->opcode == (TargetOpcode)ARM_OP(tmp) || value->dest != NULL;
+}
+
+static bool ClobbersARMForwardedValue(TargetInstruction* p,
+                                      TargetInstruction* forwarded) {
+  if (SameARMRegister(p->dest, forwarded)) {
+    return true;
+  }
+  if (p->opcode == (TargetOpcode)ARM_OP(mv) && p->operand[1] != NULL &&
+      SameARMRegister(p->operand[0], forwarded)) {
+    return true;
+  }
+  return (ARMIsFixedRegister(forwarded) || ARMIsResult(forwarded) ||
+          ARMIsCall(forwarded)) &&
+         (ARMIsCall(p) || p->opcode == (TargetOpcode)ARM_OP(asm) ||
+          (ARMIsCall(forwarded) && p->dest != NULL &&
+           (ARMIsFixedRegister(p->dest) || ARMIsResult(p->dest))));
+}
+
+static bool ValueUnclobberedBetween(ARMGenerator* rv,
+                                    TargetInstruction* def,
+                                    TargetInstruction* use,
+                                    TargetInstruction* forwarded) {
+  if (def == NULL || use == NULL || forwarded == NULL) {
+    return false;
+  }
+  if (!IsRedefinableARMValue(forwarded)) {
+    return true;
+  }
+  return TargetPathUnclobberedBetween(&rv->base, def, use, forwarded,
+                                      ClobbersARMForwardedValue);
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   ARMGenerator* rv = opt_data->rv;
@@ -303,7 +360,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       // the load runs -- folding the add's immediate into the load would then
       // address the post-update value (e.g. the load in `*(++p)`).
       if (IsAddWithImmediate(base) && base->dest == NULL &&
-          FrameOffsetFoldable(inst, base)) {
+          FrameOffsetFoldable(inst, base) &&
+          ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         int offset = ARMIntValue(inst->operand[1]);
         int immed = ARMIntValue(base->operand[1]);
         uint32_t frame_flags = base->flags & kARMFrameOffsetFlags;
@@ -325,7 +383,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       TargetInstruction* base = inst->operand[1];
       // See the load case: only fold a pure address-calculation add.
       if (IsAddWithImmediate(base) && base->dest == NULL &&
-          FrameOffsetFoldable(inst, base)) {
+          FrameOffsetFoldable(inst, base) &&
+          ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         int offset = ARMIntValue(inst->operand[2]);
         int immed = ARMIntValue(base->operand[1]);
         uint32_t frame_flags = base->flags & kARMFrameOffsetFlags;

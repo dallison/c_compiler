@@ -241,6 +241,63 @@ static void RemoveUnusedExpressions(RVGenerator* rv) {
 // ld x, (n+a)(x2)
 // as long as n+a is a possible immediate value.
 
+static bool SameRVRegister(TargetInstruction* a, TargetInstruction* b) {
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  if (a == b) {
+    return true;
+  }
+  if (RVIsFixedRegister(a) && RVIsFixedRegister(b) && !RVIsCall(a) &&
+      !RVIsCall(b)) {
+    return a->opcode == b->opcode;
+  }
+  if (RVIsResult(a) && RVIsResult(b)) {
+    return a->opcode == b->opcode;
+  }
+  return false;
+}
+
+static bool IsRedefinableRVValue(TargetInstruction* value) {
+  if (value == NULL || value->opcode == (TargetOpcode)RV_OP(fp) ||
+      value->opcode == (TargetOpcode)RV_OP(x0)) {
+    return false;
+  }
+  return RVIsVarRegister(value) || RVIsFixedRegister(value) ||
+         RVIsResult(value) || RVIsCall(value) ||
+         value->opcode == (TargetOpcode)RV_OP(tmp) || value->dest != NULL;
+}
+
+static bool ClobbersRVForwardedValue(TargetInstruction* p,
+                                     TargetInstruction* forwarded) {
+  if (SameRVRegister(p->dest, forwarded)) {
+    return true;
+  }
+  if (p->opcode == (TargetOpcode)RV_OP(mv) && p->operand[1] != NULL &&
+      SameRVRegister(p->operand[0], forwarded)) {
+    return true;
+  }
+  return (RVIsFixedRegister(forwarded) || RVIsResult(forwarded) ||
+          RVIsCall(forwarded)) &&
+         (RVIsCall(p) || p->opcode == (TargetOpcode)RV_OP(asm) ||
+          (RVIsCall(forwarded) && p->dest != NULL &&
+           (RVIsFixedRegister(p->dest) || RVIsResult(p->dest))));
+}
+
+static bool ValueUnclobberedBetween(RVGenerator* rv,
+                                    TargetInstruction* def,
+                                    TargetInstruction* use,
+                                    TargetInstruction* forwarded) {
+  if (def == NULL || use == NULL || forwarded == NULL) {
+    return false;
+  }
+  if (!IsRedefinableRVValue(forwarded)) {
+    return true;
+  }
+  return TargetPathUnclobberedBetween(&rv->base, def, use, forwarded,
+                                      ClobbersRVForwardedValue);
+}
+
 static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
   struct OptimizerData* opt_data = data;
   RVGenerator* rv = opt_data->rv;
@@ -272,7 +329,9 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= RV_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 1, label);
         inst->flags |= RV_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)RV_OP(addi)) {
+      } else if (base->opcode == (TargetOpcode)RV_OP(addi) &&
+                 base->dest == NULL &&
+                 ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         // Load from an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = RVIntValue(inst->operand[1]);
@@ -313,7 +372,9 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
         base->flags |= RV_PCREL_HI_RELOC;
         TargetReplaceOperand(inst, 2, label);
         inst->flags |= RV_PCREL_LO_RELOC;
-      } else if (base->opcode == (TargetOpcode)RV_OP(addi)) {
+      } else if (base->opcode == (TargetOpcode)RV_OP(addi) &&
+                 base->dest == NULL &&
+                 ValueUnclobberedBetween(rv, base, inst, base->operand[0])) {
         // Store to an address calculated using an addi instruction.  See if we
         // can combine them.
         int offset = RVIntValue(inst->operand[2]);

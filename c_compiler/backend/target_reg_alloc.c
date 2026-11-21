@@ -103,6 +103,7 @@ typedef struct {
   int b;
   int weight;
   MoveState state;
+  bool split;
 } Move;
 
 // A value or location to color, or a physical register.
@@ -163,6 +164,7 @@ typedef struct {
   int key_class[TARGET_RA_FIXED_KEYS];
   int key_index[TARGET_RA_FIXED_KEYS];  // Position in its class's regs.
   int k[TARGET_RA_MAX_CLASSES];
+  uint64_t caller_saved[TARGET_RA_FIXED_KEYS / 64];
 
   ChunkArray slots;  // Slot.
   ChunkArray insts;  // InstInfo, in block order.
@@ -635,7 +637,7 @@ static int LoopWeight(TargetBasicBlock* block) {
   if (depth > 6) {
     depth = 6;
   }
-  return 1 << (3 * depth);
+  return 1 << (4 * depth);
 }
 
 static Move* AddMove(RA* ra, int a, int b, int weight) {
@@ -648,10 +650,12 @@ static Move* AddMove(RA* ra, int a, int b, int weight) {
   m->b = b;
   m->weight = weight;
   m->state = kMoveWorklist;
+  m->split = false;
   return m;
 }
 
 static void BuildNodes(RA* ra) {
+  memset(ra->caller_saved, 0, sizeof(ra->caller_saved));
   for (int k = 0; k < TARGET_RA_FIXED_KEYS; k++) {
     NewNode(ra, NULL, ra->key_class[k]);
   }
@@ -687,11 +691,15 @@ static void BuildNodes(RA* ra) {
     info->end_use = (int)ra->uses.length;
 
     info->first_def = (int)ra->defs.length;
+    bool is_call = ra->gen->virtuals->is_call(inst);
     num_keys = ra->info->clobbers(inst, keys, kMaxKeys);
     for (int k = 0; k < num_keys; k++) {
       int n = TrackedKey(ra, keys[k]);
       if (n >= 0) {
         AppendInt(&ra->defs, n);
+        if (is_call) {
+          ra->caller_saved[n / 64] |= UINT64_C(1) << (n % 64);
+        }
       }
     }
     if (WritesRegister(ra, inst)) {
@@ -719,6 +727,7 @@ static void BuildNodes(RA* ra) {
           if (m != NULL && own < 0 && IsSplitCopy(ra, inst) &&
               !IsUnspillable(ra, inst->operand[0])) {
             m->state = kMoveFrozen;
+            m->split = true;
           }
         } else {
           info->converted = src;
@@ -1209,10 +1218,11 @@ static void MakeWorklist(RA* ra) {
   }
   // The worklist pops from the end, so push the most frequently executed
   // moves last to coalesce them first.
-  for (int w = 1; w <= 1 << 18; w <<= 3) {
+  for (int d = 0; d <= 6; d++) {
+    int w = 1 << (4 * d);
     for (int m = ra->moves.length; m-- > 0;) {
       int weight = MoveAt(ra, m)->weight;
-      if (weight >= w && weight < (w << 3)) {
+      if (weight >= w && (d == 6 || weight < (w << 4))) {
         AppendInt(&ra->move_worklist, m);
       }
     }
@@ -1418,7 +1428,7 @@ static int SelectSpill(RA* ra) {
     list->value.w[kept++] = n;
     double cost = node->cost / (double)(node->degree + 1);
     bool relieves = node->relief > 0 && node->cost < kUnspillableCost;
-    if (relieves) {
+    if (relieves && ra->desc->held_since_previous != NULL) {
       cost /= node->relief;
     }
     if (best == kNoNode || (relieves && !best_relieves) ||
@@ -1432,8 +1442,23 @@ static int SelectSpill(RA* ra) {
   return best;
 }
 
+static bool KeyIsCallerSaved(const RA* ra, int key) {
+  return key >= 0 && key < TARGET_RA_FIXED_KEYS &&
+         (ra->caller_saved[key / 64] & (UINT64_C(1) << (key % 64))) != 0;
+}
+
 static int PickColor(RA* ra, int n, const bool* ok) {
   Node* node = NodeAt(ra, n);
+  const TargetRAClass* rc = &ra->desc->classes[node->reg_class];
+  bool has_ok_caller_saved = false;
+  if (ra->stats.split > 0) {
+    for (int r = 0; r < rc->num_regs; r++) {
+      if (ok[r] && KeyIsCallerSaved(ra, rc->regs[r])) {
+        has_ok_caller_saved = true;
+        break;
+      }
+    }
+  }
   int best = -1;
   int best_weight = 0;
   for (size_t i = 0; i < node->moves.length; i++) {
@@ -1442,7 +1467,8 @@ static int PickColor(RA* ra, int n, const bool* ok) {
     Node* partner = NodeAt(ra, other);
     int c = partner->color;
     if (c >= 0 && (partner->state == kNodeColored || IsPrecolored(other)) &&
-        ok[ra->key_index[c]] && m->weight > best_weight) {
+        ok[ra->key_index[c]] && m->weight > best_weight &&
+        !(m->split && has_ok_caller_saved && !KeyIsCallerSaved(ra, c))) {
       best = c;
       best_weight = m->weight;
     }
@@ -1450,7 +1476,6 @@ static int PickColor(RA* ra, int n, const bool* ok) {
   if (best >= 0) {
     return best;
   }
-  const TargetRAClass* rc = &ra->desc->classes[node->reg_class];
   for (int r = 0; r < rc->num_regs; r++) {
     if (ok[r]) {
       return rc->regs[r];
@@ -1835,6 +1860,28 @@ static size_t FastPreds(RA* ra, TargetBasicBlock* block, const bool* fast,
   return n;
 }
 
+static bool IsTableJumpBlock(const TargetBasicBlock* block) {
+  return block != NULL && block->end_code != NULL &&
+         (block->end_code->flags & TARGET_INST_TABLE_JUMP) != 0;
+}
+
+static bool IsJumpTableEntryBlock(TargetGenerator* gen,
+                                  const TargetBasicBlock* block) {
+  if (block == NULL || block->end_code == NULL ||
+      gen->virtuals->is_table_entry == NULL ||
+      !gen->virtuals->is_table_entry(block->end_code)) {
+    return false;
+  }
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    size_t pred_id = (size_t)block->in_edges.value.w[i];
+    if (pred_id < gen->basic_blocks.length &&
+        IsTableJumpBlock(BlockAt(gen, pred_id))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Marks the fast path in |fast|, by block id: the entry and every call-free
 // block whose predecessors all lie on it, then short call-free blocks it
 // shares with the slow path.  Returns whether splitting can help, which needs
@@ -1887,11 +1934,56 @@ static bool FindFastPath(RA* ra, bool* fast) {
         break;
       }
     }
-    bool fast_returns = false;
+    // Prune blocks in |fast| that cannot reach a fast return while staying on
+    // |fast| (for example LICM preheaders of call-containing slow loops).
+    bool* can_return = calloc(num_blocks, sizeof(bool));
+    size_t* queue = malloc((num_blocks + 1) * sizeof(size_t));
+    size_t head = 0;
+    size_t tail = 0;
+    for (size_t b = 0; b < num_blocks; b++) {
+      if (fast[b] && returns[b] && BlockAt(gen, b) != NULL) {
+        can_return[b] = true;
+        queue[tail++] = b;
+      }
+    }
+    while (head < tail) {
+      TargetBasicBlock* cur = BlockAt(gen, queue[head++]);
+      for (size_t i = 0; cur != NULL && i < cur->in_edges.length; i++) {
+        TargetBasicBlock* pred = EdgeBlock(ra, &cur->in_edges, i);
+        if (pred != NULL && fast[pred->block_id] &&
+            !can_return[pred->block_id]) {
+          can_return[pred->block_id] = true;
+          queue[tail++] = pred->block_id;
+        }
+      }
+    }
+    for (size_t b = 0; b < num_blocks; b++) {
+      fast[b] = fast[b] && can_return[b];
+    }
+    // Keep every hardware jump-table entry block on the same side as its
+    // table-jump dispatch block so any fast-to-slow transition happens on the
+    // direct jump out of the table entry rather than across the indirect table
+    // jump.
+    for (size_t b = 0; b < num_blocks; b++) {
+      TargetBasicBlock* block = BlockAt(gen, b);
+      if (!IsJumpTableEntryBlock(gen, block)) {
+        continue;
+      }
+      for (size_t i = 0; i < block->in_edges.length; i++) {
+        TargetBasicBlock* pred = EdgeBlock(ra, &block->in_edges, i);
+        if (IsTableJumpBlock(pred) && fast[pred->block_id]) {
+          fast[b] = true;
+          break;
+        }
+      }
+    }
+    free(can_return);
+    free(queue);
+
+    bool fast_returns = fast[entry];
     bool slow_calls = false;
     for (size_t b = 0; b < num_blocks; b++) {
       if (BlockAt(gen, b) != NULL) {
-        fast_returns = fast_returns || (fast[b] && returns[b]);
         slow_calls = slow_calls || (!fast[b] && calls[b]);
       }
     }
@@ -1947,7 +2039,8 @@ static int BranchOperand(RA* ra, TargetBasicBlock* from, TargetBasicBlock* to) {
 static bool EndsWithoutFallthrough(RA* ra, TargetInstruction* inst) {
   TargetVirtuals* v = ra->gen->virtuals;
   if (inst->block == NULL || inst->block->end_code != inst ||
-      (inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+      (inst->flags & TARGET_INST_TABLE_JUMP) != 0 ||
+      IsJumpTableEntryBlock(ra->gen, inst->block)) {
     return false;
   }
   return v->is_return(inst) ||
@@ -1975,10 +2068,12 @@ static TargetInstruction* PlaceNear(RA* ra, TargetBasicBlock* from) {
 
 static Placement PlaceCopies(RA* ra, const bool* fast, TargetBasicBlock* from,
                              TargetBasicBlock* to) {
-  if (AllEdgesOnSide(ra, &to->in_edges, fast, fast[from->block_id])) {
+  if (!IsJumpTableEntryBlock(ra->gen, to) &&
+      AllEdgesOnSide(ra, &to->in_edges, fast, fast[from->block_id])) {
     return kPlaceAtStart;
   }
-  if (AllEdgesOnSide(ra, &from->out_edges, fast, fast[to->block_id])) {
+  if (!IsTableJumpBlock(from) && !IsJumpTableEntryBlock(ra->gen, from) &&
+      AllEdgesOnSide(ra, &from->out_edges, fast, fast[to->block_id])) {
     return kPlaceAtEnd;
   }
   bool falls = FallthroughBlock(ra, from) == to;

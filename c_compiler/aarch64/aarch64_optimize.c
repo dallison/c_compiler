@@ -582,13 +582,67 @@ static bool LoadStoreOffsetInRange(TargetInstruction* memory, int64_t offset) {
   return offset >= 0 && offset % bytes == 0 && offset / bytes <= 0xfff;
 }
 
+static bool IsRedefinableValue(TargetInstruction* value) {
+  if (value == NULL || value->opcode == (TargetOpcode)AARCH64_OP(fp) ||
+      value->opcode == (TargetOpcode)AARCH64_OP(zr)) {
+    return false;
+  }
+  if (value->opcode >= (TargetOpcode)AARCH64_OP(d0) &&
+      value->opcode <= (TargetOpcode)AARCH64_OP(d7)) {
+    return true;
+  }
+  return AARCH64IsVarRegister(value) || AARCH64IsFixedRegister(value) ||
+         AARCH64IsResult(value) || AARCH64IsCall(value) ||
+         value->opcode == (TargetOpcode)AARCH64_OP(tmp) ||
+         value->dest != NULL;
+}
+
+static bool ClobbersAARCH64ForwardedValue(TargetInstruction* p,
+                                          TargetInstruction* forwarded) {
+  return WritesFixedValue(p, forwarded) ||
+         SameFixedRegister(p->dest, forwarded) ||
+         WritesAliasedReturnRegister(forwarded, p) ||
+         (WritesRegisterOperand(p) &&
+          SameFixedRegister(p->operand[0], forwarded)) ||
+         ((AARCH64IsFixedRegister(forwarded) ||
+           (forwarded->opcode >= (TargetOpcode)AARCH64_OP(d0) &&
+            forwarded->opcode <= (TargetOpcode)AARCH64_OP(d7))) &&
+          (AARCH64IsCall(p) || p->opcode == (TargetOpcode)AARCH64_OP(asm))) ||
+         (AARCH64IsCall(forwarded) &&
+          (AARCH64IsCall(p) || p->opcode == (TargetOpcode)AARCH64_OP(asm) ||
+           (p->dest != NULL &&
+            (AARCH64IsFixedRegister(p->dest) || AARCH64IsResult(p->dest)))));
+}
+
+static bool ValueUnclobberedBetweenGen(TargetGenerator* gen,
+                                       TargetInstruction* def,
+                                       TargetInstruction* use,
+                                       TargetInstruction* forwarded) {
+  if (def == NULL || use == NULL || forwarded == NULL) {
+    return false;
+  }
+  if (!IsRedefinableValue(forwarded)) {
+    return true;
+  }
+  return TargetPathUnclobberedBetween(gen, def, use, forwarded,
+                                      ClobbersAARCH64ForwardedValue);
+}
+
+static bool ValueUnclobberedBetween(TargetInstruction* def,
+                                    TargetInstruction* use,
+                                    TargetInstruction* forwarded) {
+  return ValueUnclobberedBetweenGen(NULL, def, use, forwarded);
+}
+
 static bool FoldAddressAdd(AARCH64Generator* generator,
                            TargetInstruction* memory,
                            int base_index, int offset_index) {
   TargetInstruction* base = memory->operand[base_index];
   TargetInstruction* offset = memory->operand[offset_index];
   if (!IsAddressAdd(base) || offset == NULL ||
-      !AARCH64IsIntConst(offset)) {
+      !AARCH64IsIntConst(offset) ||
+      !ValueUnclobberedBetweenGen(&generator->base, base, memory,
+                                  base->operand[0])) {
     return false;
   }
   int64_t combined =
@@ -666,7 +720,11 @@ static bool FoldAddressIndex(AARCH64Generator* generator,
   // Keep only the unshifted form for now: scaled register offsets need an
   // extra shift marker on the load/store, and stores already use operand[2]
   // for the index.  shift==0 covers mem[i] / Rd-style byte accesses.
-  if (shift != 0) {
+  if (shift != 0 ||
+      !ValueUnclobberedBetweenGen(&generator->base, base, memory,
+                                  base->operand[0]) ||
+      !ValueUnclobberedBetweenGen(&generator->base, base, memory,
+                                  base->operand[1])) {
     return false;
   }
   TargetReplaceOperand(memory, base_index, base->operand[0]);
@@ -705,7 +763,8 @@ static bool FoldTruncBeforeNarrowStore(AARCH64Generator* generator,
       src = value->operand[0];
     }
   }
-  if (src == NULL) {
+  if (src == NULL ||
+      !ValueUnclobberedBetweenGen(&generator->base, value, store, src)) {
     return false;
   }
   TargetReplaceOperand(store, 0, src);
@@ -794,6 +853,9 @@ static void CombineShiftedAddsInBlock(TargetBasicBlock* block, void* data) {
       continue;
     }
     TargetInstruction* value = shift->operand[0];
+    if (!ValueUnclobberedBetweenGen(&generator->base, shift, inst, value)) {
+      continue;
+    }
     TargetInstruction* amount_inst = shift->operand[1];
     TargetReplaceOperand(inst, 0, base);
     TargetReplaceOperand(inst, 1, value);
@@ -876,9 +938,14 @@ static AARCH64Opcode InvertCond(AARCH64Opcode cond) {
 }
 
 static TargetInstruction* PeelMovSource(TargetInstruction* value,
-                                        TargetBasicBlock* block) {
+                                        TargetBasicBlock* block,
+                                        TargetInstruction* use) {
   while (value != NULL && IsMove(value) && value->block == block) {
-    value = MoveSource(value);
+    TargetInstruction* src = MoveSource(value);
+    if (!ValueUnclobberedBetween(value, use, src)) {
+      break;
+    }
+    value = src;
   }
   return value;
 }
@@ -886,8 +953,9 @@ static TargetInstruction* PeelMovSource(TargetInstruction* value,
 // Resolve a cbz/cbnz operand to the cset that produced it (expression-style
 // cset, or cset that wrote a tmp the branch reads).
 static TargetInstruction* FindCsetProducer(TargetInstruction* value,
-                                           TargetBasicBlock* block) {
-  value = PeelMovSource(value, block);
+                                           TargetBasicBlock* block,
+                                           TargetInstruction* use) {
+  value = PeelMovSource(value, block, use);
   if (value == NULL || value->block != block) {
     return NULL;
   }
@@ -897,7 +965,7 @@ static TargetInstruction* FindCsetProducer(TargetInstruction* value,
   // ubfx (objdump: uxtb/uxth) of a cset — peel one layer.
   if (value->opcode == (TargetOpcode)AARCH64_OP(ubfx) &&
       value->operand[0] != NULL) {
-    TargetInstruction* inner = PeelMovSource(value->operand[0], block);
+    TargetInstruction* inner = PeelMovSource(value->operand[0], block, value);
     if (inner != NULL && inner->opcode == (TargetOpcode)AARCH64_OP(cset) &&
         inner->block == block) {
       return inner;
@@ -908,7 +976,7 @@ static TargetInstruction* FindCsetProducer(TargetInstruction* value,
     for (TargetInstruction* inst = TargetBasicBlockBegin(block);
          inst != NULL && inst->block == block; inst = TargetNext(inst)) {
       if (inst->opcode == (TargetOpcode)AARCH64_OP(cset) &&
-          inst->dest == value) {
+          inst->dest == value && ValueUnclobberedBetween(inst, use, value)) {
         return inst;
       }
     }
@@ -924,12 +992,13 @@ static bool FoldRedundantZextBeforeCompareZeroBranch(
       branch->opcode != (TargetOpcode)AARCH64_OP(cbnz)) {
     return false;
   }
-  TargetInstruction* value = PeelMovSource(branch->operand[0], block);
+  TargetInstruction* value = PeelMovSource(branch->operand[0], block, branch);
   if (value == NULL || value->opcode != (TargetOpcode)AARCH64_OP(ubfx) ||
       value->operand[0] == NULL || value->operand[1] == NULL ||
       value->operand[2] == NULL || !AARCH64IsIntConst(value->operand[1]) ||
       !AARCH64IsIntConst(value->operand[2]) ||
-      AARCH64IntValue(value->operand[1]) != 0) {
+      AARCH64IntValue(value->operand[1]) != 0 ||
+      !ValueUnclobberedBetween(value, branch, value->operand[0])) {
     return false;
   }
   int64_t width = AARCH64IntValue(value->operand[2]);
@@ -953,7 +1022,7 @@ static bool FoldCsetCompareZeroBranch(AARCH64Generator* generator,
   }
   // Drop a dead zext on the predicate before looking for a cset producer.
   FoldRedundantZextBeforeCompareZeroBranch(generator, block, branch);
-  TargetInstruction* value = FindCsetProducer(branch->operand[0], block);
+  TargetInstruction* value = FindCsetProducer(branch->operand[0], block, branch);
   if (value == NULL || value->operand[0] == NULL) {
     return false;
   }
@@ -1097,10 +1166,11 @@ static bool IsZeroOneValue(TargetInstruction* inst) {
 
 static bool ExtractSingleBitTest(TargetInstruction* val,
                                  TargetBasicBlock* block,
+                                 TargetInstruction* use,
                                  int max_bits,
                                  TargetInstruction** base_out,
                                  int* bit_out) {
-  TargetInstruction* src = PeelMovSource(val, block);
+  TargetInstruction* src = PeelMovSource(val, block, use);
   if (src == NULL || src->block != block || src->dest != NULL) {
     return false;
   }
@@ -1117,7 +1187,8 @@ static bool ExtractSingleBitTest(TargetInstruction* val,
       while (((mask >> bit) & 1u) == 0) {
         bit++;
       }
-      if (bit >= 0 && bit < max_bits) {
+      if (bit >= 0 && bit < max_bits &&
+          ValueUnclobberedBetween(src, use, src->operand[0])) {
         *base_out = src->operand[0];
         *bit_out = bit;
         return true;
@@ -1130,7 +1201,8 @@ static bool ExtractSingleBitTest(TargetInstruction* val,
       src->operand[2] != NULL && AARCH64IsIntConst(src->operand[2]) &&
       AARCH64IntValue(src->operand[2]) == 1) {
     int64_t bit = AARCH64IntValue(src->operand[1]);
-    if (bit >= 0 && bit < max_bits) {
+    if (bit >= 0 && bit < max_bits &&
+        ValueUnclobberedBetween(src, use, src->operand[0])) {
       *base_out = src->operand[0];
       *bit_out = (int)bit;
       return true;
@@ -1178,6 +1250,9 @@ static void CombineShiftAndMaskInBlock(TargetBasicBlock* block, void* data) {
       continue;
     }
     TargetInstruction* base = shift->operand[0];
+    if (!ValueUnclobberedBetweenGen(&generator->base, shift, inst, base)) {
+      continue;
+    }
     TargetInstruction* lsb_const = shift->operand[1];
     TargetInstruction* w_const =
         TargetGetIntConstant(&generator->base, NULL, kTargetType32Bit, w);
@@ -1213,7 +1288,7 @@ static void SimplifyRedundantCsetsInBlock(TargetBasicBlock* block, void* data) {
     if (!IsCompareWithZero(prev) || !FlagsDeadAfter(block, inst)) {
       continue;
     }
-    TargetInstruction* src = PeelMovSource(prev->operand[0], block);
+    TargetInstruction* src = PeelMovSource(prev->operand[0], block, prev);
     if (src == NULL || src->block != block || src->dest != NULL ||
         InstructionSize(src) != InstructionSize(inst)) {
       if (prev->operand[0] != NULL &&
@@ -1224,7 +1299,11 @@ static void SimplifyRedundantCsetsInBlock(TargetBasicBlock* block, void* data) {
           prev->operand[0]->operand[0] != NULL &&
           prev->operand[0]->operand[1] != NULL &&
           prev->operand[0]->operand[2] == NULL &&
-          InstructionSize(prev->operand[0]) == InstructionSize(prev)) {
+          InstructionSize(prev->operand[0]) == InstructionSize(prev) &&
+          ValueUnclobberedBetween(prev->operand[0], prev,
+                                  prev->operand[0]->operand[0]) &&
+          ValueUnclobberedBetween(prev->operand[0], prev,
+                                  prev->operand[0]->operand[1])) {
         TargetInstruction* and_inst = prev->operand[0];
         prev->opcode = (TargetOpcode)AARCH64_OP(tst);
         TargetReplaceOperand(prev, 0, and_inst->operand[0]);
@@ -1268,7 +1347,7 @@ static void SimplifyRedundantCsetsInBlock(TargetBasicBlock* block, void* data) {
     TargetInstruction* base = NULL;
     int bit = 0;
     if (src->users.length == 1 && prev->operand[0] == src &&
-        ExtractSingleBitTest(src, block, max_bits, &base, &bit) &&
+        ExtractSingleBitTest(src, block, inst, max_bits, &base, &bit) &&
         !AARCH64IsConst(base) && !AARCH64IsSymbol(base) &&
         base->opcode != (TargetOpcode)AARCH64_OP(literal)) {
       if (cond == AARCH64_OP(ne) &&
@@ -1310,20 +1389,20 @@ static bool TryFoldBitTestBranch(AARCH64Generator* generator,
       branch->operand[1]->opcode == (TargetOpcode)AARCH64_OP(label)) {
     FoldRedundantZextBeforeCompareZeroBranch(generator, block, branch);
     bool is_nonzero = branch->opcode == (TargetOpcode)AARCH64_OP(cbnz);
-    TargetInstruction* cand = PeelMovSource(branch->operand[0], block);
+    TargetInstruction* cand = PeelMovSource(branch->operand[0], block, branch);
     if (cand != NULL && cand->block == block && cand->dest == NULL &&
         cand->opcode == (TargetOpcode)AARCH64_OP(eor) &&
         cand->operand[0] != NULL && cand->operand[1] != NULL &&
         AARCH64IsIntConst(cand->operand[1]) &&
         AARCH64IntValue(cand->operand[1]) == 1 &&
-        IsZeroOneValue(PeelMovSource(cand->operand[0], block))) {
+        IsZeroOneValue(PeelMovSource(cand->operand[0], block, cand))) {
       is_nonzero = !is_nonzero;
       cand = cand->operand[0];
     }
     int max_bits = InstructionSize(branch) == kSize64Bit ? 64 : 32;
     TargetInstruction* base = NULL;
     int bit = 0;
-    if (!ExtractSingleBitTest(cand, block, max_bits, &base, &bit)) {
+    if (!ExtractSingleBitTest(cand, block, branch, max_bits, &base, &bit)) {
       return false;
     }
     TargetInstruction* old_val = branch->operand[0];
@@ -1360,7 +1439,8 @@ static bool TryFoldBitTestBranch(AARCH64Generator* generator,
     int max_bits = InstructionSize(prev) == kSize64Bit ? 64 : 32;
     TargetInstruction* base = NULL;
     int bit = 0;
-    if (!ExtractSingleBitTest(prev->operand[0], block, max_bits, &base, &bit)) {
+    if (!ExtractSingleBitTest(prev->operand[0], block, branch, max_bits, &base,
+                              &bit)) {
       return false;
     }
     TargetInstruction* target = branch->operand[1];

@@ -26,7 +26,13 @@ static void SetWord(Vector* v, size_t i, uint64_t value) {
 }
 
 
-enum { kMaxSlow = 16, kMaxRegId = 64 };
+enum {
+  kMaxSlow = 16,
+  kMaxRegId = 64,
+  kMaxClones = 24,
+  kMaxCloneBlockInsts = 22,
+  kMaxClonedInsts = 40,
+};
 
 static int PopCount(uint64_t x) {
   int c = 0;
@@ -81,22 +87,56 @@ static bool RecordExec(const TargetShrinkWrapOps* sw, TargetInstruction* inst,
   return true;
 }
 
-static bool BlockFrameFree(const TargetShrinkWrapOps* sw, TargetBasicBlock* block,
-                           bool allow_save, bool allow_reload, uint64_t* saved,
-                           uint64_t* temp, uint64_t* arg, int* exec_count) {
+static bool IsTableJumpBlock(const TargetBasicBlock* block) {
+  return block != NULL && block->end_code != NULL &&
+         (block->end_code->flags & TARGET_INST_TABLE_JUMP) != 0;
+}
+
+static bool IsJumpTableEntryBlock(TargetGenerator* gen,
+                                  const TargetBasicBlock* block) {
+  if (block == NULL || block->end_code == NULL ||
+      gen->virtuals->is_table_entry == NULL ||
+      !gen->virtuals->is_table_entry(block->end_code)) {
+    return false;
+  }
+  for (size_t i = 0; i < block->in_edges.length; i++) {
+    size_t pred_id = (size_t)block->in_edges.value.w[i];
+    if (pred_id < gen->basic_blocks.length &&
+        IsTableJumpBlock(gen->basic_blocks.value.p[pred_id])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool BlockFrameFree(TargetGenerator* gen, const TargetShrinkWrapOps* sw,
+                           TargetBasicBlock* block, bool allow_save,
+                           bool allow_reload, uint64_t* saved, uint64_t* temp,
+                           uint64_t* arg, int* exec_count) {
   int cnt = 0;
   uint64_t sm = 0;
   uint64_t tm = 0;
   uint64_t am = 0;
-  if (block == NULL || block->code == NULL) {
+  if (block == NULL || block->code == NULL || IsTableJumpBlock(block) ||
+      IsJumpTableEntryBlock(gen, block)) {
     return false;
   }
   for (TargetInstruction* inst = block->code; inst != NULL;
        inst = TargetNext(inst)) {
+    if ((inst->flags & TARGET_INST_TABLE_JUMP) != 0) {
+      return false;
+    }
     TargetSWKind kind = sw->classify(sw->ctx, inst, allow_save, allow_reload,
                                     &sm, &tm, &am);
     if (kind == kTargetSWBad) {
       return false;
+    }
+    if (gen->virtuals->is_branch(inst) && !gen->virtuals->is_call(inst) &&
+        !sw->is_return(inst)) {
+      TargetInstruction** slot = sw->branch_target(sw->ctx, inst);
+      if (slot == NULL || *slot == NULL || !sw->is_label(*slot)) {
+        return false;
+      }
     }
     if (kind == kTargetSWExec && !RecordExec(sw, inst, &sm, &tm, &am)) {
       return false;
@@ -166,6 +206,7 @@ typedef struct {
   Vector blk_exec;
   Vector fall_succ;
   Vector clone_of;
+  size_t* rpo_pos;
 
   int* arg_coalesce;
   int* saved_reg_slot_idx;
@@ -327,12 +368,59 @@ static bool SplitEpilogueFromPrecedingCode(ShrinkWrap* w) {
   return true;
 }
 
+static void ComputeRPO(ShrinkWrap* w) {
+  size_t n = w->orig_blocks;
+  w->rpo_pos = malloc((n > 0 ? n : 1) * sizeof(size_t));
+  for (size_t i = 0; i < n; i++) {
+    w->rpo_pos[i] = n;
+  }
+  if (w->entry_id >= n || Block(w, w->entry_id) == NULL) {
+    return;
+  }
+  uint8_t* vis = calloc(n, sizeof(uint8_t));
+  size_t* stk_blk = malloc(n * sizeof(size_t));
+  size_t* stk_edge = malloc(n * sizeof(size_t));
+  size_t* post = malloc(n * sizeof(size_t));
+  size_t top = 0;
+  size_t npost = 0;
+  vis[w->entry_id] = 1;
+  stk_blk[top] = w->entry_id;
+  stk_edge[top] = 0;
+  top++;
+  while (top > 0) {
+    size_t u = stk_blk[top - 1];
+    size_t e = stk_edge[top - 1];
+    TargetBasicBlock* blk = Block(w, u);
+    if (blk != NULL && e < blk->out_edges.length) {
+      stk_edge[top - 1] = e + 1;
+      size_t v = (size_t)blk->out_edges.value.w[e];
+      if (v < n && !vis[v] && Block(w, v) != NULL) {
+        vis[v] = 1;
+        stk_blk[top] = v;
+        stk_edge[top] = 0;
+        top++;
+      }
+    } else {
+      top--;
+      post[npost++] = u;
+    }
+  }
+  for (size_t i = 0; i < npost; i++) {
+    w->rpo_pos[post[i]] = npost - 1 - i;
+  }
+  free(post);
+  free(stk_edge);
+  free(stk_blk);
+  free(vis);
+}
+
 // Allocates the per-block sets.  |cap| leaves room for the clones the fast
 // region may add; a block id at or past |cap| is never treated as fast.
 static void BeginAnalysis(ShrinkWrap* w) {
   w->orig_blocks = w->gen->basic_blocks.length;
-  w->cap = w->orig_blocks + 32;
+  w->cap = w->orig_blocks + kMaxClones + 8;
   w->entry_id = w->gen->entry_block->block_id;
+  ComputeRPO(w);
   BitSetInit(&w->eligible_pure);
   BitSetInit(&w->eligible_clone);
   BitSetInit(&w->can_reach_ret);
@@ -366,6 +454,7 @@ static void EndAnalysis(ShrinkWrap* w) {
   VectorDestruct(&w->blk_exec);
   VectorDestruct(&w->fall_succ);
   VectorDestruct(&w->clone_of);
+  free(w->rpo_pos);
   free(w->arg_coalesce);
   free(w->saved_reg_slot_idx);
 }
@@ -389,13 +478,13 @@ static bool RecordBlockCosts(ShrinkWrap* w) {
     int ec = 0;
     // The reload-tolerant check overwrites the masks, and only runs when the
     // block is not already eligible without reloads.
-    bool pure = BlockFrameFree(sw, blk, blk == gen->entry_block,
+    bool pure = BlockFrameFree(gen, sw, blk, blk == gen->entry_block,
                                /*allow_reload=*/false, &sm, &tm, &am, &ec);
     if (pure) {
       BitSetInsert(&w->eligible_pure, b);
     }
     if (pure || (blk != gen->entry_block &&
-                 BlockFrameFree(sw, blk, /*allow_save=*/false,
+                 BlockFrameFree(gen, sw, blk, /*allow_save=*/false,
                                 /*allow_reload=*/true, &sm, &tm, &am, &ec))) {
       BitSetInsert(&w->eligible_clone, b);
     }
@@ -490,20 +579,21 @@ static bool RecordBlockCosts(ShrinkWrap* w) {
 // The cheapest block the fast region may clone on this pass, or orig_blocks
 // when none qualifies.  |skip_loops| leaves loop blocks for the second pass,
 // so cloning one only peels the loop's first test.  A candidate needs a fast
-// predecessor and a slow one, only forward edges, at most 22 real
-// instructions, and room in the clone budget of 24 blocks and 40 instructions.
+// predecessor and a slow one, only forward edges in RPO, at most
+// kMaxCloneBlockInsts real instructions, and room in the clone budget.
 static size_t CheapestClone(ShrinkWrap* w, bool skip_loops, int num_clones,
                             int cloned_insts) {
   size_t best = w->orig_blocks;
-  for (size_t b = 0; b < w->orig_blocks && num_clones < 24; b++) {
+  for (size_t b = 0; b < w->orig_blocks && num_clones < kMaxClones; b++) {
     TargetBasicBlock* blk = Block(w, b);
     if (blk == NULL || BitSetContains(&w->sim_pure_fast, b) ||
         BitSetContains(&w->sim_clone, b) ||
         (skip_loops && blk->loop_nesting > 0) ||
         !BitSetContains(&w->eligible_clone, b) ||
         !BitSetContains(&w->can_reach_ret, b) ||
-        (int)Word(&w->blk_exec, b) > 22 ||
-        cloned_insts + (int)Word(&w->blk_exec, b) > 40 ||
+        (int)Word(&w->blk_exec, b) > kMaxCloneBlockInsts ||
+        cloned_insts + (int)Word(&w->blk_exec, b) > kMaxClonedInsts ||
+        w->rpo_pos[b] >= w->orig_blocks ||
         blk->in_edges.length == 0) {
       continue;
     }
@@ -516,7 +606,7 @@ static size_t CheapestClone(ShrinkWrap* w, bool skip_loops, int num_clones,
           (BitSetContains(&w->sim_pure_fast, pred_id) ||
            BitSetContains(&w->sim_clone, pred_id))) {
         has_fast_pred = true;
-        if (pred_id >= b) {
+        if (w->rpo_pos[pred_id] >= w->rpo_pos[b]) {
           forward_only = false;
           break;
         }
@@ -720,8 +810,10 @@ static bool FastRegionDoesRealWork(ShrinkWrap* w) {
   if (entry->out_edges.length == 2) {
     size_t o0 = (size_t)entry->out_edges.value.w[0];
     size_t o1 = (size_t)entry->out_edges.value.w[1];
-    bool f0 = o0 < w->orig_blocks && Simulated(w, o0);
-    bool f1 = o1 < w->orig_blocks && Simulated(w, o1);
+    bool f0 = o0 == w->epilogue->block_id ||
+              (o0 < w->orig_blocks && Simulated(w, o0));
+    bool f1 = o1 == w->epilogue->block_id ||
+              (o1 < w->orig_blocks && Simulated(w, o1));
     if (f0 != f1 && sw->cold_entry_split(sw->ctx, entry)) {
       return false;
     }
@@ -1047,8 +1139,8 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
       BitSetInsert(&w->in_fast, b);
     }
   }
-  TargetInstruction* orig_clone_lbl[32] = {0};
-  TargetInstruction* new_clone_lbl[32] = {0};
+  TargetInstruction* orig_clone_lbl[kMaxClones] = {0};
+  TargetInstruction* new_clone_lbl[kMaxClones] = {0};
   int clone_idx = 0;
   for (size_t b = 0; b < w->orig_blocks; b++) {
     if (!BitSetContains(&w->sim_clone, b)) {
@@ -1393,6 +1485,45 @@ static void LayOutFastPathAndPrologue(ShrinkWrap* w) {
   } else {
     sw->emit_dispatch(sw->ctx, gen, save_blk, cursor, w->slow_lbls,
                       (int)w->num_slow_targets);
+  }
+
+  for (size_t b = 0; b < gen->basic_blocks.length; b++) {
+    if (b >= w->cap || !BitSetContains(&w->in_fast, b)) {
+      continue;
+    }
+    TargetBasicBlock* blk = Block(w, b);
+    if (blk == NULL || blk->end_code == NULL) {
+      continue;
+    }
+    TargetInstruction* end = blk->end_code;
+    if (!sw->no_fallthrough(sw->ctx, end) || sw->is_return(end)) {
+      continue;
+    }
+    TargetInstruction** slot = sw->branch_target(sw->ctx, end);
+    if (slot == NULL || *slot == NULL) {
+      continue;
+    }
+    bool redundant = false;
+    for (TargetInstruction* nxt = TargetNext(end); nxt != NULL;
+         nxt = TargetNext(nxt)) {
+      if (nxt == *slot) {
+        redundant = true;
+        break;
+      }
+      if (!sw->is_label(nxt) && !sw->is_meta(sw->ctx, nxt)) {
+        break;
+      }
+    }
+    if (redundant) {
+      TargetInstruction* prev = TargetPrev(end);
+      TargetInstruction* after = TargetNext(end);
+      if (blk->code == end) {
+        blk->code = (after != NULL && after->block == blk) ? after : NULL;
+      }
+      blk->end_code = (prev != NULL && prev->block == blk) ? prev : NULL;
+      ListDeleteElement(&gen->code, &end->header);
+      TargetTrackOrphanInstruction(gen, end);
+    }
   }
 }
 
