@@ -284,24 +284,6 @@ static bool IsMoveOpcode(AARCH64Opcode op) {
          op == AARCH64_OP(fmv_d);
 }
 
-// Whether |inst| leaves the upper half of its 64-bit register clear, as
-// every instruction that writes a w register does.
-static bool ClearsUpperHalf(TargetInstruction* inst) {
-  AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
-  if (Kind(inst) != kTargetRAValue || AARCH64IsCall(inst) || IsMoveOpcode(op) ||
-      GetRegisterSize(inst) != kSize32Bit) {
-    return false;
-  }
-  switch (op) {
-    case AARCH64_OP(reload):
-    case AARCH64_OP(sxtw):
-    case AARCH64_OP(ldursw):
-      return false;
-    default:
-      return true;
-  }
-}
-
 static TargetRACopyKind CopyKind(TargetInstruction* inst) {
   AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
   TargetInstruction* src = inst->operand[0];
@@ -309,16 +291,11 @@ static TargetRACopyKind CopyKind(TargetInstruction* inst) {
       Kind(src) == kTargetRANone || RegClass(inst) != RegClass(src)) {
     return kTargetRANotCopy;
   }
-  int size = OperandSize(inst);
-  if (RegClass(inst) == kFloatClass) {
-    return size == OperandSize(src) ? kTargetRACopy : kTargetRANotCopy;
+  if (RegClass(inst) == kFloatClass && Kind(src) == kTargetRAValue &&
+      OperandSize(inst) != OperandSize(src)) {
+    return kTargetRANotCopy;
   }
-  // A 32-bit move clears the upper half, so it is only a plain copy when the
-  // source already has.
-  if (size == kSize64Bit || ClearsUpperHalf(src)) {
-    return kTargetRACopy;
-  }
-  return kTargetRAConvertingCopy;
+  return kTargetRACopy;
 }
 
 static int ArgumentKeys(int* keys, int max_keys) {

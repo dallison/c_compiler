@@ -470,6 +470,7 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
     return 8;
   }
   switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(zr):
     case AARCH64_OP(ldrb):
     case AARCH64_OP(ldurb):
       return 1;
@@ -485,7 +486,7 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
           sym->symbol->type != NULL && TypeIsIntegral(sym->symbol->type) &&
           !TypeIsSigned(sym->symbol->type)) {
         int size = sym->symbol->type->size;
-        if (size > 0 && size <= 4) {
+        if (size > 0 && size < 4) {
           return size;
         }
       }
@@ -503,6 +504,33 @@ static int KnownZeroExtendedBytes(TargetInstruction* inst) {
     }
     default:
       return 8;
+  }
+}
+
+// Whether |inst| architecturally writes a 32-bit W register (which hardware-
+// zeroes bits [63:32]) without routing through a destination pseudo or an
+// elidable move.
+static bool ClearsUpperHalf(TargetInstruction* inst) {
+  if (inst == NULL || inst->dest != NULL || !AARCH64GeneratesOutput(inst) ||
+      AARCH64IsCall(inst) || AARCH64IsSignedLoad(inst) ||
+      GetRegisterSize(inst) != kSize32Bit) {
+    return false;
+  }
+  switch ((AARCH64Opcode)inst->opcode) {
+    case AARCH64_OP(tmp):
+    case AARCH64_OP(structreturn):
+    case AARCH64_OP(literal):
+    case AARCH64_OP(asm):
+    case AARCH64_OP(mov):
+    case AARCH64_OP(mv):
+    case AARCH64_OP(fmov):
+    case AARCH64_OP(fmv_s):
+    case AARCH64_OP(fmv_d):
+    case AARCH64_OP(reload):
+    case AARCH64_OP(sxtw):
+      return false;
+    default:
+      return true;
   }
 }
 
@@ -2451,6 +2479,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   TargetInstruction* inst = NULL;
   bool ref_counts_ok =
       false;  // True if we don't need to update operand ref counts.
+  bool swapped_add_operands = false;
   
   // Do some strength reduction if we can.
   switch (opcode) {
@@ -2501,6 +2530,7 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
             inst = (TargetInstruction*)NewInstruction(AARCH64_OP(add));
             inst->operand[0] = rhs;
             inst->operand[1] = GetLoweredNode(op1);
+            swapped_add_operands = true;
           }
         }
       }
@@ -2837,22 +2867,43 @@ static TargetInstruction* LowerExpression(AARCH64Generator* g, IRNode* node) {
   }
 
   // AArch64 register-form address arithmetic is performed in X registers.
-  // When the offset was computed as a signed 32-bit integer, merely naming its
-  // X-register view zero-extends it and turns a negative displacement into a
-  // large positive one.  Widen variable signed offsets explicitly before they
-  // participate in pointer arithmetic.
+  // A 32-bit integer is only the low W view of its 64-bit register.  Widen
+  // variable 32-bit offsets explicitly before 64-bit pointer arithmetic.
   if ((node->opcode == IR_OP(adda) || node->opcode == IR_OP(suba)) &&
-      node->inputs.length == 2 && !IRIsConst(node->inputs.value.p[1])) {
-    IRNode* offset = node->inputs.value.p[1];
-    if (offset->type != NULL && offset->type->size == 4 &&
-        !TypeIsUnsigned(offset->type) &&
+      node->inputs.length == 2 &&
+      inst->opcode != (TargetOpcode)AARCH64_OP(mov)) {
+    for (int i = 0; i < 2; i++) {
+      IRNode* offset = node->inputs.value.p[i];
+      if (IRIsConst(offset) || offset->type == NULL ||
+          !TypeIsIntegral(offset->type) || offset->type->size != 4) {
+        continue;
+      }
+      int offset_op = swapped_add_operands ? (1 - i) : i;
+      TargetInstruction* off_inst = inst->operand[offset_op];
+      if (off_inst == NULL || TargetIsConst(off_inst)) {
+        continue;
+      }
+      int zero_bytes = KnownZeroExtendedBytes(off_inst);
+      if (!TypeIsUnsigned(offset->type)) {
         // uint16_t indices promote to signed int but are still non-negative;
-        // ldrh/zero-extend already clear bit 31, so sxtw is redundant.
-        KnownZeroExtendedBytes(inst->operand[1]) > 4) {
-      inst->operand[1] =
-          Emit(g, SetInstructionSize(
-                      NewInstruction1(AARCH64_OP(sxtw), inst->operand[1]),
-                      kSize64Bit));
+        // ldrh/zero-extend (< 4 bytes) already clear bit 31, so sxtw is
+        // redundant.  A 4-byte zero-extension leaves bit 31 intact and still
+        // needs sxtw when reinterpreted as signed.
+        if (zero_bytes >= 4) {
+          inst->operand[offset_op] =
+              Emit(g, SetInstructionSize(
+                          NewInstruction1(AARCH64_OP(sxtw), off_inst),
+                          kSize64Bit));
+        }
+      } else if (zero_bytes > 4 && !ClearsUpperHalf(off_inst)) {
+        inst->operand[offset_op] =
+            Emit(g, SetInstructionSize(
+                        NewInstruction3(
+                            AARCH64_OP(ubfx), off_inst,
+                            GetIntConstant(g, NULL, kTargetType32Bit, 0),
+                            GetIntConstant(g, NULL, kTargetType32Bit, 32)),
+                        kSize64Bit));
+      }
     }
   }
 
@@ -5750,9 +5801,20 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
 
 static TargetInstruction* LowerComputedBranch(AARCH64Generator* g, IRNode* node) {
   assert(node->inputs.length == 1);
+  IRNode* index = node->inputs.value.p[0];
   // A constant index must be a register so the scale (`lsl #2`) is applied.
   // An immediate add drops the shift and jumps into the middle of the table.
-  TargetInstruction* value = Materialize(g, node->inputs.value.p[0]);
+  TargetInstruction* value = Materialize(g, index);
+  if (index->type != NULL && TypeIsIntegral(index->type) &&
+      index->type->size <= 4 &&
+      KnownZeroExtendedBytes(value) > 4 && !ClearsUpperHalf(value)) {
+    value = Emit(g, SetInstructionSize(
+                        NewInstruction3(
+                            AARCH64_OP(ubfx), value,
+                            GetIntConstant(g, NULL, kTargetType32Bit, 0),
+                            GetIntConstant(g, NULL, kTargetType32Bit, 32)),
+                        kSize64Bit));
+  }
 
   TargetInstruction* adr =
       Emit(g, SetInstructionSize(NewInstruction1(AARCH64_OP(adr),
