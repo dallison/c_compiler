@@ -325,12 +325,139 @@ static bool UnknownEffectMayClobber(const IRMemoryLocation* location) {
          location->kind == kIRMemoryExtern;
 }
 
+static const Struct* DirectStructOf(TypeRecord* type) {
+  if (type == NULL || !TypeIsPrimitive(type) ||
+      (type->type & kTypeStruct) == 0 || (type->type & kTypeUnion) != 0) {
+    return NULL;
+  }
+  const Struct* str = type->info.struct_info;
+  if (str == NULL || str->is_union) {
+    return NULL;
+  }
+  return str;
+}
+
+static const Struct* PointerStructTarget(TypeRecord* ptr_type) {
+  if (ptr_type == NULL || !TypeIsPointerOrArray(ptr_type)) {
+    return NULL;
+  }
+  TypeRecord* pointee = ptr_type->next;
+  while (pointee != NULL && TypeIsArray(pointee)) {
+    pointee = pointee->next;
+  }
+  return DirectStructOf(pointee);
+}
+
+static bool SameStructIdentity(const Struct* a, const Struct* b) {
+  if (a == b) {
+    return true;
+  }
+  if (a == NULL || b == NULL) {
+    return false;
+  }
+  return a->tag_symbol != NULL && a->tag_symbol == b->tag_symbol;
+}
+
+static bool StructContainsSubobject(const Struct* outer, const Struct* target,
+                                    int depth) {
+  if (outer == NULL || target == NULL || depth > 16) {
+    return true;
+  }
+  if (SameStructIdentity(outer, target)) {
+    return true;
+  }
+  for (size_t i = 0; i < outer->bases.length; i++) {
+    const CXXBaseSpecifier* base = outer->bases.value.p[i];
+    if (base == NULL || base->type == NULL) {
+      continue;
+    }
+    const Struct* base_str = DirectStructOf(base->type);
+    if (base_str == NULL ||
+        StructContainsSubobject(base_str, target, depth + 1)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < outer->virtual_bases.length; i++) {
+    const CXXVirtualBaseInfo* vbase = outer->virtual_bases.value.p[i];
+    if (vbase == NULL || vbase->type == NULL) {
+      continue;
+    }
+    const Struct* vbase_str = DirectStructOf(vbase->type);
+    if (vbase_str == NULL ||
+        StructContainsSubobject(vbase_str, target, depth + 1)) {
+      return true;
+    }
+  }
+  for (size_t i = 0; i < outer->members.length; i++) {
+    const StructMember* member = outer->members.value.p[i];
+    if (member == NULL || member->is_static || member->is_member_function ||
+        member->is_using_declaration || member->symbol == NULL ||
+        member->symbol->type == NULL) {
+      continue;
+    }
+    TypeRecord* mtype = member->symbol->type;
+    while (mtype != NULL && TypeIsArray(mtype)) {
+      mtype = mtype->next;
+    }
+    if (mtype != NULL && TypeIsPrimitive(mtype) &&
+        (mtype->type & kTypeUnion) != 0) {
+      return true;
+    }
+    const Struct* mstr = DirectStructOf(mtype);
+    if (mstr != NULL && StructContainsSubobject(mstr, target, depth + 1)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool DistinctNonOverlappingStructs(const Struct* loc_str,
+                                          TypeRecord* candidate_ptr_type) {
+  const Struct* arg_str = PointerStructTarget(candidate_ptr_type);
+  if (loc_str == NULL || arg_str == NULL) {
+    return false;
+  }
+  if (SameStructIdentity(loc_str, arg_str)) {
+    return false;
+  }
+  return !StructContainsSubobject(loc_str, arg_str, 0) &&
+         !StructContainsSubobject(arg_str, loc_str, 0);
+}
+
+static bool IndirectPointersMayAlias(IRNode* loc_ptr, IRNode* arg_ptr,
+                                     IRNode* stripped_arg, IRNode* raw_arg) {
+  if (loc_ptr == NULL || arg_ptr == NULL) {
+    return true;
+  }
+  if (loc_ptr == arg_ptr || loc_ptr == stripped_arg || loc_ptr == raw_arg) {
+    return true;
+  }
+  const Struct* loc_str = PointerStructTarget(loc_ptr->type);
+  if (loc_str == NULL) {
+    return true;
+  }
+  if (!DistinctNonOverlappingStructs(loc_str, arg_ptr->type)) {
+    return true;
+  }
+  if (stripped_arg != NULL && stripped_arg != arg_ptr &&
+      !DistinctNonOverlappingStructs(loc_str, stripped_arg->type)) {
+    return true;
+  }
+  if (raw_arg != NULL && raw_arg != stripped_arg &&
+      !DistinctNonOverlappingStructs(loc_str, raw_arg->type)) {
+    return true;
+  }
+  return false;
+}
+
 // True when |arg| is a pointer into the same object as |location| (the callee
  // can therefore write that object).  A pointer *value* loaded from a field of
- // the object (e.g. `Sounding(interpreter->bbc)`) roots a different object and
- // does not give the callee access to |location|.
+ // the object (e.g. `Sounding(interpreter->bbc)`) roots a different struct
+ // type and does not give the callee access to |location|, whereas `void*`,
+ // character pointers, or pointers to compatible/overlapping structs may alias.
 static bool CallArgProvidesAccessTo(const IRMemoryLocation* location,
                                     IRNode* arg) {
+  IRNode* raw_arg = arg;
   while (arg != NULL && arg->opcode == IR_OP(cast) && arg->inputs.length == 1) {
     arg = arg->inputs.value.p[0];
   }
@@ -356,7 +483,8 @@ static bool CallArgProvidesAccessTo(const IRMemoryLocation* location,
            location->kind == kIRMemoryExtern || location->base == NULL;
   }
   if (location->kind == kIRMemoryIndirect) {
-    return kind == kIRMemoryIndirect && pointer == location->pointer;
+    return kind == kIRMemoryIndirect &&
+           IndirectPointersMayAlias(location->pointer, pointer, arg, raw_arg);
   }
   return base != NULL && base == location->base;
 }

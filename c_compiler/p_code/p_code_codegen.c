@@ -2205,7 +2205,7 @@ static TargetInstruction* LowerInc(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* load = Load(pcode, addr_node, ld_opcode);
   TargetInstruction* inc;
   if (TypeUsesHardwareFloatRegister(node->type)) {
-    TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
+    TargetInstruction* amount = Materialize(pcode, node->inputs.value.p[1]);
     inc = Emit(pcode,
                NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(addd)
                                                                 : P_OP(addf),
@@ -2267,7 +2267,7 @@ static TargetInstruction* LowerDec(PCodeGenerator* pcode, IRNode* node) {
   TargetInstruction* load = Load(pcode, addr_node, ld_opcode);
   TargetInstruction* inc;
   if (TypeUsesHardwareFloatRegister(node->type)) {
-    TargetInstruction* amount = GetLoweredNode(node->inputs.value.p[1]);
+    TargetInstruction* amount = Materialize(pcode, node->inputs.value.p[1]);
     inc = Emit(pcode,
                NewInstruction2(PCodeFpIsDoubleWidth(node->type) ? P_OP(subd)
                                                                 : P_OP(subf),

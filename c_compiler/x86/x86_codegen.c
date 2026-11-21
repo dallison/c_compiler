@@ -3871,6 +3871,7 @@ static TargetInstruction* LowerInc(X86Generator* rv, Generator* gen,
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeUsesHardwareFloatRegister(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc =  Emit(rv, NewInstruction2(X86FpIsDoubleWidth(node->type) ? X86_OP(addsd) : X86_OP(addss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, X86IntValue(amount));
@@ -3939,6 +3940,7 @@ static TargetInstruction* LowerDec(X86Generator* rv, Generator* gen,
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeUsesHardwareFloatRegister(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc =  Emit(rv, NewInstruction2(X86FpIsDoubleWidth(node->type) ? X86_OP(subsd) : X86_OP(subss), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -X86IntValue(amount));

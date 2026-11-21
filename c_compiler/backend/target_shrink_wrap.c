@@ -1139,13 +1139,20 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
       BitSetInsert(&w->in_fast, b);
     }
   }
-  TargetInstruction* orig_clone_lbl[kMaxClones] = {0};
-  TargetInstruction* new_clone_lbl[kMaxClones] = {0};
-  int clone_idx = 0;
+  Vector orig_clone_lbl;
+  Vector new_clone_lbl;
+  Vector block_map_orig;
+  Vector block_map_clone;
+  VectorInit(&orig_clone_lbl);
+  VectorInit(&new_clone_lbl);
+  VectorInit(&block_map_orig);
+  VectorInit(&block_map_clone);
   for (size_t b = 0; b < w->orig_blocks; b++) {
     if (!BitSetContains(&w->sim_clone, b)) {
       continue;
     }
+    block_map_orig.length = 0;
+    block_map_clone.length = 0;
     TargetBasicBlock* blk = Block(w, b);
     TargetInstruction* orig_lbl = EnsureLabel(sw, gen, blk);
     TargetBasicBlock* clone = NewTargetBasicBlock(gen->basic_blocks.length);
@@ -1156,31 +1163,63 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
     TargetEmit(gen, clone_lbl);
     clone->code = clone_lbl;
     clone->end_code = clone_lbl;
+    VectorAppend(&block_map_orig, orig_lbl);
+    VectorAppend(&block_map_clone, clone_lbl);
+    VectorAppend(&orig_clone_lbl, orig_lbl);
+    VectorAppend(&new_clone_lbl, clone_lbl);
     TargetInstruction* cur = clone_lbl;
     for (TargetInstruction* p = blk->code; p != NULL; p = TargetNext(p)) {
-      if (p != orig_lbl && !sw->omit_from_clone(sw->ctx, p)) {
-        TargetInstruction* cp;
-        if (sw->is_reload(p)) {
-          int64_t soff = 0;
-          int src_c = -1;
-          sw->reload_offset(sw->ctx, p, &soff);
-          for (int s = 0; s < w->num_sunk_slots; s++) {
-            if (w->sunk_slot_off[s] == soff) {
-              src_c = w->sunk_slot_reg[s];
-              break;
+      if (p != orig_lbl) {
+        TargetInstruction* cp = NULL;
+        if (sw->is_label(p)) {
+          // Preserve intra-block labels (such as exported PC-relative anchor
+          // labels attached to auipc/lea_rip) with fresh label IDs on the
+          // clone so %pcrel_lo operands in the clone resolve to the cloned PC.
+          cp = sw->new_label(sw->ctx);
+          cp->flags |= (p->flags & ~TARGET_INST_EXCEPTION_LANDING);
+          VectorAppend(&orig_clone_lbl, p);
+          VectorAppend(&new_clone_lbl, cp);
+        } else if (!sw->is_meta(sw->ctx, p) && !sw->omit_from_clone(sw->ctx, p)) {
+          if (sw->is_reload(p)) {
+            int64_t soff = 0;
+            int src_c = -1;
+            sw->reload_offset(sw->ctx, p, &soff);
+            for (int s = 0; s < w->num_sunk_slots; s++) {
+              if (w->sunk_slot_off[s] == soff) {
+                src_c = w->sunk_slot_reg[s];
+                break;
+              }
+            }
+            cp = sw->clone_reload(sw->ctx, gen, p, src_c);
+          } else {
+            cp = TargetNewInstruction(p->opcode);
+            cp->flags = p->flags;
+            cp->reg = p->reg;
+            cp->dest = p->dest;
+            for (int k = 0; k < TARGET_MAX_OPERANDS; k++) {
+              cp->operand[k] = p->operand[k];
+            }
+            for (size_t m = 0; m < block_map_orig.length; m++) {
+              TargetInstruction* from =
+                  (TargetInstruction*)VectorGet(&block_map_orig, m);
+              TargetInstruction* to =
+                  (TargetInstruction*)VectorGet(&block_map_clone, m);
+              if (cp->dest == from) {
+                cp->dest = to;
+              }
+              for (int k = 0; k < TARGET_MAX_OPERANDS; k++) {
+                if (cp->operand[k] == from) {
+                  cp->operand[k] = to;
+                }
+              }
             }
           }
-          cp = sw->clone_reload(sw->ctx, gen, p, src_c);
-        } else {
-          cp = TargetNewInstruction(p->opcode);
-          cp->flags = p->flags;
-          cp->reg = p->reg;
-          cp->dest = p->dest;
-          for (int k = 0; k < TARGET_MAX_OPERANDS; k++) {
-            cp->operand[k] = p->operand[k];
-          }
         }
-        cur = TargetShrinkWrapAppend(gen, clone, cp, cur);
+        if (cp != NULL) {
+          VectorAppend(&block_map_orig, p);
+          VectorAppend(&block_map_clone, cp);
+          cur = TargetShrinkWrapAppend(gen, clone, cp, cur);
+        }
       }
       if (p == blk->end_code) {
         break;
@@ -1191,9 +1230,6 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
       BitSetInsert(&w->in_fast, cid);
       VectorSet(&w->fall_succ, cid, Fall(w, b));
     }
-    orig_clone_lbl[clone_idx] = orig_lbl;
-    new_clone_lbl[clone_idx] = clone_lbl;
-    clone_idx++;
   }
 
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
@@ -1204,9 +1240,9 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
     for (TargetInstruction* p = blk->code; p != NULL; p = TargetNext(p)) {
       TargetInstruction** slot = sw->branch_target(sw->ctx, p);
       if (slot != NULL && *slot != NULL) {
-        for (int c = 0; c < clone_idx; c++) {
-          if (*slot == orig_clone_lbl[c]) {
-            *slot = new_clone_lbl[c];
+        for (size_t c = 0; c < orig_clone_lbl.length; c++) {
+          if (*slot == (TargetInstruction*)VectorGet(&orig_clone_lbl, c)) {
+            *slot = (TargetInstruction*)VectorGet(&new_clone_lbl, c);
             break;
           }
         }
@@ -1224,6 +1260,10 @@ static void CloneBlocksOnTheFastEdge(ShrinkWrap* w) {
       }
     }
   }
+  VectorDestruct(&block_map_orig);
+  VectorDestruct(&block_map_clone);
+  VectorDestruct(&orig_clone_lbl);
+  VectorDestruct(&new_clone_lbl);
 }
 
 // Blocks that used to fall into the next instruction get an explicit branch.

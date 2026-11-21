@@ -83,11 +83,28 @@ static IRNode* FindVariableReference(IRNode* origin, Symbol* symbol) {
   return NULL;
 }
 
+typedef struct PhiBlockInfo {
+  size_t num_phis;
+  size_t num_preds;
+  IRNode** inputs;
+} PhiBlockInfo;
+
+static IRNode* FirstPhiInBlock(BasicBlock* block) {
+  IRNode* inst = block->code;
+  while (inst != NULL && inst->block == block &&
+         inst->opcode == IR_OP(ssavar)) {
+    inst = IRNext(inst);
+  }
+  return (inst != NULL && inst->block == block && inst->opcode == IR_OP(phi))
+             ? inst
+             : NULL;
+}
+
 // Traverse the dominator tree depth first.  At each node, find all the variable
 // definitions and push them onto a stack associated with that variable.  The
 // stack contains references to the IRNode representing the variable.
 static void RenameVariables(Generator* gen, BasicBlock* block,
-                            Map* var_stacks) {
+                            Map* var_stacks, PhiBlockInfo* phi_info) {
   // Push all variable definitions onto the var_stack.
   for (size_t i = 0; i < block->defined_vars.length; i++) {
     Symbol* sym = block->defined_vars.values[i].key.p;
@@ -154,11 +171,51 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
     inst = IRNext(inst);
   }
 
+  // Record incoming values for PHI nodes in all CFG successors using the
+  // active rename stacks (Cytron et al.), avoiding per-(phi, pred) graph walks.
+  for (size_t e = 0; e < block->out_edges.length; e++) {
+    BlockId succ_id = (BlockId)block->out_edges.value.w[e];
+    if (succ_id < 0 || (size_t)succ_id >= gen->basic_blocks.length) {
+      continue;
+    }
+    PhiBlockInfo* info = &phi_info[succ_id];
+    if (info->inputs == NULL) {
+      continue;
+    }
+    bool duplicate_succ = false;
+    for (size_t prev = 0; prev < e; prev++) {
+      if ((BlockId)block->out_edges.value.w[prev] == succ_id) {
+        duplicate_succ = true;
+        break;
+      }
+    }
+    if (duplicate_succ) {
+      continue;
+    }
+    BasicBlock* succ = VectorGet(&gen->basic_blocks, succ_id);
+    IRNode* first_phi = FirstPhiInBlock(succ);
+    for (size_t k = 0; k < succ->in_edges.length; k++) {
+      if ((BlockId)succ->in_edges.value.w[k] != block->block_id) {
+        continue;
+      }
+      IRNode* phi_inst = first_phi;
+      size_t p = 0;
+      while (phi_inst != NULL && phi_inst->block == succ &&
+             phi_inst->opcode == IR_OP(phi)) {
+        IRVariable* phi = (IRVariable*)phi_inst;
+        info->inputs[p * info->num_preds + k] =
+            GetTopVariable(var_stacks, phi->symbol);
+        p++;
+        phi_inst = IRNext(phi_inst);
+      }
+    }
+  }
+
   // Process all blocks dominated by this one.
   for (size_t i = 0; i < block->dominatees.length; i++) {
     BasicBlock* b =
         VectorGet(&gen->basic_blocks, (BlockId)block->dominatees.value.p[i]);
-    RenameVariables(gen, b, var_stacks);
+    RenameVariables(gen, b, var_stacks, phi_info);
   }
 
   // Pop all stacks for all defined vars.
@@ -211,65 +268,20 @@ static void InsertPhiNodes(Generator* gen) {
   } while (changed);
 }
 
-static IRNode* FindSSAVar(Generator* gen, BasicBlock* block, Symbol* sym,
-                          BitSet* visited) {
-  void* latest_var = MapFindPointerKey(&block->defined_vars, sym);
-  if (latest_var != NULL) {
-    return latest_var;
+static void AddPhiInputs(BasicBlock* block, const PhiBlockInfo* info) {
+  if (info->inputs == NULL) {
+    return;
   }
-  for (size_t i = 0; i < block->in_edges.length; i++) {
-    BlockId id = block->in_edges.value.w[i];
-    BasicBlock* input = VectorGet(&gen->basic_blocks, id);
-    if (BitSetContains(visited, id)) {
-      // The walk started at a predecessor that does not define |sym| and
-      // reached a cycle.  On a do-while the header is the body, so the
-      // loop-carried definition is in the phi block itself and was stored in
-      // defined_vars by rename.  Skipping that block drops the backedge
-      // operand and freezes the phi at the pre-loop value (00161.c).
-      latest_var = MapFindPointerKey(&input->defined_vars, sym);
+  IRNode* inst = FirstPhiInBlock(block);
+  size_t p = 0;
+  while (inst != NULL && inst->block == block && inst->opcode == IR_OP(phi)) {
+    for (size_t k = 0; k < info->num_preds; k++) {
+      IRNode* latest_var = info->inputs[p * info->num_preds + k];
       if (latest_var != NULL) {
-        return latest_var;
-      }
-      continue;
-    }
-    BitSetInsert(visited, id);
-    latest_var = FindSSAVar(gen, input, sym, visited);
-    if (latest_var != NULL) {
-      return latest_var;
-    }
-  }
-  return NULL;
-}
-
-// Add all inputs to the phi nodes in the block.  We do this by
-// traversing all the block and looking up the defined_vars map
-// to obtain the latest SSA variable for the given symbol.
-static void AddPhiInputs(Generator* gen, BasicBlock* block) {
-  IRNode* inst = block->code;
-  // ssavar nodes in the block are before the phi nodes.
-  while (inst != NULL && inst->opcode == IR_OP(ssavar)) {
-    inst = IRNext(inst);
-  }
-  // Now process all phi nodes.  These are in a contiguous
-  // block.
-  while (inst != NULL && inst->opcode == IR_OP(phi)) {
-    IRVariable* phi = (IRVariable*)inst;
-    Symbol* sym = phi->symbol;
-    for (size_t i = 0; i < block->in_edges.length; i++) {
-      BasicBlock* input =
-          VectorGet(&gen->basic_blocks, block->in_edges.value.w[i]);
-      // Each predecessor lookup is an independent graph search.  Reusing one
-      // visited set across edges (or across phi nodes) can suppress a valid
-      // path merely because an earlier lookup traversed it.
-      BitSet visited;
-      BitSetInit(&visited);
-      BitSetInsert(&visited, block->block_id);
-      void* latest_var = FindSSAVar(gen, input, sym, &visited);
-      BitSetDestruct(&visited);
-      if (latest_var != NULL) {
-        IRAddInput((IRNode*)phi, latest_var, false);
+        IRAddInput(inst, latest_var, false);
       }
     }
+    p++;
     inst = IRNext(inst);
   }
 }
@@ -291,14 +303,14 @@ static int SymbolCompare(const void* a, const void* b) {
 
 // Rename all variables in basic blocks to generate a Static Single Assignment
 // to them.
-void GeneratorRenameVariables(Generator* gen) {
+static void GeneratorRenameVariables(Generator* gen, PhiBlockInfo* phi_info) {
   // We need a mapping for each variable to a stack of values it has been
   // renamed to.
   Map var_stacks;
   MapInit(&var_stacks, SymbolCompare);
 
   // Perform the rename.
-  RenameVariables(gen, gen->entry_block, &var_stacks);
+  RenameVariables(gen, gen->entry_block, &var_stacks, phi_info);
 
   // Clean up.
   for (size_t i = 0; i < var_stacks.length; i++) {
@@ -312,13 +324,36 @@ void GeneratorConvertToSSA(Generator* gen) {
   // Insert PHI nodes for all variables.
   InsertPhiNodes(gen);
 
-  // Rename all variables, creating a single assignment to each.
-  GeneratorRenameVariables(gen);
-
-  // Add inputs to all phi nodes in the blocks.
-  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
-    AddPhiInputs(gen, gen->basic_blocks.value.p[i]);
+  size_t num_blocks = gen->basic_blocks.length;
+  PhiBlockInfo* phi_info =
+      num_blocks > 0 ? calloc(num_blocks, sizeof(PhiBlockInfo)) : NULL;
+  for (size_t i = 0; i < num_blocks; i++) {
+    BasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b->in_edges.length == 0) {
+      continue;
+    }
+    size_t num_phis = 0;
+    for (IRNode* n = FirstPhiInBlock(b);
+         n != NULL && n->block == b && n->opcode == IR_OP(phi); n = IRNext(n)) {
+      num_phis++;
+    }
+    if (num_phis > 0) {
+      phi_info[i].num_phis = num_phis;
+      phi_info[i].num_preds = b->in_edges.length;
+      phi_info[i].inputs =
+          calloc(num_phis * b->in_edges.length, sizeof(IRNode*));
+    }
   }
+
+  // Rename all variables, creating a single assignment to each.
+  GeneratorRenameVariables(gen, phi_info);
+
+  // Add inputs to all phi nodes in the blocks in exact in_edges order.
+  for (size_t i = 0; i < num_blocks; i++) {
+    AddPhiInputs(gen->basic_blocks.value.p[i], &phi_info[i]);
+    free(phi_info[i].inputs);
+  }
+  free(phi_info);
 }
 
 //

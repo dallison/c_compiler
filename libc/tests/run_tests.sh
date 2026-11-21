@@ -160,7 +160,8 @@ if [ "$do_runtime" -eq 1 ] && { [ "$target" = "x86_64" ] || [ "$target" = "aarch
           libc/guest_heap.c \
           libc/memset.c \
           libc/errno.c \
-          libc/posix.c; do
+          libc/posix.c \
+          libc/syscall.c; do
         obj="$work/thread_libc_$(basename "${src%.c}").o"
         "$davecc" "${rt_cflags[@]}" "$src" -o "$obj"
         thread_libc_objs+=("$obj")

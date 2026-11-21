@@ -8103,6 +8103,11 @@ IRNode* GenerateExpression(Generator* gen, ASTNode* node) {
                      ? GenerateZeroExtend(gen, node, result)
                      : GenerateSignExtend(gen, result, node);
       }
+      if (TypeIsBool(node->type) && result->type != NULL &&
+          !TypeIsBool(result->type)) {
+        result = GenerateBooleanValue(gen, result);
+        break;
+      }
       result = GeneratorEmit(gen, NewIR1(IR_OP(cast), result));
       IRSetType(result, node->type);
       GenerateConstexprPointerCastMarker(gen, cast_node, result);

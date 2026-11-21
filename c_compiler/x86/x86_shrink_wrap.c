@@ -190,7 +190,8 @@ static bool FunctionOk(void* ctx, TargetGenerator* gen) {
   X86Generator* g = sw->allocator->rv;
   if (!OptLevel2() || gen->varargs || g->saved_regs.length != 0 ||
       g->struct_return_reg >= 0 || gen->exception_edges.length != 0 ||
-      gen->entry_block == NULL || gen->entry_block->in_edges.length != 0) {
+      g->exception_ranges.length != 0 || gen->entry_block == NULL ||
+      gen->entry_block->in_edges.length != 0) {
     return false;
   }
   return gen->stack_frame_size > 0 || gen->num_calls > 0 || g->not_leaf ||

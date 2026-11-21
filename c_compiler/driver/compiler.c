@@ -1866,6 +1866,9 @@ static bool CXXIsAddressConstant(ASTNode* expr) {
 }
 
 static ASTNode* KeepClonedNode(ASTNode* node, void* data);
+static bool CXXInitializerIsNoOpDefaultConstructor(Symbol* symbol,
+                                                   ASTNode* initializer);
+static void RecordCXXNoOpInitializedVariable(Symbol* symbol);
 
 // A class object whose initializer the constant evaluator reduces to an object
 // image is constant-initialized ([basic.start.static]), const or not: it is
@@ -1938,6 +1941,9 @@ static ASTNode* CXXGlobalConstantObjectImage(Symbol* sym, ASTNode* initializer) 
     image = ConstexprObjectInitializerForSymbol(sym, initializer->location);
     sym->flags.value_set = false;
     sym->value.other = NULL;
+    if (CXXInitializerIsNoOpDefaultConstructor(sym, evaluated)) {
+      RecordCXXNoOpInitializedVariable(sym);
+    }
   }
   DiagnosticErrorTrapEnd(saved_trap);
   DiagnosticSuppressEnd();
@@ -2318,12 +2324,39 @@ static bool CXXTypeHasNoOpDefaultConstructor(TypeRecord* type) {
 
 static bool CXXInitializerIsNoOpDefaultConstructor(Symbol* symbol,
                                                    ASTNode* initializer) {
+  if (initializer != NULL && initializer->op == AST_OP(expr_init)) {
+    initializer = ConstexprInitializerExpression(initializer);
+  }
   if (symbol == NULL || initializer == NULL ||
-      initializer->op != AST_OP(call) ||
       !CXXTypeHasNoOpDefaultConstructor(symbol->type)) {
     return false;
   }
-  ASTNode* callee = ((VectorASTNode*)initializer)->left;
+  if (initializer->op == AST_OP(braced_init)) {
+    BracedInitializerASTNode* braced = (BracedInitializerASTNode*)initializer;
+    return braced->initializers != NULL && braced->initializers->length == 0;
+  }
+  if (initializer->op != AST_OP(call)) {
+    return false;
+  }
+  VectorASTNode* call_node = (VectorASTNode*)initializer;
+  ASTNode* callee = call_node->left;
+  if (callee != NULL && callee->op == AST_OP(dot) &&
+      ASTNodeGetShape(callee) == kASTShapeBinary) {
+    BinaryASTNode* dot = (BinaryASTNode*)callee;
+    Struct* str = symbol->type->info.struct_info;
+    return call_node->children != NULL && call_node->children->length == 0 &&
+           dot->left != NULL && dot->left->op == AST_OP(identifier) &&
+           ((IdentifierASTNode*)dot->left)->symbol == symbol &&
+           dot->right != NULL && dot->right->op == AST_OP(string) &&
+           ((ConstantASTNode*)dot->right)->value.string != NULL &&
+           str != NULL && str->tag_name != NULL &&
+           StringEqualString(((ConstantASTNode*)dot->right)->value.string,
+                             str->tag_name);
+  }
+  while (callee != NULL && callee->op == AST_OP(address) &&
+         ASTNodeGetShape(callee) == kASTShapeUnary) {
+    callee = ((UnaryASTNode*)callee)->sub;
+  }
   Symbol* callee_symbol = NULL;
   if (callee != NULL && callee->op == AST_OP(identifier)) {
     callee_symbol = ((IdentifierASTNode*)callee)->symbol;
@@ -2334,6 +2367,9 @@ static bool CXXInitializerIsNoOpDefaultConstructor(Symbol* symbol,
   TypeRecord* callee_type =
       callee_symbol != NULL ? callee_symbol->type : callee != NULL ? callee->type
                                                                   : NULL;
+  if (callee_type != NULL && TypeIsPointer(callee_type)) {
+    callee_type = callee_type->next;
+  }
   // A copy or move constructor's argument is an initializer that still runs
   // (`Empty e(Registrar(flag))`).  The class has no virtual bases, so the
   // default constructor's only parameter is `this`.
@@ -3026,9 +3062,26 @@ static bool FunctionDefinitionIsODRDiscardable(TypeRecord* type) {
           type->info.function.template_origin != NULL);
 }
 
+static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
+
+// A function template, or a member or hidden friend of a class template
+// pattern.  Only its instantiations have code.
+static bool FunctionDefinitionIsTemplatePattern(Symbol* symbol,
+                                                TypeRecord* type) {
+  return TypeContainsTemplateParameter(type) ||
+         TypeContainsUninstantiatedClassTemplate(type) ||
+         FunctionBodyContainsUnexpandedPack(type->info.function.body) ||
+         (symbol->flags.is_template &&
+          type->info.function.template_origin == NULL);
+}
+
 static bool StaticFunctionIsDiscardable(Symbol* symbol, TypeRecord* type) {
   if (!OptLevel1() || symbol == NULL || type == NULL || !TypeIsFunction(type) ||
+      type->info.function.body == NULL ||
       !StorageIs(symbol->storage, STO(static)) || symbol->flags.invented ||
+      symbol->flags.is_template ||
+      type->info.function.cxx_member_owner != NULL ||
+      FunctionDefinitionIsTemplatePattern(symbol, type) ||
       compiler->lto_ir_only || compiler->toplevel_asm.length != 0) {
     return false;
   }
@@ -3047,19 +3100,6 @@ static bool StaticFunctionIsDiscardable(Symbol* symbol, TypeRecord* type) {
 static bool FunctionDefinitionIsDiscardable(Symbol* symbol, TypeRecord* type) {
   return FunctionDefinitionIsODRDiscardable(type) ||
          StaticFunctionIsDiscardable(symbol, type);
-}
-
-static bool TypeContainsUninstantiatedClassTemplate(TypeRecord* type);
-
-// A function template, or a member or hidden friend of a class template
-// pattern.  Only its instantiations have code.
-static bool FunctionDefinitionIsTemplatePattern(Symbol* symbol,
-                                                TypeRecord* type) {
-  return TypeContainsTemplateParameter(type) ||
-         TypeContainsUninstantiatedClassTemplate(type) ||
-         FunctionBodyContainsUnexpandedPack(type->info.function.body) ||
-         (symbol->flags.is_template &&
-          type->info.function.template_origin == NULL);
 }
 
 static bool FunctionDefinitionNeedsNativeCode(Symbol* symbol,
@@ -3705,6 +3745,11 @@ static void CompileDeclarationNode(Syntax* syntax, ASTNode* node) {
                                           : NULL;
                 bool constant_object_image = constant_image != NULL;
                 if (CompilerIsCXX() && TypeIsStructOrUnion(decl->symbol->type) &&
+                    CXXInitializerIsNoOpDefaultConstructor(
+                        decl->symbol, decl->initializer)) {
+                  RecordCXXNoOpInitializedVariable(decl->symbol);
+                }
+                if (CompilerIsCXX() && TypeIsStructOrUnion(decl->symbol->type) &&
                     decl->initializer != NULL &&
                     decl->initializer->op == AST_OP(call) &&
                     !constant_object_image) {
@@ -4015,8 +4060,6 @@ static DefinitionReferenceState MarkReferencesOfNeededDefinition(
     return kDefinitionNotDiscardable;
   }
   if (IsFunctionOrInlineDefinition(decl->symbol) && decl->base.type != NULL &&
-      TypeIsFunction(decl->base.type) &&
-      decl->base.type->info.function.body != NULL &&
       FunctionDefinitionIsDiscardable(decl->symbol, decl->base.type)) {
     // Whether or not it is still needed, a body whose references are marked
     // has nothing more to add.
@@ -4033,7 +4076,10 @@ static DefinitionReferenceState MarkReferencesOfNeededDefinition(
     if (!VariableDefinitionNeedsStorage(decl->symbol)) {
       return kVariableDefinitionUnreferenced;
     }
-    MarkReferencesInAST(decl->initializer);
+    if (!SymbolPointerInVector(&compiler->cxx_no_op_initialized_variables,
+                               decl->symbol)) {
+      MarkReferencesInAST(decl->initializer);
+    }
     return kDefinitionReferencesMarked;
   }
   return kDefinitionNotDiscardable;
@@ -4207,8 +4253,6 @@ static void CompileReferencedInlineFunctionsWithClosure(
         if (decl == NULL || decl->symbol == NULL ||
             !IsFunctionOrInlineDefinition(decl->symbol) ||
             decl->base.type == NULL ||
-            !TypeIsFunction(decl->base.type) ||
-            decl->base.type->info.function.body == NULL ||
             !FunctionDefinitionIsDiscardable(decl->symbol, decl->base.type) ||
             decl->base.type->info.function.native_code_emitted ||
             !FunctionDefinitionNeedsNativeCode(decl->symbol, decl->base.type)) {

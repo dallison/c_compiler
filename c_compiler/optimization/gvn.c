@@ -391,6 +391,8 @@ typedef struct {
   // Block ids of the exception landing pads, so DoGlobalValueNumbering can
   // refuse to hand one the values its dominator computed.
   BitSet landing_pads;
+  // Block ids containing at least one call instruction.
+  BitSet call_blocks;
   size_t num_blocks;
 } BlockLayout;
 
@@ -401,6 +403,7 @@ static void BlockLayoutInit(BlockLayout* layout, Generator* gen) {
     layout->block_position[i] = -1;
   }
   BitSetInit(&layout->landing_pads);
+  BitSetInit(&layout->call_blocks);
   for (size_t i = 0; i < gen->exception_ranges.length; i++) {
     ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
     if (range->catch_label != NULL && range->catch_label->block != NULL) {
@@ -416,8 +419,13 @@ static void BlockLayoutInit(BlockLayout* layout, Generator* gen) {
       continue;
     }
     size_t id = (size_t)inst->block->block_id;
-    if (id < layout->num_blocks && layout->block_position[id] < 0) {
-      layout->block_position[id] = next_position++;
+    if (id < layout->num_blocks) {
+      if (layout->block_position[id] < 0) {
+        layout->block_position[id] = next_position++;
+      }
+      if (IRIsCall(inst)) {
+        BitSetInsert(&layout->call_blocks, id);
+      }
     }
   }
 }
@@ -426,6 +434,7 @@ static void BlockLayoutDestruct(BlockLayout* layout) {
   free(layout->block_position);
   layout->block_position = NULL;
   BitSetDestruct(&layout->landing_pads);
+  BitSetDestruct(&layout->call_blocks);
 }
 
 // True if using 'definition' in place of 'use' keeps the definition ahead of
@@ -461,6 +470,77 @@ static bool DefinitionPrecedesUse(BlockLayout* layout, IRNode* definition,
   return definition_position < use_position;
 }
 
+static bool IsConstOffsetAdda(IRNode* inst) {
+  return inst != NULL && inst->opcode == IR_OP(adda) &&
+         inst->inputs.length == 2 && IRIsIntConst(inst->inputs.value.p[1]);
+}
+
+static bool HasCallBetweenDominatorAndUse(Generator* gen, BlockLayout* layout,
+                                          IRNode* def, IRNode* use) {
+  if (def->block == NULL || use->block == NULL) {
+    return true;
+  }
+  if (def->block == use->block) {
+    for (IRNode* p = IRNext(def);
+         p != NULL && p != use && !BasicBlockIsEmpty(def->block) &&
+         p != BasicBlockEnd(def->block);
+         p = IRNext(p)) {
+      if (IRIsCall(p)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  for (IRNode* p = IRNext(def);
+       p != NULL && !BasicBlockIsEmpty(def->block) &&
+       p != BasicBlockEnd(def->block);
+       p = IRNext(p)) {
+    if (IRIsCall(p)) {
+      return true;
+    }
+  }
+  for (IRNode* p = BasicBlockBegin(use->block);
+       p != NULL && p != use && !BasicBlockIsEmpty(use->block) &&
+       p != BasicBlockEnd(use->block);
+       p = IRNext(p)) {
+    if (IRIsCall(p)) {
+      return true;
+    }
+  }
+  size_t n = gen->basic_blocks.length;
+  bool* seen = calloc(n, sizeof(bool));
+  BasicBlock** work = malloc(n * sizeof(BasicBlock*));
+  size_t top = 0;
+  if ((size_t)def->block->block_id < n) {
+    seen[def->block->block_id] = true;
+  }
+  for (size_t i = 0; i < use->block->in_edges.length; i++) {
+    BlockId pred_id = use->block->in_edges.value.w[i];
+    if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
+      seen[pred_id] = true;
+      work[top++] = gen->basic_blocks.value.p[pred_id];
+    }
+  }
+  bool has_call = false;
+  while (top > 0) {
+    BasicBlock* cur = work[--top];
+    if (BitSetContains(&layout->call_blocks, (size_t)cur->block_id)) {
+      has_call = true;
+      break;
+    }
+    for (size_t i = 0; i < cur->in_edges.length; i++) {
+      BlockId pred_id = cur->in_edges.value.w[i];
+      if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
+        seen[pred_id] = true;
+        work[top++] = gen->basic_blocks.value.p[pred_id];
+      }
+    }
+  }
+  free(work);
+  free(seen);
+  return has_call;
+}
+
 // Given an instruction use its calculated value to look up the
 // table of known values.  It is found, meaning that there is
 // another instruction with exactly the same value then we know
@@ -468,16 +548,15 @@ static bool DefinitionPrecedesUse(BlockLayout* layout, IRNode* definition,
 //
 // If the instruction isn't found, add a new entry in the hash
 // table with the next value.
-static IRNode* LookupInstruction(ValueSet* set, IRNode* inst,
-                                 bool ssa_loads) {
+static Value* LookupValueEntry(ValueSet* set, IRNode* inst, bool ssa_loads) {
   uint64_t key = CalculateInstructionKey(&set->values, inst, ssa_loads);
   Value* value = HashTableSearch(&set->values, (void*)key);
   if (value != NULL) {
-    return value->instruction;
+    return value;
   }
   value = NewValue(key, set->next_value_number++, inst);
   HashTableInsert(&set->values, value);
-  return inst;
+  return value;
 }
 
 // Copy the value list.  This needs to actually copy the vector
@@ -531,11 +610,20 @@ static void DoLocalValueNumbering(Generator* gen, BlockLayout* layout,
       continue;
     }
     if (IRIsExpression(inst)) {
-      IRNode* prev_inst =
-          LookupInstruction(set, inst, gen->exception_ranges.length == 0);
+      Value* entry =
+          LookupValueEntry(set, inst, gen->exception_ranges.length == 0);
+      IRNode* prev_inst = entry->instruction;
       if (prev_inst != inst && DefinitionPrecedesUse(layout, prev_inst, inst)) {
-        GeneratorReplaceInstruction(gen, inst, prev_inst);
-        BasicBlockRemoveInstruction(gen, block, inst);
+        if (IsConstOffsetAdda(inst) &&
+            HasCallBetweenDominatorAndUse(gen, layout, prev_inst, inst)) {
+          // Refresh the entry to the post-call adda so subsequent call-free
+          // accesses share it in a scratch register instead of carrying a
+          // 1-cycle pointer offset across calls in a callee-saved register.
+          entry->instruction = inst;
+        } else {
+          GeneratorReplaceInstruction(gen, inst, prev_inst);
+          BasicBlockRemoveInstruction(gen, block, inst);
+        }
       }
     }
     inst = next;

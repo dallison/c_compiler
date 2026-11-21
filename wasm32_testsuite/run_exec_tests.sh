@@ -34,6 +34,11 @@ fi
 
 ARCHIVIST=${ARCHIVIST:-bazel-bin/archivist}
 
+if ! command -v wasm-validate >/dev/null 2>&1 ||
+   ! command -v wasmtime >/dev/null 2>&1; then
+  export PATH="/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:$PATH"
+fi
+
 for tool in wasm-validate wasmtime clang; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "run_exec_tests.sh: $tool is not installed" >&2

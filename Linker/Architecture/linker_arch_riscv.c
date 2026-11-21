@@ -333,7 +333,19 @@ static void ApplyRelocation(Linker* linker,
       return;
     }
     case R_RISCV_PCREL_HI20: {
-      int32_t offset = (int32_t)(S - P - A);
+      int64_t full_offset = (int64_t)(S - P - A);
+      int64_t abs_val = (int64_t)S + A;
+      int32_t insn = *(int32_t*)target_address;
+      if (LinkerSymbolIsUndefinedWeak(symbol) && S == 0 &&
+          full_offset != (int64_t)(int32_t)full_offset &&
+          abs_val == (int64_t)(int32_t)abs_val &&
+          (insn & 0x7f) == RV_OPCODE(auipc)) {
+        int rd = (insn >> 7) & 0x1f;
+        SplitValue(abs_val, &hi20, &lo12);
+        *(int32_t*)target_address = UTypeInstruction(RV_OPCODE(lui), rd, hi20);
+        return;
+      }
+      int32_t offset = (int32_t)full_offset;
       SplitValue(offset, &hi20, &lo12);
       SetBitField32(target_address, 12, 20, hi20);
       return;
@@ -379,8 +391,17 @@ static void ApplyRelocation(Linker* linker,
         int32_t offset = (int32_t)(addr - P + pcdiff);
         SplitValue(offset, &hi20, &lo12);
       } else {
-        int32_t offset = (int32_t)(S - P + pcdiff - A);
-        SplitValue(offset, &hi20, &lo12);
+        uint64_t hi_p = hi20_reloc->section->address + hi20_reloc->offset;
+        int64_t hi_full = (int64_t)(S - hi_p - hi20_reloc->addend);
+        int64_t abs_val = (int64_t)S + hi20_reloc->addend + A;
+        if (LinkerSymbolIsUndefinedWeak(symbol) && S == 0 &&
+            hi_full != (int64_t)(int32_t)hi_full &&
+            abs_val == (int64_t)(int32_t)abs_val) {
+          SplitValue(abs_val, &hi20, &lo12);
+        } else {
+          int32_t offset = (int32_t)(S - P + pcdiff - A);
+          SplitValue(offset, &hi20, &lo12);
+        }
       }
       
       if (reloc->type == R_RISCV_PCREL_LO12_S) {

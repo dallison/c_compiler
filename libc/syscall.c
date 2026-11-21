@@ -52,6 +52,9 @@ long __davecc_linux_syscall(long number, ...) {
                                          : (int64_t)arg[5];
     return syscall(SYS_MMAP, &request);
   }
+  if (number >= 0 && number < 0x40000000) {
+    return syscall((int)number, arg[0], arg[1], arg[2], arg[3], arg[4], arg[5]);
+  }
   errno = ENOSYS;
   return -1;
 }

@@ -51,10 +51,12 @@ static bool TypesMatchForForward(IRNode* load, IRNode* value) {
   if (TypeEqual(load->type, value->type)) {
     return true;
   }
-  // setbit used to be typed as the field; accept same-sized integrals so a
-  // corrected word-typed setbit still forwards when types are not pointer-equal.
+  // setbit used to be typed as the field; accept same-sized, same-signedness
+  // integrals so a corrected word-typed setbit still forwards when types are
+  // not pointer-equal without conflating sign- and zero-extended loads.
   return TypeIsIntegral(load->type) && TypeIsIntegral(value->type) &&
-         load->type->size == value->type->size;
+         load->type->size == value->type->size &&
+         TypeIsUnsigned(load->type) == TypeIsUnsigned(value->type);
 }
 
 static bool CanReplaceLoad(IRNode* load) {

@@ -4221,6 +4221,46 @@ static void PreserveInPlaceOldValue(AARCH64Generator* g, IRNode* node, int size)
   old_load->data.ptr = saved;
 }
 
+static bool AddressPointsToVolatile(IRNode* addr_node) {
+  if (addr_node == NULL || addr_node->type == NULL) {
+    return false;
+  }
+  if (TypeIsVolatile(addr_node->type)) {
+    return true;
+  }
+  return TypeIsPointer(addr_node->type) && addr_node->type->next != NULL &&
+         TypeIsVolatile(addr_node->type->next);
+}
+
+static TargetInstruction* ReuseAdjacentPostIncOldLoad(IRNode* node,
+                                                      IRNode* addr_node,
+                                                      int size) {
+  if (node->inputs.length <= 2 || node->outputs.length != 0 ||
+      (node->type != NULL && TypeIsVolatile(node->type)) ||
+      AddressPointsToVolatile(addr_node)) {
+    return NULL;
+  }
+  IRNode* old_load = node->inputs.value.p[2];
+  if (old_load == NULL || IRPrev(node) != old_load ||
+      old_load->block != node->block || old_load->dest != NULL ||
+      !IRIsLoadOnly(old_load) || old_load->inputs.length != 1 ||
+      old_load->inputs.value.p[0] != addr_node ||
+      (old_load->type != NULL && TypeIsVolatile(old_load->type)) ||
+      (old_load->type != NULL && node->type != NULL &&
+       TypeUsesHardwareFloatRegister(old_load->type) !=
+           TypeUsesHardwareFloatRegister(node->type)) ||
+      !HasLoweredNode(old_load)) {
+    return NULL;
+  }
+  TargetInstruction* old = GetLoweredNode(old_load);
+  if (old == NULL || old->dest != NULL || AARCH64IsVarRegister(old) ||
+      AARCH64IsConst(old) || AARCH64IsFixedRegister(old) ||
+      GetRegisterSize(old) != size) {
+    return NULL;
+  }
+  return old;
+}
+
 static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   AARCH64Opcode ld_opcode;
@@ -4270,7 +4310,10 @@ static TargetInstruction* LowerInc(AARCH64Generator* g, IRNode* node) {
     default:
       abort();
   }
-  TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  TargetInstruction* load = ReuseAdjacentPostIncOldLoad(node, addr_node, size);
+  if (load == NULL) {
+    load = Load(g, addr_node, ld_opcode, size);
+  }
   PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
@@ -4336,7 +4379,10 @@ static TargetInstruction* LowerDec(AARCH64Generator* g, IRNode* node) {
     default:
       abort();
   }
-  TargetInstruction* load = Load(g, addr_node, ld_opcode, size);
+  TargetInstruction* load = ReuseAdjacentPostIncOldLoad(node, addr_node, size);
+  if (load == NULL) {
+    load = Load(g, addr_node, ld_opcode, size);
+  }
   PreserveInPlaceOldValue(g, node, size);
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];

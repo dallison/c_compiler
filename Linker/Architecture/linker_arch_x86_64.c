@@ -167,10 +167,54 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       *((int64_t*)target_address) = (int64_t)(S + A - P);
       return;
 
-    case R_X86_64_PC32:
-      pc32 = (int32_t)(S + A - P);
+    case R_X86_64_PC32: {
+      int64_t delta = (int64_t)(S + A - P);
+      int64_t abs_val = (int64_t)S + A + 4;
+      if (LinkerSymbolIsUndefinedWeak(symbol) && S == 0 &&
+          delta != (int64_t)(int32_t)delta &&
+          abs_val == (int64_t)(int32_t)abs_val) {
+        // Undefined weak symbols resolve to 0 even when text is linked above
+        // 4 GiB (e.g. macOS 0x400000000). Relax `lea disp32(%rip), %reg` in
+        // place to `mov $imm32, %reg` per the x86-64 psABI.
+        if (reloc->offset >= 3 &&
+            ((uint8_t)target_address[-3] & 0xfb) == 0x48 &&
+            (uint8_t)target_address[-2] == 0x8d &&
+            ((uint8_t)target_address[-1] & 0xc7) == 0x05) {
+          uint8_t rex = (uint8_t)target_address[-3];
+          uint8_t modrm = (uint8_t)target_address[-1];
+          target_address[-3] =
+              (char)((rex & 0xf8) | ((rex & 0x04) != 0 ? 0x01 : 0x00));
+          target_address[-2] = (char)0xc7;
+          target_address[-1] = (char)(0xc0 | ((modrm >> 3) & 0x07));
+          *((int32_t*)target_address) = (int32_t)abs_val;
+          return;
+        }
+        if (reloc->offset >= 3 &&
+            ((uint8_t)target_address[-3] & 0xfb) == 0x40 &&
+            (uint8_t)target_address[-2] == 0x8d &&
+            ((uint8_t)target_address[-1] & 0xc7) == 0x05) {
+          uint8_t rex = (uint8_t)target_address[-3];
+          uint8_t modrm = (uint8_t)target_address[-1];
+          target_address[-3] =
+              (char)((rex & 0xf8) | ((rex & 0x04) != 0 ? 0x01 : 0x00));
+          target_address[-2] = (char)0xc7;
+          target_address[-1] = (char)(0xc0 | ((modrm >> 3) & 0x07));
+          *((int32_t*)target_address) = (int32_t)abs_val;
+          return;
+        }
+        if (reloc->offset >= 2 && (uint8_t)target_address[-2] == 0x8d &&
+            ((uint8_t)target_address[-1] & 0xc7) == 0x05) {
+          uint8_t modrm = (uint8_t)target_address[-1];
+          target_address[-2] = (char)0xc7;
+          target_address[-1] = (char)(0xc0 | ((modrm >> 3) & 0x07));
+          *((int32_t*)target_address) = (int32_t)abs_val;
+          return;
+        }
+      }
+      pc32 = (int32_t)delta;
       *((int32_t*)target_address) = pc32;
       return;
+    }
 
     case R_X86_64_PC16:
       *((int16_t*)target_address) = (int16_t)(S + A - P);

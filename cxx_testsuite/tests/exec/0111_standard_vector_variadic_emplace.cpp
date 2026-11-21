@@ -94,13 +94,15 @@ int main(void) {
       return 3;
     }
 
+    int copies_before_middle_emplace = Emplaced::copied;
     int moves_before_middle_emplace = Emplaced::moved;
     values.emplace(values.begin() + 1, 7, 8, 9);
     if (values.size() != 4 || values[1].first != 15 ||
         values[1].second != 9 || values[1].category != 3) {
       return 4;
     }
-    if (Emplaced::moved != moves_before_middle_emplace) {
+    if (Emplaced::copied != copies_before_middle_emplace ||
+        Emplaced::moved == moves_before_middle_emplace) {
       return 8;
     }
 

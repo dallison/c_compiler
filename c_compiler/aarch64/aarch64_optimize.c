@@ -2092,6 +2092,305 @@ static bool IsFallthroughJumpToNext(TargetInstruction* inst) {
   return false;
 }
 
+static bool InstructionsWithinDistance(TargetInstruction* from,
+                                       TargetInstruction* to,
+                                       int max_insts) {
+  int count = 0;
+  for (TargetInstruction* p = TargetNext(from); p != NULL && count <= max_insts;
+       p = TargetNext(p)) {
+    if (p == to) {
+      return true;
+    }
+    if (p->opcode != (TargetOpcode)AARCH64_OP(loc) &&
+        p->opcode != (TargetOpcode)AARCH64_OP(label)) {
+      count++;
+    }
+  }
+  count = 0;
+  for (TargetInstruction* p = TargetPrev(from); p != NULL && count <= max_insts;
+       p = TargetPrev(p)) {
+    if (p == to) {
+      return true;
+    }
+    if (p->opcode != (TargetOpcode)AARCH64_OP(loc) &&
+        p->opcode != (TargetOpcode)AARCH64_OP(label)) {
+      count++;
+    }
+  }
+  return false;
+}
+
+// Rewrites `b.cond skip; b target; skip:` (and cbz/cbnz/tbz/tbnz equivalents)
+// into `b.!cond target; skip:`.
+static bool TryInvertBranchOverBranch(TargetGenerator* gen,
+                                      TargetInstruction* inst) {
+  if (inst == NULL || inst->block == NULL || inst->block->is_unreachable ||
+      (inst->flags & TARGET_INST_KEEP_UNREACHABLE) != 0) {
+    return false;
+  }
+  AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+  int target_idx = -1;
+  AARCH64Opcode inv_cond = AARCH64_OP(al);
+  int max_dist = 100000;
+  if (op == AARCH64_OP(b)) {
+    if (inst->operand[0] == NULL ||
+        inst->operand[0]->opcode == (TargetOpcode)AARCH64_OP(al)) {
+      return false;
+    }
+    inv_cond = InvertCond((AARCH64Opcode)inst->operand[0]->opcode);
+    if (inv_cond == AARCH64_OP(al)) {
+      return false;
+    }
+    target_idx = 1;
+  } else if (op == AARCH64_OP(cbz) || op == AARCH64_OP(cbnz)) {
+    target_idx = 1;
+  } else if (op == AARCH64_OP(tbz) || op == AARCH64_OP(tbnz)) {
+    target_idx = 2;
+    max_dist = 4000;
+  } else {
+    return false;
+  }
+
+  TargetInstruction* skip_label = inst->operand[target_idx];
+  if (skip_label == NULL ||
+      skip_label->opcode != (TargetOpcode)AARCH64_OP(label) ||
+      skip_label->block == NULL || skip_label->block->is_unreachable) {
+    return false;
+  }
+
+  TargetInstruction* uncond = NULL;
+  for (TargetInstruction* p = TargetNext(inst); p != NULL; p = TargetNext(p)) {
+    if (p->opcode == (TargetOpcode)AARCH64_OP(loc)) {
+      continue;
+    }
+    if (p->opcode == (TargetOpcode)AARCH64_OP(label) &&
+        p->users.length == 0 && p != gen->entry_block->code &&
+        (p->flags & (TARGET_INST_KEEP_UNREACHABLE |
+                     TARGET_INST_EXCEPTION_LANDING |
+                     AARCH64_EXPORTED_LABEL)) == 0) {
+      continue;
+    }
+    uncond = p;
+    break;
+  }
+  if (uncond == NULL || uncond->block == NULL ||
+      uncond->block->is_unreachable ||
+      (uncond->flags & TARGET_INST_KEEP_UNREACHABLE) != 0 ||
+      uncond->opcode != (TargetOpcode)AARCH64_OP(b) ||
+      uncond->operand[0] == NULL ||
+      uncond->operand[0]->opcode != (TargetOpcode)AARCH64_OP(al) ||
+      uncond->operand[1] == NULL ||
+      uncond->operand[1]->opcode != (TargetOpcode)AARCH64_OP(label)) {
+    return false;
+  }
+
+  TargetInstruction* real_target = uncond->operand[1];
+  if (real_target == skip_label || real_target->block == NULL ||
+      real_target->block->is_unreachable) {
+    return false;
+  }
+
+  bool saw_skip = false;
+  for (TargetInstruction* q = TargetNext(uncond); q != NULL;
+       q = TargetNext(q)) {
+    if (q == skip_label) {
+      saw_skip = true;
+      break;
+    }
+    if (q->opcode == (TargetOpcode)AARCH64_OP(loc) ||
+        q->opcode == (TargetOpcode)AARCH64_OP(label)) {
+      continue;
+    }
+    return false;
+  }
+  if (!saw_skip || !InstructionsWithinDistance(inst, real_target, max_dist)) {
+    return false;
+  }
+
+  if (op == AARCH64_OP(b)) {
+    TargetInstruction* old_cond = inst->operand[0];
+    TargetInstruction* cond_inst =
+        TargetNewInstruction((TargetOpcode)inv_cond);
+    TargetBasicBlockEmitBefore(gen, inst->block, cond_inst, inst);
+    TargetReplaceOperand(inst, 0, cond_inst);
+    if (old_cond != NULL && old_cond->users.length == 0 &&
+        old_cond->block != NULL) {
+      TargetBasicBlockRemoveInstruction(gen, old_cond->block, old_cond);
+    }
+  } else if (op == AARCH64_OP(cbz)) {
+    inst->opcode = (TargetOpcode)AARCH64_OP(cbnz);
+  } else if (op == AARCH64_OP(cbnz)) {
+    inst->opcode = (TargetOpcode)AARCH64_OP(cbz);
+  } else if (op == AARCH64_OP(tbz)) {
+    inst->opcode = (TargetOpcode)AARCH64_OP(tbnz);
+  } else {
+    inst->opcode = (TargetOpcode)AARCH64_OP(tbz);
+  }
+  TargetReplaceOperand(inst, target_idx, real_target);
+  TargetBasicBlockRemoveInstruction(gen, uncond->block, uncond);
+  return true;
+}
+
+static bool IsPureImmediateAdd(TargetInstruction* inst) {
+  if (inst == NULL || inst->opcode != (TargetOpcode)AARCH64_OP(add) ||
+      inst->dest != NULL || inst->operand[0] == NULL ||
+      inst->operand[1] == NULL || !AARCH64IsIntConst(inst->operand[1]) ||
+      inst->operand[2] != NULL || inst->operand[3] != NULL ||
+      inst->observable_checkpoint) {
+    return false;
+  }
+  const int kSpecialFlags = AARCH64_HI_RELOC | AARCH64_LO_RELOC |
+                            AARCH64_PCREL_HI_RELOC | AARCH64_PCREL_LO_RELOC |
+                            AARCH64_TPREL_HI_RELOC | AARCH64_TPREL_LO_RELOC;
+  return (inst->flags & kSpecialFlags) == 0;
+}
+
+static bool SamePureBaseOperand(TargetInstruction* a, TargetInstruction* b) {
+  return a != NULL && a == b;
+}
+
+static bool BlockHasCall(TargetBasicBlock* block) {
+  if (block == NULL || TargetBasicBlockIsEmpty(block)) {
+    return false;
+  }
+  for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+       inst != TargetBasicBlockEnd(block); inst = TargetNext(inst)) {
+    AARCH64Opcode op = (AARCH64Opcode)inst->opcode;
+    if (op == AARCH64_OP(bl) || op == AARCH64_OP(blr) ||
+        op == AARCH64_OP(asm)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool NoCallBetweenDominatingInstAndUse(TargetGenerator* gen,
+                                              TargetInstruction* def,
+                                              TargetInstruction* use) {
+  if (def->block == use->block) {
+    for (TargetInstruction* p = TargetNext(def); p != NULL && p != use;
+         p = TargetNext(p)) {
+      AARCH64Opcode op = (AARCH64Opcode)p->opcode;
+      if (op == AARCH64_OP(bl) || op == AARCH64_OP(blr) ||
+          op == AARCH64_OP(asm)) {
+        return false;
+      }
+    }
+    return true;
+  }
+  for (TargetInstruction* p = TargetNext(def);
+       p != NULL && p != TargetBasicBlockEnd(def->block); p = TargetNext(p)) {
+    AARCH64Opcode op = (AARCH64Opcode)p->opcode;
+    if (op == AARCH64_OP(bl) || op == AARCH64_OP(blr) ||
+        op == AARCH64_OP(asm)) {
+      return false;
+    }
+  }
+  for (TargetInstruction* p = TargetBasicBlockBegin(use->block);
+       p != NULL && p != use; p = TargetNext(p)) {
+    AARCH64Opcode op = (AARCH64Opcode)p->opcode;
+    if (op == AARCH64_OP(bl) || op == AARCH64_OP(blr) ||
+        op == AARCH64_OP(asm)) {
+      return false;
+    }
+  }
+  size_t n = gen->basic_blocks.length;
+  bool* seen = calloc(n, sizeof(bool));
+  TargetBasicBlock** work = malloc(n * sizeof(TargetBasicBlock*));
+  size_t top = 0;
+  if (def->block->block_id >= 0 && (size_t)def->block->block_id < n) {
+    seen[def->block->block_id] = true;
+  }
+  for (size_t i = 0; i < use->block->in_edges.length; i++) {
+    int pred_id = (int)use->block->in_edges.value.w[i];
+    if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
+      seen[pred_id] = true;
+      work[top++] = gen->basic_blocks.value.p[pred_id];
+    }
+  }
+  bool ok = true;
+  while (top > 0) {
+    TargetBasicBlock* cur = work[--top];
+    if (BlockHasCall(cur)) {
+      ok = false;
+      break;
+    }
+    for (size_t i = 0; i < cur->in_edges.length; i++) {
+      int pred_id = (int)cur->in_edges.value.w[i];
+      if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
+        seen[pred_id] = true;
+        work[top++] = gen->basic_blocks.value.p[pred_id];
+      }
+    }
+  }
+  free(work);
+  free(seen);
+  return ok;
+}
+
+static void EliminateDuplicateImmAddsInBlock(TargetBasicBlock* block,
+                                             void* data) {
+  AARCH64Generator* generator = data;
+  TargetGenerator* gen = &generator->base;
+  if (block == NULL || block->is_unreachable ||
+      TargetBasicBlockIsEmpty(block)) {
+    return;
+  }
+  TargetInstruction* next = NULL;
+  for (TargetInstruction* inst = TargetBasicBlockBegin(block);
+       !TargetBasicBlockIsEmpty(block) && inst != TargetBasicBlockEnd(block);
+       inst = next) {
+    next = TargetNext(inst);
+    if (!IsPureImmediateAdd(inst) || inst->users.length == 0) {
+      continue;
+    }
+    int64_t imm = AARCH64IntValue(inst->operand[1]);
+    int size = InstructionSize(inst);
+    TargetInstruction* match = NULL;
+    int steps = 0;
+    for (TargetInstruction* prev = TargetPrev(inst);
+         prev != NULL && steps < 256; prev = TargetPrev(prev), steps++) {
+      if (prev->block == NULL || prev->block->is_unreachable) {
+        continue;
+      }
+      if (prev->block != block &&
+          !BitSetContains(&block->dominators, (size_t)prev->block->block_id)) {
+        continue;
+      }
+      if (IsPureImmediateAdd(prev) && InstructionSize(prev) == size &&
+          AARCH64IntValue(prev->operand[1]) == imm &&
+          SamePureBaseOperand(prev->operand[0], inst->operand[0]) &&
+          NoCallBetweenDominatingInstAndUse(gen, prev, inst) &&
+          ValueUnclobberedBetweenGen(gen, prev, inst, prev->operand[0])) {
+        match = prev;
+        break;
+      }
+    }
+    if (match == NULL) {
+      continue;
+    }
+    while (inst->users.length != 0) {
+      TargetInstruction* user = inst->users.value.p[0];
+      for (size_t i = 0; i < TARGET_MAX_OPERANDS; i++) {
+        if (user->operand[i] == inst) {
+          TargetReplaceOperand(user, (int)i, match);
+        }
+      }
+    }
+    TargetBasicBlockRemoveInstruction(gen, block, inst);
+  }
+}
+
+static void EliminateDuplicateImmAdds(AARCH64Generator* generator) {
+  if (generator->exception_ranges.length != 0 ||
+      generator->base.exception_edges.length != 0) {
+    return;
+  }
+  TargetTraverseDominatorTree(&generator->base,
+                              EliminateDuplicateImmAddsInBlock,
+                              kTraversePreOrder, generator);
+}
+
 static void SimplifyCFGForOptimize(AARCH64Generator* generator) {
   TargetGenerator* gen = &generator->base;
   if (generator->exception_ranges.length != 0 ||
@@ -2123,6 +2422,14 @@ static void SimplifyCFGForOptimize(AARCH64Generator* generator) {
     if (!in_jump_table && IsFallthroughJumpToNext(inst)) {
       TargetBasicBlockRemoveInstruction(gen, inst->block, inst);
       changed = true;
+      continue;
+    }
+    if (!in_jump_table && TryInvertBranchOverBranch(gen, inst)) {
+      next = TargetNext(inst);
+      changed = true;
+      if (IsFallthroughJumpToNext(inst)) {
+        TargetBasicBlockRemoveInstruction(gen, inst->block, inst);
+      }
     }
   }
   for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
@@ -2151,6 +2458,7 @@ void AARCH64Optimize(AARCH64Generator* generator) {
   EliminateMoves(generator);
   RemoveUnusedExpressions(generator);
   CombineLoadOrStores(generator);
+  EliminateDuplicateImmAdds(generator);
   CombineShiftedAdds(generator);
   TargetTraverseDominatorTree(&generator->base, CombineShiftAndMaskInBlock,
                               kTraversePreOrder, generator);

@@ -245,7 +245,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
     if (X86IsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
       if (base->opcode == (TargetOpcode)X86_OP(lea) &&
-          !compiler->pic) {
+          base->block == block && !compiler->pic) {
         // Insert label for lea_rip relocation.
         TargetInstruction* label =
             TargetNewInstruction((TargetOpcode)X86_OP(label));

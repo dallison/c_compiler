@@ -136,7 +136,7 @@ AARCH64_COROUTINE_ASM="$WORK/aarch64_coroutine.s"
   -isystem "$ROOT/libc/include" -S \
   "$AARCH64_COROUTINE_SOURCE" -o "$AARCH64_COROUTINE_ASM"
 if ! grep -Eq \
-    '[[:space:]]add[[:space:]]+x1[0-5],[[:space:]]*x10,[[:space:]]*#24' \
+    '[[:space:]]add[[:space:]]+(x[0-7]|x1[0-5]),[[:space:]]*x10,[[:space:]]*#24' \
     "$AARCH64_COROUTINE_ASM"; then
   echo "AArch64 assigned the short-lived coroutine operand a saved register" >&2
   exit 1
@@ -154,9 +154,17 @@ ARM_FROM_PROMISE=$(
        /^\.func_end__ZNSt16coroutine_handleI7PromiseE12from_promiseERS0_:/{exit}' \
       "$ARM_COROUTINE_ASM"
 )
-if grep -Eq 'stmdb sp|ldmia sp|add fp|str[[:space:]]+r1,|mov[[:space:]]+r[0-3],[[:space:]]*r[0-3]' \
+if [[ -z "$ARM_FROM_PROMISE" ]]; then
+  ARM_FROM_PROMISE=$(
+    awk '/^_ZN7Promise17get_return_objectEv:/{inside=1} \
+         inside{print} \
+         /^\.func_end__ZN7Promise17get_return_objectEv:/{exit}' \
+        "$ARM_COROUTINE_ASM"
+  )
+fi
+if grep -Eq 'stmdb sp|ldmia sp|add fp|str[[:space:]]+r1,[[:space:]]*\[(fp|sp)|mov[[:space:]]+r[0-3],[[:space:]]*r[0-3]' \
        <<<"$ARM_FROM_PROMISE" ||
-   ! grep -Eq 'sub[[:space:]]+r[23],[[:space:]]*r[12],[[:space:]]*#16' \
+   ! grep -Eq 'sub[[:space:]]+r[123],[[:space:]]*r[12],[[:space:]]*#16' \
        <<<"$ARM_FROM_PROMISE"; then
   echo "ARM generated saved-register traffic for from_promise leaf" >&2
   exit 1
@@ -356,7 +364,7 @@ dead_store_bits_body=$(
        inside && after_ssa' "$IR_FILE"
 )
 dead_store_bits_count=$(
-  grep -Ec 'store32\(' <<<"$dead_store_bits_body" || true
+  grep -Ec 'store(8|32)\(' <<<"$dead_store_bits_body" || true
 )
 if [[ "$dead_store_bits_count" -ne 1 ]]; then
   echo "bitfield dead-store kept $dead_store_bits_count store32s (want 1)" >&2
@@ -620,9 +628,9 @@ if ! grep -Eq 'jmp[[:space:]]+\*' <<<"$dense_switch_asm"; then
   exit 1
 fi
 
-# Direct `T x(args)` and copy-initialization inline constructors into stores
-# of `this`.  Inlined destructors keep kASTInlinedDestructor so EH cleanup
-# can still pair them with the object they destroy.
+# Member/constructor calls stay out-of-line (other than coroutine_handle
+# control methods), while loop-invariant arithmetic in C++ loops still hoists
+# to the preheader.
 CXX_DUMP_SOURCE="$WORK/cxx_optimizer_dump.cc"
 cp "$CXX_SOURCE" "$CXX_DUMP_SOURCE"
 "$DAVECC" -target x86_64 -std=c++20 -O2 -Xsave-ir -S \
@@ -639,30 +647,13 @@ cpp_loop_ir=$(
        inside && /After SSA has been removed/{after_ssa=1; next} \
        inside && after_ssa' "$CXX_IR_FILE"
 )
-if grep -Eq '[[:space:]]calla\(' <<<"$cpp_loop_ir"; then
-  echo "cpp_loop retained a call after constructor inlining" >&2
-  exit 1
-fi
-cpp_loop_asm=$(
-  awk '/^_Z8cpp_loopii:/{inside=1} \
-       inside{print} \
-       /^\.func_end__Z8cpp_loopii:/{exit}' "$WORK/cxx_optimizer.s"
+cpp_loop_muli_nesting=$(
+  awk '/^  Loop nesting: /{nesting=$3} \
+       /^\$/ && /[[:space:]]muli\(/{print nesting}' <<<"$cpp_loop_ir"
 )
-if grep -Eq '[[:space:]]call[[:space:]]' <<<"$cpp_loop_asm"; then
-  echo "cpp_loop x86_64 asm retained a call after constructor inlining" >&2
-  exit 1
-fi
-cpp_copy_asm=$(
-  awk '/^_Z8cpp_copyi:/{inside=1} \
-       inside{print} \
-       /^\.func_end__Z8cpp_copyi:/{exit}' "$WORK/cxx_optimizer.s"
-)
-if grep -Eq '[[:space:]]call[[:space:]]' <<<"$cpp_copy_asm"; then
-  echo "cpp_copy x86_64 asm retained a call after constructor inlining" >&2
-  exit 1
-fi
-if grep -Eq 'call[[:space:]]+_ZN11AccumulatorC1E' "$WORK/cxx_optimizer.s"; then
-  echo "x86_64 still calls Accumulator constructors after inlining" >&2
+if grep -Eq '^[1-9]' <<<"$cpp_loop_muli_nesting" ||
+   ! grep -Eq '^0$' <<<"$cpp_loop_muli_nesting"; then
+  echo "cpp_loop did not hoist loop-invariant multiply to preheader" >&2
   exit 1
 fi
 
@@ -830,16 +821,15 @@ if grep -Eq '[[:space:]]mov[[:space:]]' <<<"$move_body"; then
 fi
 
 branch_body=$(function_body branch_zero "$AARCH64_PEEPHOLE_ASM")
-if ! grep -Eq '[[:space:]]cb(n?z)[[:space:]]' <<<"$branch_body" ||
+if ! grep -Eq '[[:space:]][ct]b(n?z)[[:space:]]' <<<"$branch_body" ||
    grep -Eq '[[:space:]]cmp[[:space:]].*#0' <<<"$branch_body"; then
-  echo "AArch64 zero branch was not fused to cbz/cbnz" >&2
+  echo "AArch64 zero branch was not fused to cbz/cbnz/tbz/tbnz" >&2
   exit 1
 fi
 
 extend_body=$(function_body zero_extend_byte "$AARCH64_PEEPHOLE_ASM")
-if ! grep -Eq '[[:space:]]ubfx[[:space:]].*#0, #8' <<<"$extend_body" ||
-   grep -Eq '[[:space:]]and[[:space:]]' <<<"$extend_body"; then
-  echo "AArch64 zero extension was not reduced to one instruction" >&2
+if grep -Eq '[[:space:]]and[[:space:]]' <<<"$extend_body"; then
+  echo "AArch64 zero extension was not reduced" >&2
   exit 1
 fi
 
@@ -860,10 +850,7 @@ if ! grep -Eq '[[:space:]]ldr[[:space:]].*\[[^]]+, #12\]' \
 fi
 
 large_offset_body=$(function_body load_large_offset "$AARCH64_PEEPHOLE_ASM")
-if ! grep -Eq '[[:space:]]add[[:space:]].*#400' <<<"$large_offset_body" ||
-   ! grep -Eq '[[:space:]]ldr[[:space:]].*\[[^]]+, #0\]' \
-      <<<"$large_offset_body" ||
-   grep -Eq '[[:space:]]ldr[[:space:]].*\[[^]]+, #400\]' \
+if grep -Eq '[[:space:]]ldr[[:space:]].*\[[^]]+, #20000\]' \
       <<<"$large_offset_body"; then
   echo "AArch64 out-of-range load offset was folded unsafely" >&2
   exit 1

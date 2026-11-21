@@ -340,6 +340,15 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
 
     case R_AARCH64_ADR_PREL_LO21: {
       int64_t offset = (int64_t)(S + A - P);
+      uint64_t addr = S + A;
+      uint32_t rd = *(uint32_t*)target_address & 0x1fu;
+      if (LinkerSymbolIsUndefinedWeak(symbol) && S == 0 &&
+          (offset < -(1LL << 20) || offset >= (1LL << 20)) &&
+          addr <= 0xffffu) {
+        *(uint32_t*)target_address =
+            0xd2800000u | (((uint32_t)addr & 0xffffu) << 5) | rd;
+        return;
+      }
       uint32_t instruction = *(uint32_t*)target_address;
       hi21 = (int32_t)((offset >> 2) & 0x7ffff);
       lo12 = (int32_t)(offset & 0x3);
@@ -357,8 +366,22 @@ static void ApplyRelocation(Linker* linker, ObjectFile* file, Relocation* reloc,
       // page of the GOT with the low bits of the symbol.  Code that wants the
       // slot asks for it with R_AARCH64_ADR_GOT_PAGE.
       uint64_t addr = S + A;
+      int64_t page_delta =
+          ((int64_t)(addr & ~(uint64_t)0xfff) -
+           (int64_t)(P & ~(uint64_t)0xfff)) >>
+          12;
+      uint32_t rd = *(uint32_t*)target_address & 0x1fu;
+      if (LinkerSymbolIsUndefinedWeak(symbol) && S == 0 &&
+          (page_delta < -(1LL << 20) || page_delta >= (1LL << 20)) &&
+          (addr >> 12) == 0) {
+        // Undefined weak symbols resolve to 0 even when text is above 4 GiB;
+        // relax `adrp x<rd>, sym` to `movz x<rd>, #0` so the paired lo12
+        // instruction produces `0 + lo12`.
+        *(uint32_t*)target_address = 0xd2800000u | rd;
+        return;
+      }
       uint32_t instruction = EncodeAdrp(0, P, addr);
-      instruction = (instruction & ~0x1fu) | (*(uint32_t*)target_address & 0x1fu);
+      instruction = (instruction & ~0x1fu) | rd;
       *(uint32_t*)target_address = instruction;
       return;
     }

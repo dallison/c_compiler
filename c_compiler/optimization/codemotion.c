@@ -117,6 +117,14 @@ static bool IsHoistCandidate(Generator* gen, const LoopInfo* loop,
   if (IsFoldedAddressOffset(inst)) {
     return false;
   }
+  // Never hoist a constant-offset pointer addition across a loop that makes
+  // calls: `base` is already live across those calls, so keeping `base + C`
+  // live as well either burns an extra callee-saved register or spills a
+  // 1-cycle `add` to the stack.
+  if (effects.calls && inst->opcode == IR_OP(adda) &&
+      inst->inputs.length == 2 && IRIsIntConst(inst->inputs.value.p[1])) {
+    return false;
+  }
   if (inst->dest != NULL || inst->inputs.length == 0 ||
       IRHasSideEffects(inst) || IRIsVariable(inst) ||
       inst->opcode == IR_OP(literalref) ||

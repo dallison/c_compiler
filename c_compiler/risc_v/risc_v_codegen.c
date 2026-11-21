@@ -3223,6 +3223,46 @@ static TargetInstruction* LowerZeroExtend(RVGenerator* rv, IRNode* node) {
   return FinishWithDest(rv, node, lsr, RV_OP(mv));
 }
 
+static bool RVAddressPointsToVolatile(IRNode* addr_node) {
+  if (addr_node == NULL || addr_node->type == NULL) {
+    return false;
+  }
+  if (TypeIsVolatile(addr_node->type)) {
+    return true;
+  }
+  return TypeIsPointer(addr_node->type) && addr_node->type->next != NULL &&
+         TypeIsVolatile(addr_node->type->next);
+}
+
+static TargetInstruction* RVReuseAdjacentPostIncOldLoad(IRNode* node,
+                                                        IRNode* addr_node) {
+  if (node->inputs.length <= 2 || node->outputs.length != 0 ||
+      (node->type != NULL && TypeIsVolatile(node->type)) ||
+      RVAddressPointsToVolatile(addr_node)) {
+    return NULL;
+  }
+  IRNode* old_load = node->inputs.value.p[2];
+  if (old_load == NULL || IRPrev(node) != old_load ||
+      old_load->block != node->block || old_load->dest != NULL ||
+      !IRIsLoadOnly(old_load) || old_load->inputs.length != 1 ||
+      old_load->inputs.value.p[0] != addr_node ||
+      (old_load->type != NULL && TypeIsVolatile(old_load->type)) ||
+      (old_load->type != NULL && node->type != NULL &&
+       (TypeUsesHardwareFloatRegister(old_load->type) !=
+            TypeUsesHardwareFloatRegister(node->type) ||
+        (TypeUsesHardwareFloatRegister(node->type) &&
+         RVFpIsDoubleWidth(old_load->type) != RVFpIsDoubleWidth(node->type)))) ||
+      old_load->data.ptr == NULL) {
+    return NULL;
+  }
+  TargetInstruction* old = GetLoweredNode(old_load);
+  if (old == NULL || old->dest != NULL || RVIsVarRegister(old) ||
+      RVIsConst(old) || RVIsFixedRegister(old)) {
+    return NULL;
+  }
+  return old;
+}
+
 static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
   IRNode* addr_node = node->inputs.value.p[0];
   RVOpcode ld_opcode;
@@ -3269,11 +3309,15 @@ static TargetInstruction* LowerInc(RVGenerator* rv, IRNode* node) {
     default:
       abort();
   }
-  TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  TargetInstruction* load = RVReuseAdjacentPostIncOldLoad(node, addr_node);
+  if (load == NULL) {
+    load = Load(rv, addr_node, ld_opcode);
+  }
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeUsesHardwareFloatRegister(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fadd_d) : RV_OP(fadd_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, RVIntValue(amount));
@@ -3329,11 +3373,15 @@ static TargetInstruction* LowerDec(RVGenerator* rv, IRNode* node) {
     default:
       abort();
   }
-  TargetInstruction* load = Load(rv, addr_node, ld_opcode);
+  TargetInstruction* load = RVReuseAdjacentPostIncOldLoad(node, addr_node);
+  if (load == NULL) {
+    load = Load(rv, addr_node, ld_opcode);
+  }
   TargetInstruction* inc;
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeUsesHardwareFloatRegister(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc =  Emit(rv, NewInstruction2(RVFpIsDoubleWidth(node->type) ? RV_OP(fsub_d) : RV_OP(fsub_s), load, amount));
   } else  {
     inc =  AddImmediate(rv, load, -RVIntValue(amount));

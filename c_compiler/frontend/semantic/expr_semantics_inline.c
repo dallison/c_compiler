@@ -1208,6 +1208,11 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
   if (func->body == NULL || (func->body->flags & kASTAnalyzed) != 0) {
     return true;
   }
+  if ((func->symbol != NULL && func->symbol->flags.is_template &&
+       func->template_origin == NULL) ||
+      InliningBlockedByCalleeFormals(func)) {
+    return false;
+  }
   // A small member instantiation owns its body, so analyzing it here does not
   // rewrite the primary template.  Shared template bodies stay deferred.
   bool private_body = CoroutineHandleControlBodyIsPrivate(func);
@@ -1233,6 +1238,9 @@ static bool EnsureInlinedCalleeBodyIsAnalyzed(FunctionInfo* func) {
     return false;
   }
   TypeRecord* func_type = func->symbol != NULL ? func->symbol->type : NULL;
+  if (func_type != NULL && TypeContainsTemplateParameter(func_type)) {
+    return false;
+  }
   // Analyzing the body before its member initializers are inserted would
   // mark it analyzed and leave those initializers unanalyzed for codegen.
   if (FunctionTypeIsBeingAnalyzed(func_type) ||
@@ -1571,9 +1579,14 @@ static bool CalleeBodyEligibleByStructureAndSize(FunctionInfo* func,
     max_nodes = (!CompilerIsCXX() && compiler->loop_analysis_depth > 0)
                     ? kMaxSingleUseInLoopNodeCount
                     : kMaxSingleUseInlineNodeCount;
-  } else if (static_uses == 2 && (CompilerIsCXX() || is_static) &&
-             max_nodes < kMaxTwoUseInlineNodeCount) {
-    max_nodes = kMaxTwoUseInlineNodeCount;
+  } else if (static_uses == 2 && (CompilerIsCXX() || is_static)) {
+    int two_use_cap =
+        (!CompilerIsCXX() && is_static && !func->has_been_inlined)
+            ? kMaxSingleUseInlineNodeCount
+            : kMaxTwoUseInlineNodeCount;
+    if (max_nodes < two_use_cap) {
+      max_nodes = two_use_cap;
+    }
   } else if (static_uses <= (CompilerIsCXX() ? 4 : 6) &&
              max_nodes < kMaxFewUseInlineNodeCount) {
     max_nodes = kMaxFewUseInlineNodeCount;
@@ -1648,15 +1661,15 @@ bool FunctionCanBeInlined(FunctionInfo* func) {
       InliningBlockedByCallerSharingTemplateBody()) {
     return false;
   }
-  if (!EnsureInlinedCalleeBodyIsAnalyzed(func)) {
-    return false;
-  }
   // Member-function inlining stays limited to coroutine_handle::{done,resume,
   // destroy}.  A cloned member access is already an address, and argument
   // lowering takes that address again (path::compare, map node lookup).
   // Inlining the rest of a class also duplicates bodies into every caller.
   if (func->cxx_member_owner != NULL &&
       !IsStdCoroutineHandleControlMethod(func)) {
+    return false;
+  }
+  if (!EnsureInlinedCalleeBodyIsAnalyzed(func)) {
     return false;
   }
   if (func->cxx_member_owner != NULL && MemberBodyCallsMemberFunction(func)) {
@@ -1758,7 +1771,7 @@ static bool CheckGuardConditionVisitor(ASTNode* node, void* data, int child_id,
     case AST_OP(contents):
     case AST_OP(subscript):
       chk->has_deref_or_member = true;
-      return false;
+      return !chk->bad;
     case AST_OP(not):
     case AST_OP(onescomp):
     case AST_OP(uminus):

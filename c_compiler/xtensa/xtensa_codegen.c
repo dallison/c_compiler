@@ -3686,6 +3686,7 @@ static TargetInstruction* LowerInc(XTENSAGenerator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc = Emit(rv, NewInstruction2(XTENSAFpIsDoubleWidth(node->type)
                                        ? XTENSA_OP(fadd_d)
                                        : XTENSA_OP(fadd_s),
@@ -3748,6 +3749,7 @@ static TargetInstruction* LowerDec(XTENSAGenerator* rv, IRNode* node) {
   IRNode* amount_node = node->inputs.value.p[1];
   TargetInstruction* amount = GetLoweredNode(amount_node);
   if (TypeIsFloatingPoint(node->type)) {
+    amount = Materialize(rv, amount_node);
     inc = Emit(rv, NewInstruction2(XTENSAFpIsDoubleWidth(node->type)
                                        ? XTENSA_OP(fsub_d)
                                        : XTENSA_OP(fsub_s),

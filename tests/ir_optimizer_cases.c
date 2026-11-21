@@ -143,7 +143,7 @@ typedef struct {
 } MemoptParent;
 
 __attribute__((noinline)) int peek_child_flag(const MemoptField* child) {
-  return child != NULL ? child->owed : 0;
+  return child != 0 ? child->owed : 0;
 }
 
 // A call that only receives a child pointer must not force a reload of the

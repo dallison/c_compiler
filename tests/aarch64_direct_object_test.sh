@@ -12,6 +12,25 @@ else
   echo "test work directory: $work"
 fi
 
+# Direct object emission (-c) shortens per-function local label stems to L0,
+# L1, ... while -S keeps readable function names; rewrite those local stems
+# before assembling so the resulting ELF objects remain byte-for-byte identical.
+assemble_reference() {
+  awk '
+    /^\t\.type[ \t]+/ && $0 ~ /@function/ {
+      fn = $2; sub(/,$/, "", fn); stem[fn] = "L" n++;
+    }
+    {
+      for (f in stem) {
+        gsub("\\.Leh_" f "_", ".Leh_" stem[f] "_")
+        gsub("\\." f "_label_", "." stem[f] "_label_")
+      }
+      print
+    }
+  ' "$1" > "$1.stemmed"
+  "$aarch64asm" "$1.stemmed" -o "$2"
+}
+
 cat >"$work/input.cpp" <<'EOF'
 template <int N>
 __attribute__((noinline)) int value() {
@@ -27,7 +46,7 @@ EOF
   -o "$work/direct.o"
 "$davecc" -target aarch64 -std=c++20 -O0 -nostdinc -S "$work/input.cpp" \
   -o "$work/reference.s"
-"$aarch64asm" "$work/reference.s" -o "$work/reference.o"
+assemble_reference "$work/reference.s" "$work/reference.o"
 
 grep -q '// \*\*\* Basic block' "$work/reference.s"
 cmp "$work/reference.o" "$work/direct.o"
@@ -48,7 +67,7 @@ EOF
   -o "$work/inline_direct.o"
 "$davecc" -target aarch64 -std=c++20 -O0 -nostdinc -S "$work/inline_asm.cpp" \
   -o "$work/inline_reference.s"
-"$aarch64asm" "$work/inline_reference.s" -o "$work/inline_reference.o"
+assemble_reference "$work/inline_reference.s" "$work/inline_reference.o"
 
 cmp "$work/inline_reference.o" "$work/inline_direct.o"
 
@@ -66,7 +85,7 @@ EOF
   -o "$work/data_direct.o"
 "$davecc" -target aarch64 -std=c++20 -O0 -nostdinc -S "$work/data.cpp" \
   -o "$work/data_reference.s"
-"$aarch64asm" "$work/data_reference.s" -o "$work/data_reference.o"
+assemble_reference "$work/data_reference.s" "$work/data_reference.o"
 
 cmp "$work/data_reference.o" "$work/data_direct.o"
 
@@ -87,8 +106,8 @@ done
   "$work/long_symbol.cpp" -o "$work/long_symbol_direct.o"
 "$davecc" -target aarch64 -std=c++20 -O0 -nostdinc -S \
   "$work/long_symbol.cpp" -o "$work/long_symbol_reference.s"
-"$aarch64asm" "$work/long_symbol_reference.s" \
-  -o "$work/long_symbol_reference.o"
+assemble_reference "$work/long_symbol_reference.s" \
+  "$work/long_symbol_reference.o"
 
 cmp "$work/long_symbol_reference.o" "$work/long_symbol_direct.o"
 
@@ -101,7 +120,7 @@ EOF
   -o "$work/O2_direct.o"
 "$davecc" -target aarch64 -std=c++20 -O2 -nostdinc -S "$work/O2.cpp" \
   -o "$work/O2_reference.s"
-"$aarch64asm" "$work/O2_reference.s" -o "$work/O2_reference.o"
+assemble_reference "$work/O2_reference.s" "$work/O2_reference.o"
 
 cmp "$work/O2_reference.o" "$work/O2_direct.o"
 

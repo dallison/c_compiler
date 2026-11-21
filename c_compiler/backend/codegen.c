@@ -1468,7 +1468,52 @@ static void CoalesceBlocks(Generator* gen, BasicBlock* dest, BasicBlock* src) {
 // block if the block being moved ends in a conditional branch.
 //
 // This is just a linear traversal of the basic blocks.
+static bool IsExceptionBoundaryLabel(const Generator* gen, const IRNode* node) {
+  if (node == NULL || node->opcode != IR_OP(label)) {
+    return false;
+  }
+  for (size_t i = 0; i < gen->exception_ranges.length; i++) {
+    const ExceptionHandlerRange* range = gen->exception_ranges.value.p[i];
+    if (range != NULL &&
+        (node == range->try_start || node == range->try_end)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 static void StraightenGraph(Generator* gen) {
+  int* block_eh_start = NULL;
+  int* block_eh_end = NULL;
+  bool* block_has_eh_boundary = NULL;
+  size_t num_blocks = gen->basic_blocks.length;
+  if (gen->exception_ranges.length != 0 && num_blocks > 0) {
+    block_eh_start = malloc(num_blocks * sizeof(int));
+    block_eh_end = malloc(num_blocks * sizeof(int));
+    block_has_eh_boundary = calloc(num_blocks, sizeof(bool));
+    for (size_t i = 0; i < num_blocks; i++) {
+      block_eh_start[i] = -1;
+      block_eh_end[i] = -2;
+    }
+    int region = 0;
+    for (IRNode* n = (IRNode*)gen->code.first; n != NULL; n = IRNext(n)) {
+      bool boundary = IsExceptionBoundaryLabel(gen, n);
+      if (boundary) {
+        region++;
+      }
+      if (n->block != NULL && (size_t)n->block->block_id < num_blocks) {
+        size_t bid = (size_t)n->block->block_id;
+        if (boundary) {
+          block_has_eh_boundary[bid] = true;
+        }
+        if (n == n->block->code) {
+          block_eh_start[bid] = region;
+        }
+        block_eh_end[bid] = region;
+      }
+    }
+  }
+
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* block = gen->basic_blocks.value.p[i];
     if (block->in_edges.length == 1) {
@@ -1497,13 +1542,38 @@ static void StraightenGraph(Generator* gen) {
             !IRIsResult(block->end_code);
         }
         
+        if (is_candidate && block_eh_start != NULL) {
+          // Exception handler ranges are linear [try_start, try_end) intervals
+          // in gen->code; relocating a block across a try_start or try_end
+          // label can invert try_end < try_start or move calls across a try
+          // boundary.
+          size_t in_id = (size_t)input->block_id;
+          size_t blk_id = (size_t)block->block_id;
+          is_candidate = IRNext(terminator) == block->code ||
+                         (in_id < num_blocks && blk_id < num_blocks &&
+                          !block_has_eh_boundary[blk_id] &&
+                          block_eh_end[in_id] >= 0 &&
+                          block_eh_end[in_id] == block_eh_start[blk_id]);
+        }
+        
         if (is_candidate) {
+          if (block_eh_start != NULL &&
+              (size_t)input->block_id < num_blocks &&
+              (size_t)block->block_id < num_blocks) {
+            size_t in_id = (size_t)input->block_id;
+            size_t blk_id = (size_t)block->block_id;
+            block_eh_end[in_id] = block_eh_end[blk_id];
+            block_has_eh_boundary[in_id] |= block_has_eh_boundary[blk_id];
+          }
           CoalesceBlocks(gen, input, block);
         }
       }
     }
   }
-  
+
+  free(block_eh_start);
+  free(block_eh_end);
+  free(block_has_eh_boundary);
 }
 
 // We have all the instructions available.  Divide them into basic blocks where

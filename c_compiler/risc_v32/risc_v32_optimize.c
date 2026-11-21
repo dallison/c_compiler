@@ -310,7 +310,7 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
     
     if (RV32IsLoad(inst)) {
       TargetInstruction* base = inst->operand[0];
-      if (base->opcode == (TargetOpcode)RV32_OP(la) &&
+      if (base->opcode == (TargetOpcode)RV32_OP(la) && base->block == block &&
           !compiler->pic && RV32IntValue(inst->operand[1]) == 0 &&
           base->users.length == 1) {
         // Fold the la's %pcrel_lo into the load.  Only safe when the load
@@ -354,7 +354,8 @@ static void CombineLoadOrStoresInBlock(TargetBasicBlock* block, void* data) {
       }
     } else if (RV32IsStore(inst)) {
       TargetInstruction* base = inst->operand[1];
-      if (base->opcode == (TargetOpcode)RV32_OP(la) && !compiler->pic &&
+      if (base->opcode == (TargetOpcode)RV32_OP(la) && base->block == block &&
+          !compiler->pic &&
           RV32IntValue(inst->operand[2]) == 0 && base->users.length == 1) {
         // Fold only for a zero-offset store whose la feeds nothing else; see
         // the load case above for why a nonzero offset or a shared la base
