@@ -643,10 +643,20 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
             IROpcode ext_op = TypeIsUnsigned(matched_idx->type)
                                   ? IR_OP(zeroextendi)
                                   : IR_OP(signextendi);
+            TypeRecord* ext_type = node->type;
+            if (!TypeIsIntegral(ext_type)) {
+              Type base_t =
+                  node->type->size == 8 ? (kTypeLong | kTypeLongLong)
+                                        : kTypeInt;
+              if (TypeIsUnsigned(matched_idx->type)) {
+                base_t |= kTypeUnsigned;
+              }
+              ext_type = NewTypeRecordWithSize(base_t, kQualPlain);
+            }
             replacement = IRSetType(
                 NewIR2(ext_op, matched_idx,
-                       GeneratorGetIntConstant(gen, node->type, diff_bits)),
-                node->type);
+                       GeneratorGetIntConstant(gen, ext_type, diff_bits)),
+                ext_type);
             BasicBlockEmitBefore(gen, block, replacement, node);
           }
         }
@@ -699,6 +709,8 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
       int64_t add_acc = 0;
       int64_t base_lo = -1;
       int64_t base_hi = -1;
+      int64_t fallback_lo = -1;
+      int64_t fallback_hi = -1;
       TypeRecord* cmp_type = cur != NULL ? cur->type : NULL;
       if (cmp_type == NULL || !TypeIsIntegral(cmp_type) ||
           TypeIsInt128(cmp_type) || TypeIsBitInt(cmp_type) ||
@@ -712,25 +724,50 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
              cur->opcode == IR_OP(mova)) &&
             cur->inputs.length == 1 && cur->type != NULL &&
             in0 != NULL && in0->type != NULL &&
-            TypeIsIntegral(in0->type) &&
+            (TypeIsIntegral(in0->type) || TypeIsPointer(in0->type)) &&
             in0->type->size == cur->type->size) {
           cur = in0;
           continue;
         }
-        if ((cur->opcode == IR_OP(signextendi) ||
-             (cur->opcode == IR_OP(zeroextendi) &&
-              in0 != NULL && in0->type != NULL && cur->type != NULL &&
-              in0->type->size < cur->type->size)) &&
-            cur->inputs.length == 2 && in0 != NULL && in0->type != NULL &&
+        if (cur->opcode == IR_OP(zeroextendi) && cur->inputs.length == 2 &&
+            in0 != NULL && in0->type != NULL && cur->type != NULL &&
             TypeIsIntegral(in0->type) && in0->type->size > 0 &&
-            in0->type->size < cur->type->size && add_acc == 0) {
-          if (cur->opcode == IR_OP(signextendi) && in0->type->size == 4) {
+            in0->type->size < cur->type->size) {
+          int64_t cap = -1;
+          if (in0->type->size == 1) {
+            cap = 255;
+          } else if (in0->type->size == 2) {
+            cap = 65535;
+          } else if (in0->type->size == 4) {
+            cap = INT64_C(4294967295);
+          }
+          if (cap >= 0 && cap <= type_max - add_acc) {
+            if (add_acc == 0) {
+              if (fallback_lo < 0 || cap < fallback_hi) {
+                fallback_lo = 0;
+                fallback_hi = cap;
+              }
+              if (cap < type_max) {
+                type_max = cap;
+              }
+              cur = in0;
+              continue;
+            }
+            base_lo = 0;
+            base_hi = cap;
+            break;
+          }
+        }
+        if (cur->opcode == IR_OP(signextendi) &&
+            cur->inputs.length == 2 && in0 != NULL && in0->type != NULL &&
+            cur->type != NULL && TypeIsIntegral(in0->type) &&
+            in0->type->size > 0 && in0->type->size < cur->type->size &&
+            add_acc == 0) {
+          if (in0->type->size == 4) {
             type_max = INT32_MAX;
-          } else if (cur->opcode == IR_OP(signextendi) &&
-                     in0->type->size == 2) {
+          } else if (in0->type->size == 2) {
             type_max = INT16_MAX;
-          } else if (cur->opcode == IR_OP(signextendi) &&
-                     in0->type->size == 1) {
+          } else if (in0->type->size == 1) {
             type_max = INT8_MAX;
           }
           cur = in0;
@@ -856,11 +893,17 @@ static void ReduceNodeStrength(Generator* gen, BasicBlock* block,
         }
         break;
       }
-      if (base_lo < 0 || base_hi < base_lo) {
+      int64_t lo;
+      int64_t hi;
+      if (base_lo >= 0 && base_hi >= base_lo) {
+        lo = base_lo + add_acc;
+        hi = base_hi + add_acc;
+      } else if (fallback_lo >= 0 && fallback_hi >= fallback_lo) {
+        lo = fallback_lo;
+        hi = fallback_hi;
+      } else {
         break;
       }
-      int64_t lo = base_lo + add_acc;
-      int64_t hi = base_hi + add_acc;
       int64_t lim = IRIntConstValue(node->inputs.value.p[1]);
       if (IRComparisonIsUnsigned(node)) {
         if (lim >= 0) {

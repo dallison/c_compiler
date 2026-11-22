@@ -161,16 +161,16 @@ static bool DecodeAddress(IRNode* address, Symbol** base, IRNode** pointer,
       } else if (IRIsIntConst(address->inputs.value.p[1])) {
         constant = address->inputs.value.p[1];
         next = address->inputs.value.p[0];
-      } else {
-        return false;
       }
-      int64_t combined;
-      if (Int64AddOverflow(*offset, IRIntConstValue(constant), &combined)) {
-        return false;
+      if (constant != NULL) {
+        int64_t combined;
+        if (Int64AddOverflow(*offset, IRIntConstValue(constant), &combined)) {
+          return false;
+        }
+        *offset = combined;
+        address = next;
+        continue;
       }
-      *offset = combined;
-      address = next;
-      continue;
     }
     if ((address->opcode == IR_OP(addressof) ||
          address->opcode == IR_OP(cast)) &&
@@ -424,19 +424,57 @@ static bool DistinctNonOverlappingStructs(const Struct* loc_str,
          !StructContainsSubobject(arg_str, loc_str, 0);
 }
 
+static IRNode* PeelPointerArithmeticBase(IRNode* ptr) {
+  for (int depth = 0; ptr != NULL && depth < 8; depth++) {
+    if (ptr->opcode == IR_OP(cast) && ptr->inputs.length == 1) {
+      IRNode* in = ptr->inputs.value.p[0];
+      if (in != NULL && in->type != NULL && TypeIsPointerOrArray(in->type)) {
+        ptr = in;
+        continue;
+      }
+      break;
+    }
+    if (ptr->opcode == IR_OP(adda) && ptr->inputs.length == 2) {
+      IRNode* lhs = ptr->inputs.value.p[0];
+      IRNode* rhs = ptr->inputs.value.p[1];
+      if (lhs != NULL && lhs->type != NULL && TypeIsPointerOrArray(lhs->type)) {
+        ptr = lhs;
+        continue;
+      }
+      if (rhs != NULL && rhs->type != NULL && TypeIsPointerOrArray(rhs->type)) {
+        ptr = rhs;
+        continue;
+      }
+    }
+    break;
+  }
+  return ptr;
+}
+
 static bool IndirectPointersMayAlias(IRNode* loc_ptr, IRNode* arg_ptr,
                                      IRNode* stripped_arg, IRNode* raw_arg) {
   if (loc_ptr == NULL || arg_ptr == NULL) {
     return true;
   }
-  if (loc_ptr == arg_ptr || loc_ptr == stripped_arg || loc_ptr == raw_arg) {
+  IRNode* loc_base = PeelPointerArithmeticBase(loc_ptr);
+  IRNode* arg_base = PeelPointerArithmeticBase(arg_ptr);
+  if (loc_ptr == arg_ptr || loc_ptr == stripped_arg || loc_ptr == raw_arg ||
+      loc_base == arg_base || loc_base == arg_ptr || loc_ptr == arg_base) {
     return true;
   }
   const Struct* loc_str = PointerStructTarget(loc_ptr->type);
   if (loc_str == NULL) {
     return true;
   }
+  if (loc_base != loc_ptr &&
+      !SameStructIdentity(loc_str, PointerStructTarget(loc_base->type))) {
+    return true;
+  }
   if (!DistinctNonOverlappingStructs(loc_str, arg_ptr->type)) {
+    return true;
+  }
+  if (arg_base != arg_ptr &&
+      !DistinctNonOverlappingStructs(loc_str, arg_base->type)) {
     return true;
   }
   if (stripped_arg != NULL && stripped_arg != arg_ptr &&

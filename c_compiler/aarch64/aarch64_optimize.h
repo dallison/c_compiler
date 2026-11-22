@@ -9,5 +9,6 @@
 struct AARCH64Generator;
 
 void AARCH64Optimize(struct AARCH64Generator* generator);
+void AARCH64SimplifyBranchesPostRA(struct AARCH64Generator* generator);
 
 #endif /* aarch64_optimize_h */

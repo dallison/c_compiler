@@ -33,6 +33,7 @@
 #include "copyprop.h"
 #include "dce.h"
 #include "induction.h"
+#include "jump_thread.h"
 #include "listing.h"
 #include "loop_info.h"
 #include "memopt.h"
@@ -1291,7 +1292,7 @@ static void CalculateDominators(Generator* gen) {
       BasicBlock* new_idom = NULL;
       for (size_t j = 0; j < block->in_edges.length; j++) {
         BlockId predecessor_id = block->in_edges.value.w[j];
-        if (idoms[predecessor_id] == NULL) {
+        if (idoms.value.p[predecessor_id] == NULL) {
           continue;
         }
         BasicBlock* predecessor =
@@ -1551,7 +1552,7 @@ static void StraightenGraph(Generator* gen) {
             !IRIsResult(block->end_code);
         }
         
-        if (is_candidate && block_eh_start != NULL) {
+        if (is_candidate && has_eh) {
           // Exception handler ranges are linear [try_start, try_end) intervals
           // in gen->code; relocating a block across a try_start or try_end
           // label can invert try_end < try_start or move calls across a try
@@ -1714,6 +1715,19 @@ static void RemoveUnreachableBlocks(Generator* gen) {
   VectorDestruct(&work);
   BitSetDestruct(&traversal_visited);
   BitSetDestruct(&exception_reachable);
+}
+
+void GeneratorCleanupCFG(Generator* gen) {
+  ResetCFGAnalysis(gen);
+  RemoveUnreachableBlocks(gen);
+  for (size_t i = 0; i < gen->basic_blocks.length; i++) {
+    BasicBlock* b = gen->basic_blocks.value.p[i];
+    if (b != NULL && b != gen->entry_block && b != gen->exit_block &&
+        b->is_unreachable && BasicBlockIsEmpty(b)) {
+      VectorClear(&b->out_edges);
+    }
+  }
+  AnalyzeCFG(gen);
 }
 
 // Look in all the basic blocks for one that contains a call instruction.
@@ -2618,6 +2632,10 @@ void OptimizeFunctionIR(Generator* gen) {
     if (compiler->ir_optimizations.copy_prop) {
       CopyPropagationOptimization(gen);
     }
+    if (compiler->ir_optimizations.gvn) {
+      AnalyzeCFG(gen);
+      GlobalValueNumberingOptimization(gen);
+    }
     MemoryOptimization(gen);
     // Memopt can replace loads with constants (e.g. inlined default
     // arguments forwarded into `value += by * scale`).  Fold the
@@ -2626,6 +2644,11 @@ void OptimizeFunctionIR(Generator* gen) {
     // Also re-run strength reduction so `suba(adda(p,x),p)` exposed by
     // load CSE (MemIsIo) folds before codegen.
     StrengthReductionOptimization(gen);
+    if (compiler->ir_optimizations.sccp) {
+      if (SparseConditionalConstantPropagation(gen, NULL)) {
+        AnalyzeCFG(gen);
+      }
+    }
     if (compiler->ir_optimizations.const_prop) {
       ConstantPropagationOptimization(gen);
     }
@@ -2653,6 +2676,17 @@ void OptimizeFunctionIR(Generator* gen) {
   }
 
   if (OptLevel2() && !compiler->keep_ssa) {
+    if (JumpThreadingOptimization(gen)) {
+      MemoryOptimization(gen);
+      if (compiler->ir_optimizations.gvn) {
+        GlobalValueNumberingOptimization(gen);
+      }
+      MemoryOptimization(gen);
+      StrengthReductionOptimization(gen);
+      if (compiler->ir_optimizations.dce) {
+        DeadCodeEliminationOptimization(gen);
+      }
+    }
     AutoVectorizeOptimization(gen);
   }
 

@@ -803,6 +803,11 @@ static bool SimplifyBranches(SCCPContext* context, SCCPStats* stats) {
       if (!take) {
         BasicBlockRemoveInstruction(context->gen, block, branch);
         changed = true;
+      } else {
+        IRNode* bra = NewIR1(IR_OP(bra), branch->inputs.value.p[1]);
+        BasicBlockEmitBefore(context->gen, block, bra, branch);
+        BasicBlockRemoveInstruction(context->gen, block, branch);
+        changed = true;
       }
       if (stats != NULL) {
         stats->branches_simplified++;
@@ -835,6 +840,10 @@ static bool SimplifyBranches(SCCPContext* context, SCCPStats* stats) {
       changed = true;
     }
     if (!take) {
+      BasicBlockRemoveInstruction(context->gen, block, branch);
+    } else {
+      IRNode* bra = NewIR1(IR_OP(bra), branch->inputs.value.p[1]);
+      BasicBlockEmitBefore(context->gen, block, bra, branch);
       BasicBlockRemoveInstruction(context->gen, block, branch);
     }
     if (stats != NULL) {

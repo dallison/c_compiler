@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include "aarch64_codegen.h"
 #include "aarch64_machine.h"
+#include "aarch64_optimize.h"
 #include "target_basic_block.h"
 #include "compiler.h"
 
@@ -985,6 +986,7 @@ void AARCH64AllocateRegisters(AARCH64RegisterAllocator* allocator) {
   AARCH64ShrinkWrap(allocator);
   HoistLoopInvariantValues(allocator);
   FoldPhysicalCopies(allocator);
+  AARCH64SimplifyBranchesPostRA(allocator->g);
 }
 
 

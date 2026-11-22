@@ -44,3 +44,16 @@ __attribute__((noinline)) int call_forward(int a, int b) {
 __attribute__((noinline)) int call_swap(int a, int b) {
   return call_forward_callee(b, a);
 }
+
+__attribute__((noinline)) int short_circuit_chain(int a, int b, int c, int d) {
+  if ((a && (b & 4)) || (c && (d & 8))) {
+    return 19;
+  }
+  return 7;
+}
+
+__attribute__((noinline)) int odd_callee_saved_frame(int a, int b, int c) {
+  int first = call_forward_callee(a, b);
+  int second = call_forward_callee(b, c);
+  return first + second + c;
+}

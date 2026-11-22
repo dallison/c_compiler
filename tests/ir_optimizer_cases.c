@@ -384,6 +384,40 @@ __attribute__((noinline)) int alias_may_alias(int count, int* left,
   return result;
 }
 
+__attribute__((noinline)) int jump_thread_short_circuit(int a, int b,
+                                                        int c, int d) {
+  if ((a && (b & 4)) || (c && (d & 8))) {
+    return 19;
+  }
+  return 7;
+}
+
+__attribute__((noinline)) int cross_block_store_and_inc_forward(
+    MemoptField* f, int flag) {
+  f->owed = 10;
+  ++f->owed;
+  if (flag) {
+    f->pad = f->owed + 2;
+  } else {
+    f->pad = f->owed + 5;
+  }
+  return f->pad;
+}
+
+__attribute__((noinline)) void fast_tail_slow_mutate(MemoptParent* p) {
+  p->child->owed += 3;
+}
+
+__attribute__((noinline)) int fast_tail_duplicate(MemoptParent* p, int slow) {
+  int before = p->child->owed;
+  if (slow) {
+    fast_tail_slow_mutate(p);
+  }
+  int after = p->child->owed;
+  p->flag = before + after;
+  return p->flag;
+}
+
 int main(void) {
   int result = 0;
   int checkpoint_input = 31;
@@ -447,6 +481,24 @@ int main(void) {
     result |= 8;
   } else if (checkpoint_order(&checkpoint_input) != 62) {
     result |= 8;
+  }
+  if (jump_thread_short_circuit(0, 4, 0, 8) != 7 ||
+      jump_thread_short_circuit(1, 4, 0, 0) != 19 ||
+      jump_thread_short_circuit(1, 2, 1, 8) != 19 ||
+      jump_thread_short_circuit(1, 2, 1, 2) != 7) {
+    result |= 64;
+  }
+  field.owed = 0;
+  field.pad = 0;
+  if (cross_block_store_and_inc_forward(&field, 1) != 13 ||
+      cross_block_store_and_inc_forward(&field, 0) != 16) {
+    result |= 64;
+  }
+  field.owed = 20;
+  if (fast_tail_duplicate(&parent, 0) != 40 ||
+      fast_tail_duplicate(&parent, 1) != 43 ||
+      field.owed != 23) {
+    result |= 64;
   }
   return result;
 }

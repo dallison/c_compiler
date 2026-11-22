@@ -199,6 +199,7 @@ void GeneratorStealCode(Generator* gen, List* dst);
 void GeneratorAdoptCode(Generator* gen, List* src);
 void GeneratorRebuildPools(Generator* gen);
 void BuildBasicBlocks(Generator* gen);
+void GeneratorCleanupCFG(Generator* gen);
 
 int GeneratorNumCalls(Generator* gen);
 uint64_t CXXExceptionTypeID(TypeRecord* type);

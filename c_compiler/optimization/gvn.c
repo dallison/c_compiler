@@ -618,8 +618,12 @@ static void DoLocalValueNumbering(Generator* gen, BlockLayout* layout,
           LookupValueEntry(set, inst, gen->exception_ranges.length == 0);
       IRNode* prev_inst = entry->instruction;
       if (prev_inst != inst && DefinitionPrecedesUse(layout, prev_inst, inst)) {
-        if (IsConstOffsetAdda(inst) &&
-            HasCallBetweenDominatorAndUse(gen, layout, prev_inst, inst)) {
+        if (inst->opcode == IR_OP(cast) &&
+            (prev_inst->type == NULL || inst->type == NULL ||
+             !TypeEqual(prev_inst->type, inst->type))) {
+          // Keep distinct cast target types separate for signedness and TBAA.
+        } else if (IsConstOffsetAdda(inst) &&
+                   HasCallBetweenDominatorAndUse(gen, layout, prev_inst, inst)) {
           // Refresh the entry to the post-call adda so subsequent call-free
           // accesses share it in a scratch register instead of carrying a
           // 1-cycle pointer offset across calls in a callee-saved register.

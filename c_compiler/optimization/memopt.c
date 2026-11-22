@@ -157,6 +157,119 @@ static IRNode* StoredValue(IRNode* store) {
   return store->inputs.value.p[1];
 }
 
+static bool IncDecOpcodes(IROpcode op, IROpcode* load_op, IROpcode* store_op,
+                          bool* is_inc) {
+  switch (op) {
+    case IR_OP(inc32):
+      *load_op = IR_OP(load32);
+      *store_op = IR_OP(store32);
+      *is_inc = true;
+      return true;
+    case IR_OP(uinc32):
+      *load_op = IR_OP(loadu32);
+      *store_op = IR_OP(store32);
+      *is_inc = true;
+      return true;
+    case IR_OP(dec32):
+      *load_op = IR_OP(load32);
+      *store_op = IR_OP(store32);
+      *is_inc = false;
+      return true;
+    case IR_OP(udec32):
+      *load_op = IR_OP(loadu32);
+      *store_op = IR_OP(store32);
+      *is_inc = false;
+      return true;
+    case IR_OP(inc64):
+    case IR_OP(uinc64):
+      *load_op = IR_OP(load64);
+      *store_op = IR_OP(store64);
+      *is_inc = true;
+      return true;
+    case IR_OP(dec64):
+    case IR_OP(udec64):
+      *load_op = IR_OP(load64);
+      *store_op = IR_OP(store64);
+      *is_inc = false;
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool HasNearbyFollowupLoad(IRNode* inst,
+                                  const IRMemoryLocation* location) {
+  int steps = 0;
+  for (IRNode* scan = IRNext(inst); scan != NULL && steps < 48;
+       scan = IRNext(scan), steps++) {
+    if (IRIsObservableCheckpoint(scan) || IRIsCall(scan) ||
+        IRAsmClobbersMemory(scan)) {
+      return false;
+    }
+    if (IRIsLoadOnly(scan)) {
+      IRMemoryLocation scan_loc;
+      if (CanReplaceLoad(scan) && IRAliasDecode(scan, &scan_loc) &&
+          !scan_loc.volatile_access && !scan_loc.atomic_access &&
+          IRAliasClassify(location, &scan_loc) == kIRMustAlias &&
+          location->size == scan_loc.size) {
+        return true;
+      }
+    }
+    if (IRIsStore(scan) && IRAliasInstMayClobber(location, scan)) {
+      return false;
+    }
+  }
+  return false;
+}
+
+static IRNode* TryExpandIncDecForForwarding(Generator* gen, BasicBlock* block,
+                                            IRNode* inst) {
+  IROpcode load_op, store_op;
+  bool is_inc = false;
+  if (!IncDecOpcodes(inst->opcode, &load_op, &store_op, &is_inc) ||
+      inst->outputs.length != 0 || inst->dest != NULL ||
+      inst->inputs.length != 2 || IRIsVarDef(inst) || inst->type == NULL ||
+      TypeIsVolatile(inst->type) || TypeIsBitInt(inst->type)) {
+    return NULL;
+  }
+  IRNode* addr = inst->inputs.value.p[0];
+  IRNode* step_node = inst->inputs.value.p[1];
+  if (addr == NULL || IRHasSideEffects(addr) || step_node == NULL ||
+      !IRIsIntConst(step_node)) {
+    return NULL;
+  }
+  IRMemoryLocation location;
+  if (!IRAliasDecode(inst, &location) || location.volatile_access ||
+      location.atomic_access ||
+      (location.kind != kIRMemoryIndirect &&
+       location.kind != kIRMemoryStatic &&
+       location.kind != kIRMemoryExtern) ||
+      !HasNearbyFollowupLoad(inst, &location)) {
+    return NULL;
+  }
+  IRNode* ld = NewIR1(load_op, addr);
+  IRSetType(ld, inst->type);
+  ld->location = inst->location;
+  if (IRIsVarRef(inst)) {
+    ld->flags |= kIRVarUse;
+    ld->var.use = inst->var.use;
+  }
+  IRNode* step =
+      GeneratorGetIntConstant(gen, inst->type, IRIntConstValue(step_node));
+  IRNode* alu = NewIR2(is_inc ? IR_OP(addi) : IR_OP(subi), ld, step);
+  IRSetType(alu, inst->type);
+  alu->location = inst->location;
+  IRNode* st = NewIR2(store_op, addr, alu);
+  IRSetType(st, inst->type);
+  st->location = inst->location;
+
+  BasicBlockEmitBefore(gen, block, ld, inst);
+  BasicBlockEmitBefore(gen, block, alu, inst);
+  BasicBlockEmitBefore(gen, block, st, inst);
+  BasicBlockRemoveInstruction(gen, block, inst);
+  return ld;
+}
+
 static void OptimizeBlockMemory(Generator* gen, BasicBlock* block) {
   Vector available;
   VectorInit(&available);
@@ -167,6 +280,12 @@ static void OptimizeBlockMemory(Generator* gen, BasicBlock* block) {
     next = IRNext(inst);
     if (IRIsObservableCheckpoint(inst)) {
       AvailableClear(&available);
+      continue;
+    }
+
+    IRNode* expanded = TryExpandIncDecForForwarding(gen, block, inst);
+    if (expanded != NULL) {
+      next = expanded;
       continue;
     }
 
@@ -230,11 +349,14 @@ typedef struct {
   IRMemoryLocation effect;
 } Clobber;
 
-// A load that may be reused at a later load of the same location.
+// A load or store whose value may be reused at a later load of the same
+// location.
 typedef struct {
-  IRNode* load;
+  IRNode* load;      // The load or store instruction in gen->code.
+  IRNode* value;     // Value produced (`load` for loads, StoredValue for stores).
   IRMemoryLocation location;
   int linear;  // Position in the instruction list codegen walks.
+  bool is_store;
 } LoadInfo;
 
 static bool IsAtomicInst(IRNode* inst) {
@@ -284,7 +406,7 @@ static bool ClobberHits(const Clobber* clobber, const LoadInfo* load,
     case kClobberEffect:
       return IRAliasClassify(&load->location, &clobber->effect) != kIRNoAlias;
     case kClobberFull:
-      return InstructionClobbersAvailability(&load->location, load->load, inst);
+      return InstructionClobbersAvailability(&load->location, load->value, inst);
   }
   return false;
 }
@@ -310,8 +432,8 @@ static bool SsaAddressesDiffer(IRNode* load, IRNode* candidate) {
 // |src| can replace |use|: it is the same location, dominates the use, and
 // codegen will have emitted it first.
 static bool LoadCanFeed(const LoadInfo* src, const LoadInfo* use) {
-  if (src->linear >= use->linear || src->load->block == NULL ||
-      use->load->block == NULL) {
+  if (use->is_store || src->value == NULL || src->linear >= use->linear ||
+      src->load->block == NULL || use->load->block == NULL) {
     return false;
   }
   if (src->load->block != use->load->block &&
@@ -319,10 +441,20 @@ static bool LoadCanFeed(const LoadInfo* src, const LoadInfo* use) {
                       src->load->block->block_id)) {
     return false;
   }
+  if (src->is_store && !IRIsConstant(src->value)) {
+    if (src->value->block == NULL) {
+      return false;
+    }
+    if (src->value->block != use->load->block &&
+        !BitSetContains(&use->load->block->dominators,
+                        src->value->block->block_id)) {
+      return false;
+    }
+  }
   if (SsaAddressesDiffer(use->load, src->load) ||
       IRAliasClassify(&src->location, &use->location) != kIRMustAlias ||
       src->location.size != use->location.size ||
-      !TypesMatchForForward(use->load, src->load)) {
+      !TypesMatchForForward(use->load, src->value)) {
     return false;
   }
   return true;
@@ -424,18 +556,41 @@ static void CrossBlockLoadCSE(Generator* gen) {
   for (IRNode* node = GeneratorFirstInstruction(gen); node != NULL;
        node = IRNext(node)) {
     int here = linear++;
-    IRMemoryLocation location;
-    if (!CanReplaceLoad(node) || !IRAliasDecode(node, &location) ||
-        location.volatile_access || location.atomic_access ||
-        node->block == NULL) {
+    if (node->block == NULL) {
       continue;
     }
-    LoadInfo* info = calloc(1, sizeof(LoadInfo));
-    info->load = node;
-    info->location = location;
-    info->linear = here;
-    HashMapInsert(&ids, (uint64_t)(uintptr_t)node, (int64_t)loads.length);
-    VectorAppend(&loads, info);
+    IRMemoryLocation location;
+    if (CanReplaceLoad(node) && IRAliasDecode(node, &location) &&
+        !location.volatile_access && !location.atomic_access) {
+      LoadInfo* info = calloc(1, sizeof(LoadInfo));
+      info->load = node;
+      info->value = node;
+      info->location = location;
+      info->linear = here;
+      info->is_store = false;
+      HashMapInsert(&ids, (uint64_t)(uintptr_t)node, (int64_t)loads.length);
+      VectorAppend(&loads, info);
+      continue;
+    }
+    if (IRIsStoreOnly(node) && node->dest == NULL &&
+        IRAliasDecode(node, &location) && !location.volatile_access &&
+        !location.atomic_access &&
+        (location.kind == kIRMemoryIndirect ||
+         location.kind == kIRMemoryStatic ||
+         location.kind == kIRMemoryExtern)) {
+      IRNode* val = StoredValue(node);
+      if (val != NULL && val->type != NULL && !TypeIsVolatile(val->type) &&
+          !IRIsVariable(val) && (IRIsConstant(val) || val->block != NULL)) {
+        LoadInfo* info = calloc(1, sizeof(LoadInfo));
+        info->load = node;
+        info->value = val;
+        info->location = location;
+        info->linear = here;
+        info->is_store = true;
+        HashMapInsert(&ids, (uint64_t)(uintptr_t)node, (int64_t)loads.length);
+        VectorAppend(&loads, info);
+      }
+    }
   }
   int num_loads = (int)loads.length;
   if (num_loads == 0) {
@@ -572,7 +727,7 @@ static void CrossBlockLoadCSE(Generator* gen) {
            !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
            inst = IRNext(inst)) {
         int id = (int)HashMapFind(&ids, (uint64_t)(uintptr_t)inst, -1);
-        if (id >= 0) {
+        if (id >= 0 && !((LoadInfo*)loads.value.p[id])->is_store) {
           int best = -1;
           BitSetIterator it;
           BitSetIteratorStart(&it, &in_set);
@@ -614,10 +769,15 @@ static void CrossBlockLoadCSE(Generator* gen) {
       if (final_id.value.w[i] < 0) {
         continue;
       }
-      IRNode* load = ((LoadInfo*)loads.value.p[i])->load;
+      LoadInfo* use_info = loads.value.p[i];
+      LoadInfo* src_info = loads.value.p[final_id.value.w[i]];
+      if (use_info->is_store || src_info->value == NULL ||
+          !TypesMatchForForward(use_info->load, src_info->value)) {
+        continue;
+      }
+      IRNode* load = use_info->load;
       BasicBlock* block = load->block;
-      GeneratorReplaceInstruction(
-          gen, load, ((LoadInfo*)loads.value.p[final_id.value.w[i]])->load);
+      GeneratorReplaceInstruction(gen, load, src_info->value);
       BasicBlockRemoveInstruction(gen, block, load);
     }
     VectorDestruct(&final_id);

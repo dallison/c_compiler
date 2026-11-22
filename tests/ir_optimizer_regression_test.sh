@@ -879,6 +879,22 @@ if [ "$swap_moves" -ne 3 ]; then
   exit 1
 fi
 
+short_circuit_body=$(function_body short_circuit_chain "$AARCH64_PEEPHOLE_ASM")
+if grep -Eq '[[:space:]]cset[[:space:]]|(^|[^[:alnum:]_])sp([^[:alnum:]_]|$)' \
+    <<<"$short_circuit_body"; then
+  echo "AArch64 short-circuit branch chain was not jump-threaded cleanly" >&2
+  exit 1
+fi
+
+odd_frame_body=$(function_body odd_callee_saved_frame "$AARCH64_PEEPHOLE_ASM")
+if grep -Eq '[[:space:]](stp|ldp)[[:space:]].*#(8|24|40)\]' \
+    <<<"$odd_frame_body" ||
+   grep -Eq '[[:space:]](sub|add)[[:space:]]+sp,[[:space:]]*sp' \
+    <<<"$odd_frame_body"; then
+  echo "AArch64 odd callee-saved frame used misaligned stp/ldp or split SP update" >&2
+  exit 1
+fi
+
 # A leaf returning a small aggregate receives its hidden result pointer in x8.
 # Taking the address of a reference argument uses the pointer already in x0;
 # neither value needs a stack home or a callee-saved register.

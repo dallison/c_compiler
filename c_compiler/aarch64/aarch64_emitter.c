@@ -311,7 +311,7 @@ static size_t SavedIntRegisters(AARCH64Emitter* emitter,
 }
 
 static bool PairSlotInRange(int offset) {
-  return offset % 8 == 0 && offset >= -512 && offset <= 504;
+  return offset % 16 == 0 && offset >= -512 && offset <= 504;
 }
 
 static bool EmptyStackFrame(AARCH64Emitter* emitter) {
@@ -334,14 +334,16 @@ static bool CanFuseSpWithSavedIntRegs(AARCH64Emitter* emitter,
                                       size_t num_int_regs) {
   if (EmptyStackFrame(emitter) || emitter->g->base.varargs ||
       emitter->g->moves_sp || stack_frame_size <= 0 ||
+      (stack_frame_size % 16) != 0 ||
       BitSetCount(&emitter->regs->used_float_regs) != 0 ||
       num_int_regs == 0) {
     return false;
   }
-  if ((num_int_regs % 2) == 0) {
-    return stack_frame_size <= 504;
+  int total_frame = stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+  if (num_int_regs >= 2) {
+    return total_frame <= 504;
   }
-  return stack_frame_size <= 240;
+  return total_frame <= 240;
 }
 
 // Addresses the spill slot `offset` bytes below x29 with a single load or
@@ -518,6 +520,29 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   // their callee-saved slots below the local and spill regions as well.
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame, no need to store frame pointer.
+  } else if (fuse_sp) {
+    int total_frame = stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+    if (num_int_regs >= 2) {
+      fprintf(fp, "\tstp %s, %s, [sp, #-%d]!\n",
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf1, sizeof(buf1)),
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 2],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf2, sizeof(buf2)),
+              total_frame);
+    } else {
+      fprintf(fp, "\tstr %s, [sp, #-%d]!\n",
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf1, sizeof(buf1)),
+              total_frame);
+    }
+    fprintf(fp, "\tstp x29, x30, [sp, #%d]\n", stack_frame_size);
+    fprintf(fp, ".Leh_%s_after_push:\n", emitter->g->base.function_name.value);
+    AddSubImmediate(emitter, "x29", "sp", /*add=*/true, stack_frame_size, NULL,
+                    fp);
+    fprintf(fp, ".Leh_%s_after_leaq:\n", emitter->g->base.function_name.value);
   } else {
     fprintf(fp, "\tstp x29, x30, [sp, #-16]!\n");
     if (!varargs) {
@@ -527,26 +552,7 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
     if (!varargs) {
       fprintf(fp, ".Leh_%s_after_leaq:\n", emitter->g->base.function_name.value);
     }
-    if (fuse_sp) {
-      if ((num_int_regs % 2) == 0) {
-        fprintf(fp, "\tstp %s, %s, [sp, #-%d]!\n",
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf1, sizeof(buf1)),
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 2],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf2, sizeof(buf2)),
-                stack_frame_size);
-      } else {
-        fprintf(fp, "\tstr %s, [sp, #-%d]!\n",
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf1, sizeof(buf1)),
-                stack_frame_size);
-      }
-    } else {
-      DecrementStackPointer(emitter, stack_frame_size, fp);
-    }
+    DecrementStackPointer(emitter, stack_frame_size, fp);
 
     if (varargs && space_above_frame_pointer > 0) {
       // AAPCS64 variadic register save area.  StackFrameSize() reserved
@@ -619,7 +625,7 @@ static void SaveRegisters(AARCH64Emitter* emitter, FILE* fp) {
   emitter->saved_reg_offset = saved_reg_offset;
 
   size_t rem_int_regs =
-      fuse_sp ? num_int_regs - ((num_int_regs % 2) == 0 ? 2 : 1) : num_int_regs;
+      fuse_sp ? num_int_regs - (num_int_regs >= 2 ? 2 : 1) : num_int_regs;
   if (rem_int_regs > 0) {
     fprintf(fp, "\t// Saved integer registers.\n");
   }
@@ -703,7 +709,7 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
   bool fuse_sp = CanFuseSpWithSavedIntRegs(emitter, stack_frame_size,
                                            num_int_regs);
   size_t rem_int_regs =
-      fuse_sp ? num_int_regs - ((num_int_regs % 2) == 0 ? 2 : 1) : num_int_regs;
+      fuse_sp ? num_int_regs - (num_int_regs >= 2 ? 2 : 1) : num_int_regs;
   for (size_t i = 0; i < rem_int_regs;) {
     if (i + 1 < rem_int_regs && PairSlotInRange(offset - 8)) {
       fprintf(fp, "\tldp %s, %s, [sp, #%d]\n",
@@ -736,27 +742,27 @@ static void RestoreRegisters(AARCH64Emitter* emitter, FILE* fp) {
 
   if (EmptyStackFrame(emitter)) {
     // Empty stack frame.
-  } else {
-    if (fuse_sp) {
-      if ((num_int_regs % 2) == 0) {
-        fprintf(fp, "\tldp %s, %s, [sp], #%d\n",
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf1, sizeof(buf1)),
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 2],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf2, sizeof(buf2)),
-                stack_frame_size);
-      } else {
-        fprintf(fp, "\tldr %s, [sp], #%d\n",
-                AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
-                                           kAARCH64RegTypeInt, kSize64Bit,
-                                           buf1, sizeof(buf1)),
-                stack_frame_size);
-      }
+  } else if (fuse_sp) {
+    int total_frame = stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+    fprintf(fp, "\tldp x29, x30, [sp, #%d]\n", stack_frame_size);
+    if (num_int_regs >= 2) {
+      fprintf(fp, "\tldp %s, %s, [sp], #%d\n",
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf1, sizeof(buf1)),
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 2],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf2, sizeof(buf2)),
+              total_frame);
     } else {
-      IncrementStackPointer(emitter, stack_frame_size, fp);
+      fprintf(fp, "\tldr %s, [sp], #%d\n",
+              AARCH64RegisterNameFromNum(int_regs[num_int_regs - 1],
+                                         kAARCH64RegTypeInt, kSize64Bit,
+                                         buf1, sizeof(buf1)),
+              total_frame);
     }
+  } else {
+    IncrementStackPointer(emitter, stack_frame_size, fp);
     fprintf(fp, "\tldp x29, x30, [sp], #16\n");
   }
 }
@@ -2319,35 +2325,46 @@ static void ProgramSaveRegisters(AARCH64Emitter* emitter,
     AsmModuleComment(module, "Leaf procedure, no stack frame generated");
   }
   if (!EmptyStackFrame(emitter)) {
-    AARCH64ProgramEmitWord(
-        module, AARCH64EncodeLoadStorePair(2, false, false, 3, 29, 30, 31,
-                                           -16));
-    if (!varargs) {
-      String label = {0};
-      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_push");
-      AsmModuleLabel(module, label.value);
-      StringDestruct(&label);
-    }
-    ProgramMoveRegister(module, 29, 31, true, false);
-    if (!varargs) {
-      String label = {0};
-      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_leaq");
-      AsmModuleLabel(module, label.value);
-      StringDestruct(&label);
-    }
     if (fuse_sp) {
-      if ((num_int_regs % 2) == 0) {
+      int total_frame = stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+      if (num_int_regs >= 2) {
         AARCH64ProgramEmitWord(
             module, AARCH64EncodeLoadStorePair(
                         2, false, false, 3, int_regs[num_int_regs - 1],
-                        int_regs[num_int_regs - 2], 31, -stack_frame_size));
+                        int_regs[num_int_regs - 2], 31, -total_frame));
       } else {
         AARCH64ProgramEmitWord(
             module, AARCH64EncodeLoadStoreUnscaled(
                         3, false, 0, int_regs[num_int_regs - 1], 31,
-                        -stack_frame_size, 3));
+                        -total_frame, 3));
       }
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStorePair(2, false, false, 2, 29, 30, 31,
+                                             stack_frame_size));
+      String label = {0};
+      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_push");
+      AsmModuleLabel(module, label.value);
+      ProgramAddSubImmediate(module, 29, 31, true, true, stack_frame_size);
+      ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_leaq");
+      AsmModuleLabel(module, label.value);
+      StringDestruct(&label);
     } else {
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStorePair(2, false, false, 3, 29, 30, 31,
+                                             -16));
+      if (!varargs) {
+        String label = {0};
+        ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_push");
+        AsmModuleLabel(module, label.value);
+        StringDestruct(&label);
+      }
+      ProgramMoveRegister(module, 29, 31, true, false);
+      if (!varargs) {
+        String label = {0};
+        ProgramNamedFunctionLabel(&label, ".Leh_", label_stem, "_after_leaq");
+        AsmModuleLabel(module, label.value);
+        StringDestruct(&label);
+      }
       ProgramAddSubImmediate(module, 31, 31, true, false, stack_frame_size);
     }
     if (varargs && space_above_frame_pointer > 0) {
@@ -2385,7 +2402,7 @@ static void ProgramSaveRegisters(AARCH64Emitter* emitter,
   emitter->saved_reg_offset = saved_reg_offset;
 
   size_t rem_int_regs =
-      fuse_sp ? num_int_regs - ((num_int_regs % 2) == 0 ? 2 : 1) : num_int_regs;
+      fuse_sp ? num_int_regs - (num_int_regs >= 2 ? 2 : 1) : num_int_regs;
   if (rem_int_regs > 0) {
     AsmModuleComment(module, "Saved integer registers.");
   }
@@ -2423,7 +2440,7 @@ static void ProgramRestoreRegisters(AARCH64Emitter* emitter,
   bool fuse_sp = CanFuseSpWithSavedIntRegs(emitter, stack_frame_size,
                                            num_int_regs);
   size_t rem_int_regs =
-      fuse_sp ? num_int_regs - ((num_int_regs % 2) == 0 ? 2 : 1) : num_int_regs;
+      fuse_sp ? num_int_regs - (num_int_regs >= 2 ? 2 : 1) : num_int_regs;
   int offset = ProgramTransferSavedIntRegisters(
       int_regs, rem_int_regs, module, true, emitter->saved_reg_offset);
   BitSetIterator it;
@@ -2436,23 +2453,27 @@ static void ProgramRestoreRegisters(AARCH64Emitter* emitter,
   }
   if (!EmptyStackFrame(emitter)) {
     if (fuse_sp) {
-      if ((num_int_regs % 2) == 0) {
+      int total_frame = stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE;
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStorePair(2, false, true, 2, 29, 30, 31,
+                                             stack_frame_size));
+      if (num_int_regs >= 2) {
         AARCH64ProgramEmitWord(
             module, AARCH64EncodeLoadStorePair(
                         2, false, true, 1, int_regs[num_int_regs - 1],
-                        int_regs[num_int_regs - 2], 31, stack_frame_size));
+                        int_regs[num_int_regs - 2], 31, total_frame));
       } else {
         AARCH64ProgramEmitWord(
             module, AARCH64EncodeLoadStoreUnscaled(
                         3, false, 1, int_regs[num_int_regs - 1], 31,
-                        stack_frame_size, 1));
+                        total_frame, 1));
       }
     } else {
       ProgramAddSubImmediate(module, 31, 31, true, true, stack_frame_size);
+      AARCH64ProgramEmitWord(
+          module, AARCH64EncodeLoadStorePair(2, false, true, 1, 29, 30, 31,
+                                             16));
     }
-    AARCH64ProgramEmitWord(
-        module, AARCH64EncodeLoadStorePair(2, false, true, 1, 29, 30, 31,
-                                           16));
   }
 }
 
@@ -4091,6 +4112,11 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
       AARCH64SavedCFIRegisters(emitter, saved_regs,
                                sizeof(saved_regs) / sizeof(saved_regs[0]));
   AARCH64FillLSDAInfo(emitter, func_name, lsda_ranges, &lsda_count);
+  int stack_frame_size = StackFrameSize(emitter);
+  int int_regs[AARCH64_NUM_INT_REGS];
+  size_t num_int_regs = SavedIntRegisters(emitter, int_regs);
+  bool fuse_sp = CanFuseSpWithSavedIntRegs(emitter, stack_frame_size,
+                                           num_int_regs);
   DaveEHFrameEmitInfo info = {
       .ranges = lsda_ranges,
       .range_count = lsda_count,
@@ -4101,7 +4127,8 @@ static void AARCH64PrintEHMetadata(AARCH64Emitter* emitter, FILE* fp,
       .cie_cfa_reg = 31,
       .cie_fp_reg = 29,
       .entry_cfa_offset = 0,
-      .frame_cfa_offset = 16,
+      .frame_cfa_offset =
+          fuse_sp ? stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE : 16,
       .fp_cfa_offset = 16,
       .saved_fp_offset = -16,
       .saved_ra_offset = -8,
@@ -4126,6 +4153,11 @@ static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
       AARCH64SavedCFIRegisters(emitter, saved_regs,
                                sizeof(saved_regs) / sizeof(saved_regs[0]));
   AARCH64FillLSDAInfo(emitter, function, ranges, &range_count);
+  int stack_frame_size = StackFrameSize(emitter);
+  int int_regs[AARCH64_NUM_INT_REGS];
+  size_t num_int_regs = SavedIntRegisters(emitter, int_regs);
+  bool fuse_sp = CanFuseSpWithSavedIntRegs(emitter, stack_frame_size,
+                                           num_int_regs);
   DaveEHFrameEmitInfo info = {
       .ranges = ranges,
       .range_count = range_count,
@@ -4137,7 +4169,8 @@ static void AARCH64EmitEHMetadata(AARCH64Emitter* emitter, AsmModule* module,
       .cie_cfa_reg = 31,
       .cie_fp_reg = 29,
       .entry_cfa_offset = 0,
-      .frame_cfa_offset = 16,
+      .frame_cfa_offset =
+          fuse_sp ? stack_frame_size + AARCH64_STACK_FRAME_HEADER_SIZE : 16,
       .fp_cfa_offset = 16,
       .saved_fp_offset = -16,
       .saved_ra_offset = -8,
@@ -4162,7 +4195,7 @@ void AARCH64PrintFunction(AARCH64Emitter* emitter, FILE* fp) {
   fprintf(fp, "\t.type %s, @function\n\n", func_name);
   fprintf(fp, "%s:\n", func_name);
   DaveEHPrintFuncTextLabel(fp, func_name);
-  if (compiler->pic && emitter->g->base.is_global &&
+  if (compiler->pic && !compiler->native_object && emitter->g->base.is_global &&
       strcmp(func_name, "main") != 0) {
     fprintf(fp, "\t.word 0xD503241F  // bti c\n");
   }
@@ -4214,7 +4247,7 @@ void AARCH64EmitFunctionToModule(AARCH64Emitter* emitter, AsmModule* module) {
   String label_stem = {0};
   AsmModuleFunctionLabelStem(module, function, &label_stem);
   DaveEHEmitFuncTextLabel(module, label_stem.value);
-  if (compiler->pic && emitter->g->base.is_global &&
+  if (compiler->pic && !compiler->native_object && emitter->g->base.is_global &&
       strcmp(function, "main") != 0) {
     AsmModuleComment(module, "bti c");
     AARCH64ProgramEmitWord(module, 0xd503241fu);

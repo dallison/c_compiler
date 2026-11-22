@@ -371,6 +371,7 @@ davecc_library(davecc_compiler
   c_compiler/optimization/dce.c
   c_compiler/optimization/gvn.c
   c_compiler/optimization/induction.c
+  c_compiler/optimization/jump_thread.c
   c_compiler/optimization/loop_info.c
   c_compiler/optimization/memopt.c
   c_compiler/optimization/optimizer.c

@@ -112,8 +112,13 @@ assemble_reference "$work/long_symbol_reference.s" \
 cmp "$work/long_symbol_reference.o" "$work/long_symbol_direct.o"
 
 cat >"$work/O2.cpp" <<'EOF'
-int sum(int a, int b) { return a + b; }
-int main() { return sum(3, 4); }
+__attribute__((noinline)) int sum(int a, int b) { return a + b; }
+__attribute__((noinline)) int odd_frame(int a, int b, int c) {
+  int x = sum(a, b);
+  int y = sum(b, c);
+  return x + y + c;
+}
+int main() { return odd_frame(3, 4, 5) - 21; }
 EOF
 
 "$davecc" -target aarch64 -std=c++20 -O2 -nostdinc -c "$work/O2.cpp" \

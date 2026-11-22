@@ -984,6 +984,7 @@ cc_library(
         "c_compiler/frontend/semantic/type_traits_semantics.c",
         "c_compiler/optimization/constprop.c",
         "c_compiler/optimization/dce.c",
+        "c_compiler/optimization/jump_thread.c",
         "c_compiler/frontend/syntax/debug.c",
         "c_compiler/assembler/dwarf.c",
         "c_compiler/frontend/syntax/dwarf_defs.c",

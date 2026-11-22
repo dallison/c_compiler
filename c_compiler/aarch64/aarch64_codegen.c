@@ -1352,6 +1352,7 @@ static TargetInstruction* HoldCallTarget(AARCH64Generator* g,
   hold->flags |= AARCH64_INST_AVOID_ARG_REGS;
   TargetInstruction* mv =
       Emit(g, CopyInstructionSize(NewInstruction1(AARCH64_OP(mov), from), 0));
+  mv->flags |= AARCH64_INST_AVOID_ARG_REGS;
   mv->dest = hold;
   return hold;
 }
@@ -5785,7 +5786,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
     TargetInstruction* call_target = addr;
     if (staged_target != NULL) {
       opcode = AARCH64_OP(blr);
-      call_target = PinCallTargetToX9(g, staged_target);
+      call_target = staged_target;
     } else if (((int)addr->opcode == (int)AARCH64_OP(symbol))) {
       // Calling a symbol, use a regular 'call' instruction.
       opcode = TypeUsesHardwareFloatRegister(node->type) ? AARCH64_OP(bl) : AARCH64_OP(bl);

@@ -470,6 +470,11 @@ static TargetInstruction* CreateReload(void* ctx, TargetInstruction* spill) {
   if (RegClass(spill->operand[0]) == kFloatClass) {
     reload->flags |= AARCH64_INST_FP;
   }
+  if (AvoidsArgRegs(spill->operand[0]) ||
+      (spill->operand[0]->dest != NULL &&
+       AvoidsArgRegs(spill->operand[0]->dest))) {
+    reload->flags |= AARCH64_INST_AVOID_ARG_REGS;
+  }
   return reload;
 }
 
