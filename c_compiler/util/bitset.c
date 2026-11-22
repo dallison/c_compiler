@@ -115,7 +115,7 @@ void BitSetInsertGrow(BitSet* set, size_t index) {
   set->value[word] |= UINT64_C(1) << (index % 64);
 }
 
-bool BitSetContains(BitSet* set, size_t index) {
+bool BitSetContains(const BitSet* set, size_t index) {
   size_t word = index / 64;
   if (word >= set->capacity) {
     return false;
@@ -222,8 +222,8 @@ bool BitSetEqual(BitSet* set1, BitSet* set2) {
 
   // First compare area where the capacities match.  One may have a larger
   // capacity but all the extra bits might be zero.
-  int v = memcmp(set1->value, set2->value, min * sizeof(uint64_t));
-  if (v != 0) {
+  if (min > 0 &&
+      memcmp(set1->value, set2->value, min * sizeof(uint64_t)) != 0) {
     return false;
   }
   // Now we look at the extra bits in the larger set to see if they

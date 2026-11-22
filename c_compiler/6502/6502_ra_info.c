@@ -425,11 +425,12 @@ typedef struct {
   TargetInstruction* reload;
 } BlockReload;
 
-static BlockReload* FindBlockReload(BlockReload* reloads, int num_reloads,
+static BlockReload* FindBlockReload(const Vector* reloads,
                                     TargetBasicBlock* block) {
-  for (int r = 0; r < num_reloads; r++) {
-    if (reloads[r].block == block) {
-      return &reloads[r];
+  for (size_t r = 0; r < reloads->length; r++) {
+    BlockReload* reload = reloads->value.p[r];
+    if (reload->block == block) {
+      return reload;
     }
   }
   return NULL;
@@ -448,18 +449,20 @@ static bool CannotSpill(TargetGenerator* gen, TargetInstruction* cell,
 // it, filling |reloads|.  |late| holds the instructions there naming |cell|.
 static const char* PlaceReloads(TargetInstruction* cell,
                                 TargetInstruction* point, const Vector* late,
-                                BlockReload* reloads, int* num_reloads) {
+                                Vector* reloads) {
   for (size_t i = 0; i < late->length; i++) {
     TargetInstruction* user = late->value.p[i];
     if (WritesZeroPage(user) && user->operand[0] == cell) {
       return "late-write";
     }
-    if (FindBlockReload(reloads, *num_reloads, user->block) == NULL) {
-      reloads[(*num_reloads)++] = (BlockReload){.block = user->block};
+    if (FindBlockReload(reloads, user->block) == NULL) {
+      BlockReload* reload = calloc(1, sizeof(BlockReload));
+      reload->block = user->block;
+      VectorAppend(reloads, reload);
     }
   }
-  for (int r = 0; r < *num_reloads; r++) {
-    BlockReload* reload = &reloads[r];
+  for (size_t r = 0; r < reloads->length; r++) {
+    BlockReload* reload = reloads->value.p[r];
     TargetBasicBlock* block = reload->block;
     TargetInstruction* first = NULL;
     for (TargetInstruction* p =
@@ -525,12 +528,11 @@ static bool RewriteSpill(void* ctx, TargetInstruction* cell) {
       VectorAppend(&late, user);
     }
   }
-  BlockReload* reloads = calloc(late.length + 1, sizeof(BlockReload));
-  int num_reloads = 0;
-  const char* reason =
-      PlaceReloads(cell, point, &late, reloads, &num_reloads);
+  Vector reloads;
+  VectorInit(&reloads);
+  const char* reason = PlaceReloads(cell, point, &late, &reloads);
   if (reason != NULL) {
-    free(reloads);
+    VectorDestructWithContents(&reloads, NULL, /*free_element=*/true);
     VectorDestruct(&late);
     return CannotSpill(gen, cell, reason);
   }
@@ -548,12 +550,13 @@ static bool RewriteSpill(void* ctx, TargetInstruction* cell) {
   TargetInstruction* spill = TargetNewInstruction2(
       (TargetOpcode)(W65C02_OP(spill1) + index), cell, offset);
   TargetBasicBlockEmitAfter(gen, block, spill, point);
-  for (int r = 0; r < num_reloads; r++) {
-    if (reloads[r].reload_point != NULL) {
-      reloads[r].reload = TargetNewInstruction1(
+  for (size_t r = 0; r < reloads.length; r++) {
+    BlockReload* reload = reloads.value.p[r];
+    if (reload->reload_point != NULL) {
+      reload->reload = TargetNewInstruction1(
           (TargetOpcode)(W65C02_OP(reload1) + index), spill);
-      TargetBasicBlockEmitAfter(gen, reloads[r].block, reloads[r].reload,
-                                reloads[r].reload_point);
+      TargetBasicBlockEmitAfter(gen, reload->block, reload->reload,
+                                reload->reload_point);
     }
   }
   // Reload points move to the spill, as under the old allocator.
@@ -562,14 +565,14 @@ static bool RewriteSpill(void* ctx, TargetInstruction* cell) {
     TargetInstruction* to =
         IsReloadPoint(user)
             ? spill
-            : FindBlockReload(reloads, num_reloads, user->block)->reload;
+            : FindBlockReload(&reloads, user->block)->reload;
     for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
       if (user->operand[op] == cell) {
         TargetReplaceOperand(user, op, to);
       }
     }
   }
-  free(reloads);
+  VectorDestructWithContents(&reloads, NULL, /*free_element=*/true);
   VectorDestruct(&late);
   return true;
 }

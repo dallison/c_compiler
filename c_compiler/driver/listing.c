@@ -270,14 +270,14 @@ static void PrintBlockIR(FILE* fp, BasicBlock* block) {
 }
 
 static void PrintTargetBlock(FILE* fp, TargetBasicBlock* block,
-                             TargetGenerator* target, char* printed) {
+                             TargetGenerator* target, BitSet* printed) {
   if (block == NULL || TargetBasicBlockIsEmpty(block)) {
     return;
   }
-  if (printed[block->block_id]) {
+  if (BitSetContains(printed, (size_t)block->block_id)) {
     return;
   }
-  printed[block->block_id] = 1;
+  BitSetInsert(printed, (size_t)block->block_id);
   fputs("  lowered:\n", fp);
   TargetOpcodeNameFunc name_func =
       target->virtuals != NULL ? target->virtuals->opcode_name
@@ -331,11 +331,11 @@ void ListingEmitFunction(Generator* gen, void* target_code) {
   }
 
   TargetGenerator* target = (TargetGenerator*)target_code;
-  char* printed_target_blocks = NULL;
-  if (compiler->listing_lowered && target != NULL &&
-      target->basic_blocks.length > 0) {
-    printed_target_blocks = calloc(target->basic_blocks.length, 1);
-  }
+  BitSet printed_target_blocks;
+  BitSetInit(&printed_target_blocks);
+  bool track_target_blocks =
+      compiler->listing_lowered && target != NULL &&
+      target->basic_blocks.length > 0;
 
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     BasicBlock* block = gen->basic_blocks.value.p[i];
@@ -343,12 +343,13 @@ void ListingEmitFunction(Generator* gen, void* target_code) {
       continue;
     }
     TargetBasicBlock* target_block =
-        printed_target_blocks != NULL ? TargetBlockForIRBlock(block) : NULL;
+        track_target_blocks ? TargetBlockForIRBlock(block) : NULL;
     bool show_source = BlockWouldPrintSource(block);
     bool show_ir = compiler->listing_ir;
-    bool show_lowered = target_block != NULL &&
-                        !TargetBasicBlockIsEmpty(target_block) &&
-                        !printed_target_blocks[target_block->block_id];
+    bool show_lowered =
+        target_block != NULL && !TargetBasicBlockIsEmpty(target_block) &&
+        !BitSetContains(&printed_target_blocks,
+                        (size_t)target_block->block_id);
     if (!show_source && !show_ir && !show_lowered) {
       continue;
     }
@@ -358,21 +359,22 @@ void ListingEmitFunction(Generator* gen, void* target_code) {
       PrintBlockIR(fp, block);
     }
     if (show_lowered) {
-      PrintTargetBlock(fp, target_block, target, printed_target_blocks);
+      PrintTargetBlock(fp, target_block, target, &printed_target_blocks);
     }
   }
 
-  if (printed_target_blocks != NULL) {
+  if (track_target_blocks) {
     for (size_t i = 0; i < target->basic_blocks.length; i++) {
       TargetBasicBlock* tblock = target->basic_blocks.value.p[i];
-      if (TargetBasicBlockIsEmpty(tblock) || printed_target_blocks[i]) {
+      if (TargetBasicBlockIsEmpty(tblock) ||
+          BitSetContains(&printed_target_blocks, i)) {
         continue;
       }
       fprintf(fp, "lowered BB %zu:\n", tblock->block_id);
-      PrintTargetBlock(fp, tblock, target, printed_target_blocks);
+      PrintTargetBlock(fp, tblock, target, &printed_target_blocks);
     }
-    free(printed_target_blocks);
   }
+  BitSetDestruct(&printed_target_blocks);
 
   if (gen->func != NULL && TypeIsFunction(gen->func) &&
       gen->func->info.function.body != NULL) {

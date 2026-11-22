@@ -338,8 +338,8 @@ static bool PreferLoad(const LoadInfo* candidate, const LoadInfo* best) {
   return candidate->linear < best->linear;
 }
 
-static void IntersectAvailable(Generator* gen, BasicBlock* block, BitSet* outs,
-                               BitSet* into) {
+static void IntersectAvailable(Generator* gen, BasicBlock* block,
+                               const Vector* outs, BitSet* into) {
   BitSetClear(into);
   bool any = false;
   for (size_t e = 0; e < block->in_edges.length; e++) {
@@ -348,7 +348,7 @@ static void IntersectAvailable(Generator* gen, BasicBlock* block, BitSet* outs,
         gen->basic_blocks.value.p[id] == NULL) {
       continue;
     }
-    BitSet* pred = &outs[id];
+    BitSet* pred = outs->value.p[id];
     if (!any) {
       BitSetCopy(into, pred);
       any = true;
@@ -383,7 +383,7 @@ static void TransferAvailable(const BitSet* in, const BitSet* kill,
   }
 }
 
-static void KillAvailable(BitSet* live, const LoadInfo* loads, int num_loads,
+static void KillAvailable(BitSet* live, const Vector* loads,
                           const Clobber* clobber, IRNode* inst) {
   if (clobber->kind == kClobberNone) {
     return;
@@ -392,10 +392,10 @@ static void KillAvailable(BitSet* live, const LoadInfo* loads, int num_loads,
     BitSetClear(live);
     return;
   }
-  for (int i = 0; i < num_loads; i++) {
-    if (BitSetContains(live, (size_t)i) &&
-        ClobberHits(clobber, &loads[i], inst)) {
-      BitSetRemove(live, (size_t)i);
+  for (size_t i = 0; i < loads->length; i++) {
+    if (BitSetContains(live, i) &&
+        ClobberHits(clobber, loads->value.p[i], inst)) {
+      BitSetRemove(live, i);
     }
   }
 }
@@ -416,9 +416,8 @@ static void CrossBlockLoadCSE(Generator* gen) {
     return;
   }
 
-  LoadInfo* loads = NULL;
-  int num_loads = 0;
-  int loads_cap = 0;
+  Vector loads;
+  VectorInit(&loads);
   HashMap ids;
   HashMapInit(&ids, 64);
   int linear = 0;
@@ -431,35 +430,45 @@ static void CrossBlockLoadCSE(Generator* gen) {
         node->block == NULL) {
       continue;
     }
-    if (num_loads == loads_cap) {
-      loads_cap = loads_cap == 0 ? 32 : loads_cap * 2;
-      loads = realloc(loads, (size_t)loads_cap * sizeof(LoadInfo));
-    }
-    loads[num_loads].load = node;
-    loads[num_loads].location = location;
-    loads[num_loads].linear = here;
-    HashMapInsert(&ids, (uint64_t)(uintptr_t)node, num_loads);
-    num_loads++;
+    LoadInfo* info = calloc(1, sizeof(LoadInfo));
+    info->load = node;
+    info->location = location;
+    info->linear = here;
+    HashMapInsert(&ids, (uint64_t)(uintptr_t)node, (int64_t)loads.length);
+    VectorAppend(&loads, info);
   }
+  int num_loads = (int)loads.length;
   if (num_loads == 0) {
     HashMapDestruct(&ids);
-    free(loads);
+    VectorDestruct(&loads);
     return;
   }
 
-  BitSet* kill = calloc(num_blocks, sizeof(BitSet));
-  BitSet* generated = calloc(num_blocks, sizeof(BitSet));
-  BitSet* avail_out = calloc(num_blocks, sizeof(BitSet));
+  Vector kill;
+  Vector generated;
+  Vector avail_out;
+  VectorInit(&kill);
+  VectorInit(&generated);
+  VectorInit(&avail_out);
+  VectorReserve(&kill, num_blocks);
+  VectorReserve(&generated, num_blocks);
+  VectorReserve(&avail_out, num_blocks);
   for (size_t b = 0; b < num_blocks; b++) {
-    BitSetFill(&kill[b], (size_t)num_loads);
-    BitSetClear(&kill[b]);
-    BitSetFill(&generated[b], (size_t)num_loads);
-    BitSetClear(&generated[b]);
+    BitSet* k = NewBitSet();
+    BitSet* g = NewBitSet();
+    BitSet* ao = NewBitSet();
+    VectorAppend(&kill, k);
+    VectorAppend(&generated, g);
+    VectorAppend(&avail_out, ao);
+    BitSetFill(k, (size_t)num_loads);
+    BitSetClear(k);
+    BitSetFill(g, (size_t)num_loads);
+    BitSetClear(g);
     BasicBlock* block = gen->basic_blocks.value.p[b];
     if (block == NULL) {
       continue;
     }
-    BitSetFill(&avail_out[b], (size_t)num_loads);
+    BitSetFill(ao, (size_t)num_loads);
     BitSet live;
     BitSetInit(&live);
     BitSetFill(&live, (size_t)num_loads);
@@ -469,14 +478,14 @@ static void CrossBlockLoadCSE(Generator* gen) {
          inst = IRNext(inst)) {
       Clobber clobber = ClassifyClobber(inst);
       if (clobber.kind == kClobberAll) {
-        BitSetFill(&kill[b], (size_t)num_loads);
+        BitSetFill(k, (size_t)num_loads);
         BitSetClear(&live);
       } else if (clobber.kind != kClobberNone) {
         for (int i = 0; i < num_loads; i++) {
-          if (!ClobberHits(&clobber, &loads[i], inst)) {
+          if (!ClobberHits(&clobber, loads.value.p[i], inst)) {
             continue;
           }
-          BitSetInsert(&kill[b], (size_t)i);
+          BitSetInsert(k, (size_t)i);
           BitSetRemove(&live, (size_t)i);
         }
       }
@@ -485,7 +494,7 @@ static void CrossBlockLoadCSE(Generator* gen) {
         BitSetInsert(&live, (size_t)id);
       }
     }
-    BitSetCopy(&generated[b], &live);
+    BitSetCopy(g, &live);
     BitSetDestruct(&live);
   }
 
@@ -497,14 +506,16 @@ static void CrossBlockLoadCSE(Generator* gen) {
   BitSetFill(&next, (size_t)num_loads);
   BitSet in_queue;
   BitSetInit(&in_queue);
-  size_t* queue = calloc(num_blocks + 1, sizeof(size_t));
+  Vector queue;
+  VectorInit(&queue);
+  VectorResize(&queue, num_blocks + 1);
   size_t qhead = 0;
   size_t qtail = 0;
   for (size_t b = 0; b < num_blocks; b++) {
     if (gen->basic_blocks.value.p[b] == NULL) {
       continue;
     }
-    queue[qtail++] = b;
+    queue.value.u[qtail++] = b;
     BitSetInsert(&in_queue, b);
   }
   // Each block's available set only shrinks, so the worklist ends.  The cap
@@ -518,25 +529,25 @@ static void CrossBlockLoadCSE(Generator* gen) {
       failed = true;
       break;
     }
-    size_t b = queue[qhead++];
+    size_t b = queue.value.u[qhead++];
     if (qhead == num_blocks + 1) {
       qhead = 0;
     }
     BitSetRemove(&in_queue, b);
     BasicBlock* block = gen->basic_blocks.value.p[b];
-    IntersectAvailable(gen, block, avail_out, &in_set);
-    TransferAvailable(&in_set, &kill[b], &generated[b], &next);
-    if (BitSetEqual(&next, &avail_out[b])) {
+    IntersectAvailable(gen, block, &avail_out, &in_set);
+    TransferAvailable(&in_set, kill.value.p[b], generated.value.p[b], &next);
+    if (BitSetEqual(&next, avail_out.value.p[b])) {
       continue;
     }
-    BitSetCopy(&avail_out[b], &next);
+    BitSetCopy(avail_out.value.p[b], &next);
     for (size_t e = 0; e < block->out_edges.length; e++) {
       BlockId succ = block->out_edges.value.w[e];
       if (succ >= num_blocks || gen->basic_blocks.value.p[succ] == NULL ||
           BitSetContains(&in_queue, succ)) {
         continue;
       }
-      queue[qtail++] = succ;
+      queue.value.u[qtail++] = succ;
       if (qtail == num_blocks + 1) {
         qtail = 0;
       }
@@ -544,18 +555,19 @@ static void CrossBlockLoadCSE(Generator* gen) {
     }
   }
 
-  int* replacement = NULL;
   if (!failed) {
-    replacement = malloc((size_t)num_loads * sizeof(int));
+    Vector replacement;
+    VectorInit(&replacement);
+    VectorResize(&replacement, (size_t)num_loads);
     for (int i = 0; i < num_loads; i++) {
-      replacement[i] = -1;
+      replacement.value.w[i] = -1;
     }
     for (size_t b = 0; b < num_blocks; b++) {
       BasicBlock* block = gen->basic_blocks.value.p[b];
       if (block == NULL) {
         continue;
       }
-      IntersectAvailable(gen, block, avail_out, &in_set);
+      IntersectAvailable(gen, block, &avail_out, &in_set);
       for (IRNode* inst = BasicBlockBegin(block);
            !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
            inst = IRNext(inst)) {
@@ -567,18 +579,18 @@ static void CrossBlockLoadCSE(Generator* gen) {
           while (!BitSetIteratorDone(&it)) {
             int candidate = (int)BitSetIteratorValue(&it);
             BitSetIteratorNext(&it);
-            if (!LoadCanFeed(&loads[candidate], &loads[id])) {
+            if (!LoadCanFeed(loads.value.p[candidate], loads.value.p[id])) {
               continue;
             }
             if (best < 0 ||
-                PreferLoad(&loads[candidate], &loads[best])) {
+                PreferLoad(loads.value.p[candidate], loads.value.p[best])) {
               best = candidate;
             }
           }
-          replacement[id] = best;
+          replacement.value.w[id] = best;
         }
         Clobber clobber = ClassifyClobber(inst);
-        KillAvailable(&in_set, loads, num_loads, &clobber, inst);
+        KillAvailable(&in_set, &loads, &clobber, inst);
         if (id >= 0) {
           BitSetInsert(&in_set, (size_t)id);
         }
@@ -586,42 +598,44 @@ static void CrossBlockLoadCSE(Generator* gen) {
     }
     // Resolve chains before editing the IR.  Clearing a link or deleting a
     // load while another load still names it would forward to a removed node.
-    int* final_id = malloc((size_t)num_loads * sizeof(int));
+    Vector final_id;
+    VectorInit(&final_id);
+    VectorResize(&final_id, (size_t)num_loads);
     for (int i = 0; i < num_loads; i++) {
       int final = i;
       int guard = num_loads;
-      while (guard-- > 0 && replacement[final] >= 0) {
-        final = replacement[final];
+      while (guard-- > 0 && replacement.value.w[final] >= 0) {
+        final = (int)replacement.value.w[final];
       }
-      final_id[i] = (final == i || replacement[final] >= 0) ? -1 : final;
+      final_id.value.w[i] =
+          (final == i || replacement.value.w[final] >= 0) ? -1 : final;
     }
     for (int i = 0; i < num_loads; i++) {
-      if (final_id[i] < 0) {
+      if (final_id.value.w[i] < 0) {
         continue;
       }
-      IRNode* load = loads[i].load;
+      IRNode* load = ((LoadInfo*)loads.value.p[i])->load;
       BasicBlock* block = load->block;
-      GeneratorReplaceInstruction(gen, load, loads[final_id[i]].load);
+      GeneratorReplaceInstruction(
+          gen, load, ((LoadInfo*)loads.value.p[final_id.value.w[i]])->load);
       BasicBlockRemoveInstruction(gen, block, load);
     }
-    free(final_id);
+    VectorDestruct(&final_id);
+    VectorDestruct(&replacement);
   }
 
-  free(replacement);
-  free(queue);
+  VectorDestruct(&queue);
   BitSetDestruct(&in_queue);
   BitSetDestruct(&next);
   BitSetDestruct(&in_set);
-  for (size_t b = 0; b < num_blocks; b++) {
-    BitSetDestruct(&kill[b]);
-    BitSetDestruct(&generated[b]);
-    BitSetDestruct(&avail_out[b]);
-  }
-  free(kill);
-  free(generated);
-  free(avail_out);
+  VectorDestructWithContents(&avail_out, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&generated, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&kill, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
   HashMapDestruct(&ids);
-  free(loads);
+  VectorDestructWithContents(&loads, NULL, /*free_element=*/true);
 }
 
 void MemoryOptimization(Generator* gen) {

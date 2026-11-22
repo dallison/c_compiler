@@ -508,36 +508,40 @@ static bool HasCallBetweenDominatorAndUse(Generator* gen, BlockLayout* layout,
     }
   }
   size_t n = gen->basic_blocks.length;
-  bool* seen = calloc(n, sizeof(bool));
-  BasicBlock** work = malloc(n * sizeof(BasicBlock*));
-  size_t top = 0;
+  BitSet seen;
+  BitSetInit(&seen);
+  Vector work;
+  VectorInit(&work);
   if ((size_t)def->block->block_id < n) {
-    seen[def->block->block_id] = true;
+    BitSetInsert(&seen, (size_t)def->block->block_id);
   }
   for (size_t i = 0; i < use->block->in_edges.length; i++) {
     BlockId pred_id = use->block->in_edges.value.w[i];
-    if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
-      seen[pred_id] = true;
-      work[top++] = gen->basic_blocks.value.p[pred_id];
+    if (pred_id >= 0 && (size_t)pred_id < n &&
+        !BitSetContains(&seen, (size_t)pred_id)) {
+      BitSetInsert(&seen, (size_t)pred_id);
+      VectorAppend(&work, gen->basic_blocks.value.p[pred_id]);
     }
   }
   bool has_call = false;
-  while (top > 0) {
-    BasicBlock* cur = work[--top];
+  while (work.length > 0) {
+    BasicBlock* cur = VectorLast(&work);
+    VectorPop(&work);
     if (BitSetContains(&layout->call_blocks, (size_t)cur->block_id)) {
       has_call = true;
       break;
     }
     for (size_t i = 0; i < cur->in_edges.length; i++) {
       BlockId pred_id = cur->in_edges.value.w[i];
-      if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
-        seen[pred_id] = true;
-        work[top++] = gen->basic_blocks.value.p[pred_id];
+      if (pred_id >= 0 && (size_t)pred_id < n &&
+          !BitSetContains(&seen, (size_t)pred_id)) {
+        BitSetInsert(&seen, (size_t)pred_id);
+        VectorAppend(&work, gen->basic_blocks.value.p[pred_id]);
       }
     }
   }
-  free(work);
-  free(seen);
+  VectorDestruct(&work);
+  BitSetDestruct(&seen);
   return has_call;
 }
 

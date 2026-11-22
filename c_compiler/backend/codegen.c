@@ -1236,7 +1236,7 @@ static void ComputeReversePostorder(Generator* gen, Vector* postorder,
 static BasicBlock* IntersectImmediateDominators(BasicBlock* left,
                                                 BasicBlock* right,
                                                 BasicBlock** idoms,
-                                                const size_t* rpo_number) {
+                                                const uint64_t* rpo_number) {
   while (left != right) {
     while (rpo_number[left->block_id] > rpo_number[right->block_id]) {
       left = idoms[left->block_id];
@@ -1266,18 +1266,22 @@ static void CalculateDominators(Generator* gen) {
   BitSetInit(&reachable);
   ComputeReversePostorder(gen, &postorder, &reachable);
 
-  size_t* rpo_number = malloc(num_blocks * sizeof(*rpo_number));
-  BasicBlock** idoms = calloc(num_blocks, sizeof(*idoms));
+  Vector rpo_number;
+  Vector idoms;
+  VectorInit(&rpo_number);
+  VectorInit(&idoms);
+  VectorResize(&rpo_number, num_blocks);
+  VectorResize(&idoms, num_blocks);
   for (size_t i = 0; i < num_blocks; i++) {
-    rpo_number[i] = SIZE_MAX;
+    rpo_number.value.u[i] = UINT64_MAX;
   }
   for (size_t i = 0; i < postorder.length; i++) {
     BlockId id = postorder.value.w[postorder.length - i - 1];
-    rpo_number[id] = i;
+    rpo_number.value.u[id] = i;
   }
 
   BlockId entry_id = gen->entry_block->block_id;
-  idoms[entry_id] = gen->entry_block;
+  idoms.value.p[entry_id] = gen->entry_block;
   bool changed = true;
   while (changed) {
     changed = false;
@@ -1295,11 +1299,12 @@ static void CalculateDominators(Generator* gen) {
         new_idom =
             new_idom == NULL
                 ? predecessor
-                : IntersectImmediateDominators(new_idom, predecessor, idoms,
-                                               rpo_number);
+                : IntersectImmediateDominators(new_idom, predecessor,
+                                               (BasicBlock**)idoms.value.p,
+                                               rpo_number.value.u);
       }
-      if (new_idom != NULL && idoms[id] != new_idom) {
-        idoms[id] = new_idom;
+      if (new_idom != NULL && idoms.value.p[id] != new_idom) {
+        idoms.value.p[id] = new_idom;
         changed = true;
       }
     }
@@ -1315,18 +1320,18 @@ static void CalculateDominators(Generator* gen) {
     if (block->is_unreachable) {
       continue;
     }
-    block->idom = i == entry_id ? NULL : idoms[i];
+    block->idom = i == entry_id ? NULL : idoms.value.p[i];
     for (BasicBlock* dominator = block; dominator != NULL;
          dominator = dominator->block_id == entry_id
                          ? NULL
-                         : idoms[dominator->block_id]) {
+                         : idoms.value.p[dominator->block_id]) {
       BitSetInsert(&block->dominators, dominator->block_id);
       block->num_dominators++;
     }
   }
 
-  free(idoms);
-  free(rpo_number);
+  VectorDestruct(&idoms);
+  VectorDestruct(&rpo_number);
   BitSetDestruct(&reachable);
   VectorDestruct(&postorder);
 }
@@ -1483,17 +1488,21 @@ static bool IsExceptionBoundaryLabel(const Generator* gen, const IRNode* node) {
 }
 
 static void StraightenGraph(Generator* gen) {
-  int* block_eh_start = NULL;
-  int* block_eh_end = NULL;
-  bool* block_has_eh_boundary = NULL;
+  Vector block_eh_start;
+  Vector block_eh_end;
+  BitSet block_has_eh_boundary;
+  VectorInit(&block_eh_start);
+  VectorInit(&block_eh_end);
+  BitSetInit(&block_has_eh_boundary);
+  bool has_eh = false;
   size_t num_blocks = gen->basic_blocks.length;
   if (gen->exception_ranges.length != 0 && num_blocks > 0) {
-    block_eh_start = malloc(num_blocks * sizeof(int));
-    block_eh_end = malloc(num_blocks * sizeof(int));
-    block_has_eh_boundary = calloc(num_blocks, sizeof(bool));
+    has_eh = true;
+    VectorResize(&block_eh_start, num_blocks);
+    VectorResize(&block_eh_end, num_blocks);
     for (size_t i = 0; i < num_blocks; i++) {
-      block_eh_start[i] = -1;
-      block_eh_end[i] = -2;
+      block_eh_start.value.w[i] = -1;
+      block_eh_end.value.w[i] = -2;
     }
     int region = 0;
     for (IRNode* n = (IRNode*)gen->code.first; n != NULL; n = IRNext(n)) {
@@ -1504,12 +1513,12 @@ static void StraightenGraph(Generator* gen) {
       if (n->block != NULL && (size_t)n->block->block_id < num_blocks) {
         size_t bid = (size_t)n->block->block_id;
         if (boundary) {
-          block_has_eh_boundary[bid] = true;
+          BitSetInsert(&block_has_eh_boundary, bid);
         }
         if (n == n->block->code) {
-          block_eh_start[bid] = region;
+          block_eh_start.value.w[bid] = region;
         }
-        block_eh_end[bid] = region;
+        block_eh_end.value.w[bid] = region;
       }
     }
   }
@@ -1551,19 +1560,22 @@ static void StraightenGraph(Generator* gen) {
           size_t blk_id = (size_t)block->block_id;
           is_candidate = IRNext(terminator) == block->code ||
                          (in_id < num_blocks && blk_id < num_blocks &&
-                          !block_has_eh_boundary[blk_id] &&
-                          block_eh_end[in_id] >= 0 &&
-                          block_eh_end[in_id] == block_eh_start[blk_id]);
+                          !BitSetContains(&block_has_eh_boundary, blk_id) &&
+                          block_eh_end.value.w[in_id] >= 0 &&
+                          block_eh_end.value.w[in_id] ==
+                              block_eh_start.value.w[blk_id]);
         }
         
         if (is_candidate) {
-          if (block_eh_start != NULL &&
+          if (has_eh &&
               (size_t)input->block_id < num_blocks &&
               (size_t)block->block_id < num_blocks) {
             size_t in_id = (size_t)input->block_id;
             size_t blk_id = (size_t)block->block_id;
-            block_eh_end[in_id] = block_eh_end[blk_id];
-            block_has_eh_boundary[in_id] |= block_has_eh_boundary[blk_id];
+            block_eh_end.value.w[in_id] = block_eh_end.value.w[blk_id];
+            if (BitSetContains(&block_has_eh_boundary, blk_id)) {
+              BitSetInsert(&block_has_eh_boundary, in_id);
+            }
           }
           CoalesceBlocks(gen, input, block);
         }
@@ -1571,9 +1583,9 @@ static void StraightenGraph(Generator* gen) {
     }
   }
 
-  free(block_eh_start);
-  free(block_eh_end);
-  free(block_has_eh_boundary);
+  VectorDestruct(&block_eh_start);
+  VectorDestruct(&block_eh_end);
+  BitSetDestruct(&block_has_eh_boundary);
 }
 
 // We have all the instructions available.  Divide them into basic blocks where

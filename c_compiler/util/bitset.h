@@ -38,7 +38,7 @@ static inline void BitSetInsert(BitSet* set, size_t index) {
   }
   set->value[word] |= UINT64_C(1) << (index % 64);
 }
-bool BitSetContains(BitSet* set, size_t index);
+bool BitSetContains(const BitSet* set, size_t index);
 void BitSetRemove(BitSet* set, size_t index);
 
 void BitSetIntersection(BitSet* set1, BitSet* set2, BitSet* result);

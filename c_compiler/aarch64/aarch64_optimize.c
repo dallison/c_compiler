@@ -1735,13 +1735,14 @@ static bool ConvertDiamondsToCselOnce(AARCH64Generator* generator) {
     return false;
   }
   size_t nblocks = gen->basic_blocks.length;
-  bool* touched = calloc(nblocks, sizeof(bool));
+  BitSet touched;
+  BitSetInit(&touched);
   bool changed = false;
 
   for (size_t b_id = 0; b_id < nblocks; b_id++) {
     TargetBasicBlock* b = gen->basic_blocks.value.p[b_id];
-    if (b == NULL || b->is_unreachable || touched[b_id] || b->code == NULL ||
-        b->end_code == NULL || b->out_edges.length != 2) {
+    if (b == NULL || b->is_unreachable || BitSetContains(&touched, b_id) ||
+        b->code == NULL || b->end_code == NULL || b->out_edges.length != 2) {
       continue;
     }
     TargetInstruction* br = b->end_code;
@@ -2047,14 +2048,14 @@ static bool ConvertDiamondsToCselOnce(AARCH64Generator* generator) {
       TargetBasicBlockRemoveInstruction(gen, join_blk, join_lbl);
     }
 
-    touched[b_id] = true;
-    touched[taken_blk->block_id] = true;
-    touched[fall_id] = true;
-    touched[join_blk->block_id] = true;
+    BitSetInsert(&touched, b_id);
+    BitSetInsert(&touched, taken_blk->block_id);
+    BitSetInsert(&touched, fall_id);
+    BitSetInsert(&touched, join_blk->block_id);
     changed = true;
   }
 
-  free(touched);
+  BitSetDestruct(&touched);
   if (changed) {
     TargetRebuildBasicBlocks(gen);
   }
@@ -2295,36 +2296,40 @@ static bool NoCallBetweenDominatingInstAndUse(TargetGenerator* gen,
     }
   }
   size_t n = gen->basic_blocks.length;
-  bool* seen = calloc(n, sizeof(bool));
-  TargetBasicBlock** work = malloc(n * sizeof(TargetBasicBlock*));
-  size_t top = 0;
+  BitSet seen;
+  BitSetInit(&seen);
+  Vector work;
+  VectorInit(&work);
   if (def->block->block_id >= 0 && (size_t)def->block->block_id < n) {
-    seen[def->block->block_id] = true;
+    BitSetInsert(&seen, (size_t)def->block->block_id);
   }
   for (size_t i = 0; i < use->block->in_edges.length; i++) {
     int pred_id = (int)use->block->in_edges.value.w[i];
-    if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
-      seen[pred_id] = true;
-      work[top++] = gen->basic_blocks.value.p[pred_id];
+    if (pred_id >= 0 && (size_t)pred_id < n &&
+        !BitSetContains(&seen, (size_t)pred_id)) {
+      BitSetInsert(&seen, (size_t)pred_id);
+      VectorAppend(&work, gen->basic_blocks.value.p[pred_id]);
     }
   }
   bool ok = true;
-  while (top > 0) {
-    TargetBasicBlock* cur = work[--top];
+  while (work.length > 0) {
+    TargetBasicBlock* cur = VectorLast(&work);
+    VectorPop(&work);
     if (BlockHasCall(cur)) {
       ok = false;
       break;
     }
     for (size_t i = 0; i < cur->in_edges.length; i++) {
       int pred_id = (int)cur->in_edges.value.w[i];
-      if (pred_id >= 0 && (size_t)pred_id < n && !seen[pred_id]) {
-        seen[pred_id] = true;
-        work[top++] = gen->basic_blocks.value.p[pred_id];
+      if (pred_id >= 0 && (size_t)pred_id < n &&
+          !BitSetContains(&seen, (size_t)pred_id)) {
+        BitSetInsert(&seen, (size_t)pred_id);
+        VectorAppend(&work, gen->basic_blocks.value.p[pred_id]);
       }
     }
   }
-  free(work);
-  free(seen);
+  VectorDestruct(&work);
+  BitSetDestruct(&seen);
   return ok;
 }
 

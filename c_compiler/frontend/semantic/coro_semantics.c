@@ -54,10 +54,22 @@ typedef struct {
 
 /* Growable collection of the suspension points found in a coroutine body. */
 typedef struct {
-  SuspensionPoint* points;
-  int count;
+  Vector points;
   int capacity;
 } SuspensionPoints;
+
+static SuspensionPoint* SuspensionPointAt(const SuspensionPoints* points,
+                                          int i) {
+  return points->points.value.p[i];
+}
+
+static int SuspensionPointCount(const SuspensionPoints* points) {
+  return points == NULL ? 0 : (int)points->points.length;
+}
+
+static void SuspensionPointsDestruct(SuspensionPoints* points) {
+  VectorDestructWithContents(&points->points, NULL, /*free_element=*/true);
+}
 
 /* A local variable (or parameter) whose lifetime crosses a suspension point and
  * must therefore be promoted from the stack into the heap-allocated coroutine
@@ -4370,8 +4382,8 @@ static CoroutineFrame NewCoroutineFrame(TypeRecord* promise_type,
     }
     TypeRecordDelete(member_type);
   }
-  for (int i = 0; points != NULL && i < points->count; i++) {
-    SuspensionPoint* point = &points->points[i];
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
     if (point->kind == kSuspensionCoYield && point->co_yield != NULL) {
       ASTNode* operand = ((UnaryASTNode*)point->co_yield)->sub;
       if (operand != NULL && operand->type != NULL &&
@@ -5262,10 +5274,15 @@ static bool CoroutineStatementLocation(ASTNode* stmt,
 /* Reserve and return the next slot in the suspension-points array, or NULL when
  * full. */
 static SuspensionPoint* NextSuspensionPoint(SuspensionPoints* points) {
-  if (points == NULL || points->count >= points->capacity) {
+  if (points == NULL || SuspensionPointCount(points) >= points->capacity) {
     return NULL;
   }
-  return &points->points[points->count++];
+  SuspensionPoint* point = calloc(1, sizeof(SuspensionPoint));
+  if (point == NULL) {
+    return NULL;
+  }
+  VectorAppend(&points->points, point);
+  return point;
 }
 
 /* Record a suspension point for a (non-always-ready) co_await found directly in a
@@ -5863,11 +5880,10 @@ static bool CoroutineNodeIsWithin(ASTNode* node, ASTNode* ancestor) {
 
 static bool CoroutineRangeForContainsSuspension(
     CompoundStatementASTNode* compound, SuspensionPoints* points) {
-  for (int i = 0; points != NULL && i < points->count; i++) {
-    ASTNode* suspension =
-        points->points[i].kind == kSuspensionCoAwait
-            ? points->points[i].co_await
-            : points->points[i].co_yield;
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
+    ASTNode* suspension = point->kind == kSuspensionCoAwait ? point->co_await
+                                                            : point->co_yield;
     if (CoroutineNodeIsWithin(suspension, (ASTNode*)compound)) {
       return true;
     }
@@ -5947,7 +5963,7 @@ static bool CollectPersistedCoroutineLocals(
     SuspensionPoints* points,
     Vector* persisted_locals) {
   VectorInit(persisted_locals);
-  if (body == NULL || points == NULL || points->count == 0) {
+  if (body == NULL || SuspensionPointCount(points) == 0) {
     return true;
   }
   bool ok = true;
@@ -5959,11 +5975,11 @@ static bool CollectPersistedCoroutineLocals(
   ASTNodeVisit((ASTNode*)body,
                CollectPersistedCoroutineRangeForTemporaries, 0,
                &range_collection);
-  for (int i = 0; i < points->count; i++) {
-    CollectPersistedCoroutineLocalsForPoint(body, &points->points[i],
-                                            persisted_locals, &ok);
-    CollectPersistedCoroutineCatchParametersForPoint(
-        body, &points->points[i], persisted_locals, &ok);
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
+    CollectPersistedCoroutineLocalsForPoint(body, point, persisted_locals, &ok);
+    CollectPersistedCoroutineCatchParametersForPoint(body, point,
+                                                     persisted_locals, &ok);
   }
   return ok;
 }
@@ -5977,11 +5993,8 @@ static bool CollectPersistedCoroutineLocals(
  * initial_suspend. */
 static bool SuspensionPointInitializersUseSymbol(SuspensionPoints* points,
                                                  Symbol* symbol) {
-  if (points == NULL) {
-    return false;
-  }
-  for (int i = 0; i < points->count; i++) {
-    if (ASTUsesSymbol(points->points[i].awaiter_init, symbol)) {
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    if (ASTUsesSymbol(SuspensionPointAt(points, i)->awaiter_init, symbol)) {
       return true;
     }
   }
@@ -6052,10 +6065,11 @@ static CoroutinePersistedLocal* FindPersistedCoroutineLocal(Vector* locals,
 static void AdjustSuspensionPointIndicesAfterInsert(SuspensionPoints* points,
                                                     CompoundStatementASTNode* compound,
                                                     size_t insert_index) {
-  for (int i = 0; points != NULL && i < points->count; i++) {
-    if (points->points[i].compound == compound &&
-        points->points[i].statement_index >= insert_index) {
-      points->points[i].statement_index++;
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
+    if (point->compound == compound &&
+        point->statement_index >= insert_index) {
+      point->statement_index++;
     }
   }
 }
@@ -6148,8 +6162,8 @@ static bool CoroutineSuspensionUsesValueDeclaration(
   if (points == NULL || decl == NULL) {
     return false;
   }
-  for (int i = 0; i < points->count; i++) {
-    if (points->points[i].value_decl == decl) {
+  for (int i = 0; i < SuspensionPointCount(points); i++) {
+    if (SuspensionPointAt(points, i)->value_decl == decl) {
       return true;
     }
   }
@@ -6701,64 +6715,56 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
 
   /* Phase 1: per-point resume labels + replace suspension expressions with their
    * await_resume() results. */
-  LabelASTNode** labels = NULL;
-  if (points->count > 0) {
-    labels = calloc((size_t)points->count, sizeof(LabelASTNode*));
+  int point_count = SuspensionPointCount(points);
+  Vector labels;
+  VectorInit(&labels);
+  if (point_count > 0) {
+    VectorReserve(&labels, (size_t)point_count);
   }
-  if (points->count > 0 && labels == NULL) {
-    SemanticError(node, "failed to allocate coroutine resume labels");
-    return false;
-  }
-  for (int i = 0; i < points->count; i++) {
-    SourceLocation location = points->points[i].kind == kSuspensionCoYield
-                                  ? points->points[i].co_yield->location
-                                  : points->points[i].co_await->location;
+  for (int i = 0; i < point_count; i++) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
+    SourceLocation location = point->kind == kSuspensionCoYield
+                                  ? point->co_yield->location
+                                  : point->co_await->location;
     String label_name;
     StringInit(&label_name, SyntaxFakeName(&compiler->syntax));
-    labels[i] =
-        (LabelASTNode*)NewLabelASTNode(label_name.value, NULL, false, location);
+    VectorAppend(&labels, NewLabelASTNode(label_name.value, NULL, false,
+                                          location));
     StringDestruct(&label_name);
 
-    if (points->points[i].kind == kSuspensionCoYield) {
-      if (!LowerCoYieldStatement(&points->points[i], promise, frame,
-                                 yield_awaiter_type)) {
-        free(labels);
+    if (point->kind == kSuspensionCoYield) {
+      if (!LowerCoYieldStatement(point, promise, frame, yield_awaiter_type)) {
+        VectorDestruct(&labels);
         return false;
       }
-      if (points->points[i].value_decl != NULL) {
+      if (point->value_decl != NULL) {
         ReplaceVariableInitializerExpression(
-            points->points[i].value_decl,
+            point->value_decl,
             UnwrapExpressionInitializer(NewAwaitResumeInitializer(
-                points->points[i].awaiter,
-                points->points[i].value_decl->symbol->type, location)));
-      } else if (!SuspensionPointIsStatementCoYield(&points->points[i])) {
+                point->awaiter, point->value_decl->symbol->type, location)));
+      } else if (!SuspensionPointIsStatementCoYield(point)) {
         ASTNode* await_resume = NewElidedAwaitResumeExpression(
-            points->points[i].awaiter, points->points[i].co_yield->type,
-            location);
-        ASTNodeReplaceChild(points->points[i].co_yield->parent,
-                            points->points[i].co_yield->child_id,
+            point->awaiter, point->co_yield->type, location);
+        ASTNodeReplaceChild(point->co_yield->parent, point->co_yield->child_id,
                             await_resume, true);
       }
-    } else if (points->points[i].value_decl == NULL) {
+    } else if (point->value_decl == NULL) {
       ASTNode* await_resume = NewElidedAwaitResumeExpression(
-          points->points[i].awaiter, points->points[i].co_await->type,
-          location);
-      ASTNodeReplaceChild(points->points[i].co_await->parent,
-                          points->points[i].co_await->child_id,
+          point->awaiter, point->co_await->type, location);
+      ASTNodeReplaceChild(point->co_await->parent, point->co_await->child_id,
                           await_resume, true);
     } else {
       ReplaceVariableInitializerExpression(
-          points->points[i].value_decl,
+          point->value_decl,
           UnwrapExpressionInitializer(NewAwaitResumeInitializer(
-              points->points[i].awaiter,
-              points->points[i].value_decl->symbol->type, location)));
+              point->awaiter, point->value_decl->symbol->type, location)));
     }
   }
 
   /* Phase 2: splice the awaiter init, suspend block, resume label, and destructor
    * around each point (reverse order keeps earlier indices valid). */
-  for (int i = points->count - 1; i >= 0; i--) {
-    SuspensionPoint* point = &points->points[i];
+  for (int i = point_count - 1; i >= 0; i--) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
     SourceLocation location = point->kind == kSuspensionCoYield
                                   ? point->co_yield->location
                                   : point->co_await->location;
@@ -6770,8 +6776,8 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
     if (point->kind == kSuspensionCoYield) {
       CoroutineCompoundInsertStatement(point->compound, suspend_if,
                                        point->statement_index + 1);
-      CoroutineCompoundInsertStatement(point->compound, (ASTNode*)labels[i],
-                                       point->statement_index + 2);
+      CoroutineCompoundInsertStatement(
+          point->compound, labels.value.p[i], point->statement_index + 2);
       CoroutineCompoundInsertStatement(point->compound, reset_state,
                                        point->statement_index + 3);
       if (SuspensionPointIsStatementCoYield(point)) {
@@ -6819,7 +6825,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
       }
       CoroutineCompoundInsertStatement(point->compound, suspend_if,
                                        next_index);
-      CoroutineCompoundInsertStatement(point->compound, (ASTNode*)labels[i],
+      CoroutineCompoundInsertStatement(point->compound, labels.value.p[i],
                                        next_index + 1);
       CoroutineCompoundInsertStatement(point->compound, reset_state,
                                        next_index + 2);
@@ -6829,17 +6835,19 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   }
 
   /* Phase 3: prepend the resume dispatch (`if (state==N) goto labelN;`). */
-  for (int i = points->count - 1; i >= 0; i--) {
-    SourceLocation location = points->points[i].kind == kSuspensionCoYield
-                                  ? points->points[i].co_yield->location
-                                  : points->points[i].co_await->location;
-    ASTNode* entry_if = NewStateResumeIf(frame, i + 1, labels[i], location);
+  for (int i = point_count - 1; i >= 0; i--) {
+    SuspensionPoint* point = SuspensionPointAt(points, i);
+    SourceLocation location = point->kind == kSuspensionCoYield
+                                  ? point->co_yield->location
+                                  : point->co_await->location;
+    ASTNode* entry_if = NewStateResumeIf(
+        frame, i + 1, (LabelASTNode*)labels.value.p[i], location);
     CompoundASTNodeInsertStatement(body, entry_if, 1);
   }
   CompoundASTNodeInsertStatement(body,
                                  NewFrameIntAssignment(frame, frame->done, 0,
                                                        node->location),
-                                 (size_t)points->count + 1);
+                                 (size_t)point_count + 1);
   RewriteFrameOwnedSymbols((ASTNode*)body, frame);
   Symbol* resume_function =
       NewCoroutineResumeFunction(node, frame, body, scan.suspend_count, promise,
@@ -6854,7 +6862,7 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
             NewFunctionAddress(resume_function, frame->resume->symbol->type,
                                node->location),
             node->location),
-        (size_t)points->count + 2);
+        (size_t)point_count + 2);
   }
   if (destroy_function != NULL && frame->destroy != NULL) {
     CompoundASTNodeInsertStatement(
@@ -6864,10 +6872,10 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
             NewFunctionAddress(destroy_function, frame->destroy->symbol->type,
                                node->location),
             node->location),
-        (size_t)points->count + 3);
+        (size_t)point_count + 3);
   }
   if (initial_awaiter != NULL) {
-    size_t initial_index = (size_t)points->count + 4;
+    size_t initial_index = (size_t)point_count + 4;
     while (initial_index < body->statements->length) {
       ASTNode* statement = body->statements->value.p[initial_index];
       if (statement == NULL ||
@@ -6895,12 +6903,12 @@ static bool LowerSuspendingCoAwaitFunction(ASTNode* node,
   }
   /* Phase 4: drop the now-relocated original suspension statements (each sat at
    * index 1 after the dispatch chain was prepended) and add frame starters. */
-  for (int i = 0; i < points->count; i++) {
+  for (int i = 0; i < point_count; i++) {
     VectorDeleteElement(body->statements, 1);
   }
   InsertCoroutineFrameStarterInitializers(body, frame, node->location);
   ResetCompoundStatementParents(body);
-  free(labels);
+  VectorDestruct(&labels);
   return true;
 }
 
@@ -6941,6 +6949,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
           : NULL;
   CompoundStatementASTNode* body = (CompoundStatementASTNode*)info->body;
   SuspensionPoints points = {0};
+  VectorInit(&points.points);
   Vector persisted_locals;
   VectorInit(&persisted_locals);
   Symbol* promise = SyntaxNewTemporary(
@@ -6958,38 +6967,34 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   if (needs_frame && points.capacity > 0) {
     ASTNodeVisit((ASTNode*)body, AnalyzeCoroutineRangeForDeclarations, 0,
                  NULL);
-    points.points = calloc((size_t)points.capacity, sizeof(SuspensionPoint));
-    if (points.points == NULL) {
-      SemanticError(node, "failed to allocate coroutine suspension points");
-      PersistedCoroutineLocalsDestruct(&persisted_locals);
-      return false;
-    }
+    VectorReserve(&points.points, (size_t)points.capacity);
     CollectSuspensionPointsInCompound(body, &points);
-    if (points.count != scan.suspend_count) {
+    if (SuspensionPointCount(&points) != scan.suspend_count) {
       SemanticError(node, "unsupported coroutine suspension form");
       PersistedCoroutineLocalsDestruct(&persisted_locals);
-      free(points.points);
+      SuspensionPointsDestruct(&points);
       return false;
     }
-    for (int i = 0; i < points.count; i++) {
-      if (!ValidateSuspensionPoint(node, body, promise, &points.points[i])) {
+    for (int i = 0; i < SuspensionPointCount(&points); i++) {
+      if (!ValidateSuspensionPoint(node, body, promise,
+                                   SuspensionPointAt(&points, i))) {
         PersistedCoroutineLocalsDestruct(&persisted_locals);
-        free(points.points);
+        SuspensionPointsDestruct(&points);
         return false;
       }
     }
-    for (int i = 0; i < points.count; i++) {
-      if (points.points[i].kind == kSuspensionCoAwait &&
-          !ValidateCoroutineSuspensionPointFrameAwaiterConstructible(
-              &points.points[i])) {
+    for (int i = 0; i < SuspensionPointCount(&points); i++) {
+      SuspensionPoint* point = SuspensionPointAt(&points, i);
+      if (point->kind == kSuspensionCoAwait &&
+          !ValidateCoroutineSuspensionPointFrameAwaiterConstructible(point)) {
         PersistedCoroutineLocalsDestruct(&persisted_locals);
-        free(points.points);
+        SuspensionPointsDestruct(&points);
         return false;
       }
     }
     if (!CollectPersistedCoroutineLocals(body, &points, &persisted_locals)) {
       PersistedCoroutineLocalsDestruct(&persisted_locals);
-      free(points.points);
+      SuspensionPointsDestruct(&points);
       return false;
     }
   }
@@ -6997,27 +7002,27 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
       !CollectPersistedCoroutineParameters(info, body, &points,
                                            &persisted_locals)) {
     PersistedCoroutineLocalsDestruct(&persisted_locals);
-    free(points.points);
+    SuspensionPointsDestruct(&points);
     return false;
   }
   if (needs_frame && initial_awaiter_type != NULL &&
       !ValidateCoroutineFrameOwnedAwaiterConstructible(node,
                                                        initial_awaiter_type)) {
     PersistedCoroutineLocalsDestruct(&persisted_locals);
-    free(points.points);
+    SuspensionPointsDestruct(&points);
     return false;
   }
   if (needs_frame && yield_awaiter_type != NULL &&
       !ValidateCoroutineFrameOwnedAwaiterConstructible(node,
                                                        yield_awaiter_type)) {
     PersistedCoroutineLocalsDestruct(&persisted_locals);
-    free(points.points);
+    SuspensionPointsDestruct(&points);
     return false;
   }
   if (final_awaiter_type != NULL &&
       !ValidateCoAwaiterType(node, final_awaiter_type)) {
     PersistedCoroutineLocalsDestruct(&persisted_locals);
-    free(points.points);
+    SuspensionPointsDestruct(&points);
     return false;
   }
 
@@ -7077,12 +7082,13 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                                    frame.final_awaiter_constructed, false,
                                    false);
     }
-    for (int i = 0; i < points.count; i++) {
-      if (points.points[i].kind == kSuspensionCoAwait) {
-        CoroutineFrameAddOwnedSymbol(
-            &frame, points.points[i].awaiter,
-            points.points[i].frame_member,
-            points.points[i].frame_constructed_member, false, true);
+    for (int i = 0; i < SuspensionPointCount(&points); i++) {
+      SuspensionPoint* point = SuspensionPointAt(&points, i);
+      if (point->kind == kSuspensionCoAwait) {
+        CoroutineFrameAddOwnedSymbol(&frame, point->awaiter,
+                                     point->frame_member,
+                                     point->frame_constructed_member, false,
+                                     true);
       }
     }
   }
@@ -7099,9 +7105,10 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
   }
   CompoundASTNodeInsertStatement(
       body, NewDeclarationListASTNode(decls, node->location), 0);
-  for (int i = 0; i < points.count; i++) {
-    if (points.points[i].compound == body) {
-      points.points[i].statement_index++;
+  for (int i = 0; i < SuspensionPointCount(&points); i++) {
+    SuspensionPoint* point = SuspensionPointAt(&points, i);
+    if (point->compound == body) {
+      point->statement_index++;
     }
   }
   if (needs_frame) {
@@ -7158,7 +7165,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
                                       yield_awaiter_type)) {
     CoroutineFrameOwnedSymbolsDestruct(&frame);
     PersistedCoroutineLocalsDestruct(&persisted_locals);
-    free(points.points);
+    SuspensionPointsDestruct(&points);
     return false;
   }
   if (needs_frame) {
@@ -7187,7 +7194,7 @@ static bool LowerCoroutineFunction(ASTNode* node, CoroutineScan scan) {
     CoroutineFrameOwnedSymbolsDestruct(&frame);
   }
   PersistedCoroutineLocalsDestruct(&persisted_locals);
-  free(points.points);
+  SuspensionPointsDestruct(&points);
   return true;
 }
 

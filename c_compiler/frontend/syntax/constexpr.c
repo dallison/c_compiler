@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include "bitset.h"
 #include "member_pointer.h"
 #include "compiler.h"
 #include "constexpr_pcode.h"
@@ -6126,7 +6127,7 @@ static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
 static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
                                                     TypeRecord* type,
                                                     ConstexprObject* object,
-                                                    const bool* initialized,
+                                                    const BitSet* initialized,
                                                     size_t slot_count) {
   if (!TypeIsStructOrUnion(type) || type->info.struct_info == NULL ||
       type->info.struct_info->is_union || initialized == NULL) {
@@ -6139,7 +6140,8 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
       continue;
     }
     size_t storage_index = ConstexprBaseStorageIndex(str, i);
-    if (storage_index >= slot_count || initialized[storage_index]) {
+    if (storage_index >= slot_count ||
+        BitSetContains(initialized, storage_index)) {
       continue;
     }
     if (!ConstexprValueInitializeAggregateSlot(
@@ -6153,7 +6155,8 @@ static bool ApplyConstexprDefaultMemberInitializers(ConstEvalContext* ctx,
       continue;
     }
     size_t storage_index = ConstexprMemberStorageIndex(str, member);
-    if (storage_index >= slot_count || initialized[storage_index]) {
+    if (storage_index >= slot_count ||
+        BitSetContains(initialized, storage_index)) {
       continue;
     }
     ConstexprValue* slot = ConstexprObjectSlot(object, storage_index);
@@ -6227,14 +6230,12 @@ static bool ConstexprValueInitializeAggregateSlot(ConstEvalContext* ctx,
     }
   }
   size_t slot_count = slot->object->slots.length;
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  if (slot_count > 0 && initialized == NULL) {
-    return false;
-  }
+  BitSet initialized;
+  BitSetInit(&initialized);
   bool ok = slot_count == 0 ||
             ApplyConstexprDefaultMemberInitializers(ctx, type, slot->object,
-                                                    initialized, slot_count);
-  free(initialized);
+                                                    &initialized, slot_count);
+  BitSetDestruct(&initialized);
   return ok;
 }
 
@@ -6498,10 +6499,8 @@ static bool ConstexprEvaluateElidedInitializer(ConstEvalContext* ctx,
     return false;
   }
   size_t slot_count = object->slots.length;
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  if (slot_count > 0 && initialized == NULL) {
-    return false;
-  }
+  BitSet initialized;
+  BitSetInit(&initialized);
   bool ok = true;
   for (size_t index = ConstexprNextPositionalSlot(type, 0);
        ok && index < slot_count && *next < entries->length;
@@ -6513,11 +6512,11 @@ static bool ConstexprEvaluateElidedInitializer(ConstEvalContext* ctx,
     ok = ConstexprEvaluateElidedInitializer(
         ctx, ConstexprObjectSlotType(type, index), entries, next,
         ConstexprObjectSlot(object, index));
-    initialized[index] = true;
+    BitSetInsert(&initialized, index);
   }
   ok = ok && ApplyConstexprDefaultMemberInitializers(ctx, type, object,
-                                                     initialized, slot_count);
-  free(initialized);
+                                                     &initialized, slot_count);
+  BitSetDestruct(&initialized);
   return ok;
 }
 
@@ -6709,8 +6708,9 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
       }
     }
   }
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  bool ok = slot_count == 0 || initialized != NULL;
+  BitSet initialized;
+  BitSetInit(&initialized);
+  bool ok = true;
   size_t next_index = 0;
   for (size_t i = 0; ok && i < braced->initializers->length; i++) {
     ASTNode* entry = braced->initializers->value.p[i];
@@ -6749,7 +6749,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
           break;
         }
         if (slot_index < slot_count) {
-          initialized[slot_index] = true;
+          BitSetInsert(&initialized, slot_index);
         }
         next_index = slot_index + 1;
         continue;
@@ -6823,7 +6823,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
         break;
       }
       if (slot_index < slot_count) {
-        initialized[slot_index] = true;
+        BitSetInsert(&initialized, slot_index);
       }
       next_index = slot_index + 1;
       i = next - 1;
@@ -6864,17 +6864,17 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     }
     ConstexprTruncateBitFieldSlot(ConstexprSlotMember(type, slot_index), slot);
     if (slot_index < slot_count) {
-      initialized[slot_index] = true;
+      BitSetInsert(&initialized, slot_index);
     }
     next_index = slot_index + 1;
   }
   if (ok) {
-    ok = ApplyConstexprDefaultMemberInitializers(ctx, type, object, initialized,
-                                                 slot_count);
+    ok = ApplyConstexprDefaultMemberInitializers(
+        ctx, type, object, &initialized, slot_count);
   }
   if (ok && TypeIsFixedArray(type) && !sparse_lifetime_initializer) {
     for (size_t i = 0; ok && i < slot_count; i++) {
-      if (initialized[i]) {
+      if (BitSetContains(&initialized, i)) {
         continue;
       }
       ConstexprValue* slot = ConstexprObjectSlot(object, i);
@@ -6894,7 +6894,7 @@ static bool EvaluateConstexprInitializer(ConstEvalContext* ctx,
     ok = ApplyConstexprDesignatedBaseDefaultInitializers(
         ctx, type, object, braced);
   }
-  free(initialized);
+  BitSetDestruct(&initialized);
   if (ok && TypeIsStructOrUnion(type) && type->info.struct_info != NULL &&
       !type->info.struct_info->is_union) {
     ok = ConstexprMaterializeBaseSubobjectSlots(ctx, object);
@@ -13075,7 +13075,8 @@ bool ConstexprClassHasData(TypeRecord* type) {
 // Writes `value`'s object representation to `bytes`, marking in `valid` the
 // bytes that hold a value; padding and indeterminate scalars stay unmarked.
 static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
-                                  unsigned char* bytes, bool* valid) {
+                                  unsigned char* bytes, BitSet* valid,
+                                  size_t byte_offset) {
   if (type == NULL || value == NULL || type->size <= 0) {
     return false;
   }
@@ -13085,8 +13086,10 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
     }
     if (value->state == kValueStateValid) {
       uint64_t bits = ConstexprScalarBits(*value, type);
-      memcpy(bytes, &bits, (size_t)type->size);
-      memset(valid, true, (size_t)type->size);
+      memcpy(bytes + byte_offset, &bits, (size_t)type->size);
+      for (size_t b = 0; b < (size_t)type->size; b++) {
+        BitSetInsert(valid, byte_offset + b);
+      }
     }
     return true;
   }
@@ -13103,7 +13106,7 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
     for (size_t i = 0; i < count; i++) {
       size_t offset = i * (size_t)element->size;
       if (!ConstexprBitCastWrite(element, ConstexprObjectSlot(object, i),
-                                 bytes + offset, valid + offset)) {
+                                 bytes, valid, byte_offset + offset)) {
         return false;
       }
     }
@@ -13125,8 +13128,8 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
     }
     ConstexprValue* slot =
         ConstexprObjectSlot(object, ConstexprBaseStorageIndex(str, i));
-    if (!ConstexprBitCastWrite(base->type, slot, bytes + base->byte_offset,
-                               valid + base->byte_offset)) {
+    if (!ConstexprBitCastWrite(base->type, slot, bytes, valid,
+                               byte_offset + (size_t)base->byte_offset)) {
       return false;
     }
   }
@@ -13140,9 +13143,8 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
     }
     ConstexprValue* slot =
         ConstexprObjectSlot(object, ConstexprMemberStorageIndex(str, member));
-    if (!ConstexprBitCastWrite(member->symbol->type, slot,
-                               bytes + member->byte_offset,
-                               valid + member->byte_offset)) {
+    if (!ConstexprBitCastWrite(member->symbol->type, slot, bytes, valid,
+                               byte_offset + (size_t)member->byte_offset)) {
       return false;
     }
   }
@@ -13153,18 +13155,19 @@ static bool ConstexprBitCastWrite(TypeRecord* type, ConstexprValue* value,
 // scalar must hold a value.
 static bool ConstexprBitCastRead(ConstEvalContext* ctx, TypeRecord* type,
                                  const unsigned char* bytes,
-                                 const bool* valid, ConstexprValue* result) {
+                                 const BitSet* valid, size_t byte_offset,
+                                 ConstexprValue* result) {
   if (type == NULL || type->size <= 0) {
     return false;
   }
   if (ConstexprBitCastScalarType(type)) {
     for (int i = 0; i < type->size; i++) {
-      if (!valid[i]) {
+      if (!BitSetContains(valid, byte_offset + (size_t)i)) {
         return false;
       }
     }
     uint64_t bits = 0;
-    memcpy(&bits, bytes, (size_t)type->size);
+    memcpy(&bits, bytes + byte_offset, (size_t)type->size);
     *result = ConstexprScalarFromBits(bits, type);
     return true;
   }
@@ -13184,8 +13187,9 @@ static bool ConstexprBitCastRead(ConstEvalContext* ctx, TypeRecord* type,
     for (size_t i = 0; i < count; i++) {
       size_t offset = i * (size_t)element->size;
       ConstexprValue* slot = ConstexprObjectSlot(object, i);
-      if (slot == NULL || !ConstexprBitCastRead(ctx, element, bytes + offset,
-                                                valid + offset, slot)) {
+      if (slot == NULL ||
+          !ConstexprBitCastRead(ctx, element, bytes, valid,
+                                byte_offset + offset, slot)) {
         return false;
       }
     }
@@ -13200,8 +13204,9 @@ static bool ConstexprBitCastRead(ConstEvalContext* ctx, TypeRecord* type,
       if (slot == NULL) {
         return false;
       }
-      if (!ConstexprBitCastRead(ctx, base->type, bytes + base->byte_offset,
-                                valid + base->byte_offset, slot)) {
+      if (!ConstexprBitCastRead(ctx, base->type, bytes, valid,
+                                byte_offset + (size_t)base->byte_offset,
+                                slot)) {
         return false;
       }
     }
@@ -13213,9 +13218,9 @@ static bool ConstexprBitCastRead(ConstEvalContext* ctx, TypeRecord* type,
       ConstexprValue* slot = ConstexprObjectSlot(
           object, ConstexprMemberStorageIndex(str, member));
       if (member->is_bit_field || slot == NULL ||
-          !ConstexprBitCastRead(ctx, member->symbol->type,
-                                bytes + member->byte_offset,
-                                valid + member->byte_offset, slot)) {
+          !ConstexprBitCastRead(ctx, member->symbol->type, bytes, valid,
+                                byte_offset + (size_t)member->byte_offset,
+                                slot)) {
         return false;
       }
     }
@@ -13256,12 +13261,13 @@ static bool ConstexprEvaluateBitCast(ConstEvalContext* ctx, ASTNode* node,
   }
   size_t size = (size_t)to->size;
   unsigned char* bytes = calloc(size, 1);
-  bool* valid = calloc(size, sizeof(bool));
-  bool ok = bytes != NULL && valid != NULL &&
-            ConstexprBitCastWrite(from, &value, bytes, valid) &&
-            ConstexprBitCastRead(ctx, to, bytes, valid, result);
+  BitSet valid;
+  BitSetInit(&valid);
+  bool ok = bytes != NULL &&
+            ConstexprBitCastWrite(from, &value, bytes, &valid, 0) &&
+            ConstexprBitCastRead(ctx, to, bytes, &valid, 0, result);
   free(bytes);
-  free(valid);
+  BitSetDestruct(&valid);
   return ok;
 }
 

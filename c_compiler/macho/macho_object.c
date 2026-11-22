@@ -732,54 +732,45 @@ static bool SymbolIsThreadLocalVariable(MachOObject* macho, MachOSymbol* sym) {
  * name$tlv$init symbol.  The original symbol moves onto the descriptor so
  * the TLVP relocation keeps using it. */
 static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
-  size_t count = 0;
-  for (size_t i = 0; i < macho->symbols.length; i++) {
-    if (SymbolIsThreadLocalVariable(macho, macho->symbols.value.p[i])) {
-      count++;
-    }
-  }
-  if (count == 0) {
-    return true;
-  }
-
-  MachOSymbol** originals = malloc(count * sizeof(*originals));
-  if (originals == NULL) {
-    return false;
-  }
-  size_t n = 0;
+  Vector originals;
+  VectorInit(&originals);
   for (size_t i = 0; i < macho->symbols.length; i++) {
     MachOSymbol* sym = macho->symbols.value.p[i];
     if (SymbolIsThreadLocalVariable(macho, sym)) {
-      originals[n++] = sym;
+      VectorAppend(&originals, sym);
     }
+  }
+  size_t n = originals.length;
+  if (n == 0) {
+    VectorDestruct(&originals);
+    return true;
   }
 
-  MachOSymbol** inits = calloc(n, sizeof(*inits));
-  if (inits == NULL) {
-    free(originals);
-    return false;
-  }
+  Vector inits;
+  VectorInit(&inits);
+  VectorReserve(&inits, n);
   for (size_t i = 0; i < n; i++) {
+    MachOSymbol* orig = originals.value.p[i];
     MachOSymbol* init = calloc(1, sizeof(*init));
     if (init == NULL) {
-      free(originals);
-      free(inits);
+      VectorDestruct(&originals);
+      VectorDestruct(&inits);
       return false;
     }
-    StringInit(&init->name, originals[i]->name.value);
+    StringInit(&init->name, orig->name.value);
     StringAppend(&init->name, "$tlv$init");
     init->type = MACHO_N_SECT;
-    init->sect = originals[i]->sect;
-    init->value = originals[i]->value;
+    init->sect = orig->sect;
+    init->value = orig->value;
     VectorInsertBefore(&macho->symbols, macho->nlocals, init);
     macho->nlocals++;
-    inits[i] = init;
+    VectorAppend(&inits, init);
   }
 
   MachOSymbol* bootstrap = calloc(1, sizeof(*bootstrap));
   if (bootstrap == NULL) {
-    free(originals);
-    free(inits);
+    VectorDestruct(&originals);
+    VectorDestruct(&inits);
     return false;
   }
   StringInit(&bootstrap->name, "__tlv_bootstrap");
@@ -795,8 +786,8 @@ static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
   }
   MachOSection* vars = calloc(1, sizeof(*vars));
   if (vars == NULL) {
-    free(originals);
-    free(inits);
+    VectorDestruct(&originals);
+    VectorDestruct(&inits);
     return false;
   }
   SetPaddedName(vars->sectname, "__thread_vars");
@@ -810,28 +801,29 @@ static bool PrepareThreadLocalDescriptors(MachOObject* macho) {
   vars->owns_data = true;
   if (vars->data == NULL) {
     free(vars);
-    free(originals);
-    free(inits);
+    VectorDestruct(&originals);
+    VectorDestruct(&inits);
     return false;
   }
   vars->macho_index = (uint32_t)macho->sections.length + 1;
   VectorAppend(&macho->sections, vars);
 
   for (size_t i = 0; i < n; i++) {
-    originals[i]->sect = (uint8_t)vars->macho_index;
-    originals[i]->value = vars->addr + i * 24;
+    MachOSymbol* orig = originals.value.p[i];
+    orig->sect = (uint8_t)vars->macho_index;
+    orig->value = vars->addr + i * 24;
     uint32_t base = (uint32_t)(i * 24);
     if (!AppendExternalReloc(macho, vars, base, bootstrap, 3,
                              MACHO_ARM64_RELOC_UNSIGNED) ||
-        !AppendExternalReloc(macho, vars, base + 16, inits[i], 3,
+        !AppendExternalReloc(macho, vars, base + 16, inits.value.p[i], 3,
                              MACHO_ARM64_RELOC_UNSIGNED)) {
-      free(originals);
-      free(inits);
+      VectorDestruct(&originals);
+      VectorDestruct(&inits);
       return false;
     }
   }
-  free(originals);
-  free(inits);
+  VectorDestruct(&originals);
+  VectorDestruct(&inits);
   return true;
 }
 

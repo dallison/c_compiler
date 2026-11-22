@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
+#include "bitset.h"
 #include "codegen.h"
 #include "compiler.h"
 #include "errors.h"
@@ -7834,10 +7835,8 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
     }
   }
   size_t slot_count = object->slots.length;
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  if (slot_count > 0 && initialized == NULL) {
-    return false;
-  }
+  BitSet initialized;
+  BitSetInit(&initialized);
   bool ok = true;
   size_t next_index = 0;
   for (size_t i = 0; ok && i < braced->initializers->length; i++) {
@@ -7862,7 +7861,7 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       }
       for (size_t k = (size_t)first->value.array_index;
            k <= (size_t)first->array_index_end && k < slot_count; k++) {
-        initialized[k] = true;
+        BitSetInsert(&initialized, k);
       }
       next_index = (size_t)first->array_index_end + 1;
       continue;
@@ -7884,12 +7883,12 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       break;
     }
     slot->lifetime_ended = false;
-    initialized[slot_index] = true;
+    BitSetInsert(&initialized, slot_index);
     next_index = slot_index + 1;
   }
   for (size_t i = 0; ok && !sparse_lifetime_initializer && i < slot_count;
        i++) {
-    if (initialized[i]) {
+    if (BitSetContains(&initialized, i)) {
       continue;
     }
     ConstexprValue* slot = PCodeConstexprObjectSlot(object, i);
@@ -7909,7 +7908,7 @@ static bool BuildPCodeArrayObject(ConstEvalContext* ctx, TypeRecord* type,
       ok = false;
     }
   }
-  free(initialized);
+  BitSetDestruct(&initialized);
   return ok;
 }
 
@@ -7979,7 +7978,7 @@ static bool PCodeDesignatedTopSlot(TypeRecord* type, Designator* designator,
 static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
                                              TypeRecord* type,
                                              ConstexprObject* object,
-                                             const bool* initialized);
+                                             const BitSet* initialized);
 
 // Default-constructs the non-aggregate class in |slot|.
 static bool PCodeDefaultConstructSlot(ConstEvalContext* ctx, TypeRecord* type,
@@ -8058,7 +8057,7 @@ static bool PCodeValueInitializeSlot(ConstEvalContext* ctx, TypeRecord* type,
 static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
                                              TypeRecord* type,
                                              ConstexprObject* object,
-                                             const bool* initialized) {
+                                             const BitSet* initialized) {
   Struct* str = type->info.struct_info;
   if (str->virtual_bases.length != 0) {
     return false;
@@ -8070,7 +8069,8 @@ static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
       return false;
     }
     size_t index = ConstexprBaseStorageIndex(str, i);
-    if (index < slot_count && initialized != NULL && initialized[index]) {
+    if (index < slot_count && initialized != NULL &&
+        BitSetContains(initialized, index)) {
       continue;
     }
     ConstexprValue* slot = PCodeConstexprObjectSlot(object, index);
@@ -8094,7 +8094,8 @@ static bool PCodeInitializeOmittedSubobjects(ConstEvalContext* ctx,
       continue;
     }
     size_t index = PCodeConstexprMemberSlotIndex(str, member);
-    if (index < slot_count && initialized != NULL && initialized[index]) {
+    if (index < slot_count && initialized != NULL &&
+        BitSetContains(initialized, index)) {
       continue;
     }
     ConstexprValue* slot = PCodeConstexprObjectSlot(object, index);
@@ -8159,10 +8160,8 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
     return true;
   }
   size_t slot_count = object->slots.length;
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  if (slot_count > 0 && initialized == NULL) {
-    return false;
-  }
+  BitSet initialized;
+  BitSetInit(&initialized);
   bool ok = true;
   size_t positional = 0;
   size_t next = 0;
@@ -8189,11 +8188,11 @@ static bool BuildPCodeStructObject(ConstEvalContext* ctx, TypeRecord* type,
                PCodeConstexprObjectSlot(object, slot_index));
     }
     if (ok && slot_index < slot_count) {
-      initialized[slot_index] = true;
+      BitSetInsert(&initialized, slot_index);
     }
   }
-  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, initialized);
-  free(initialized);
+  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, &initialized);
+  BitSetDestruct(&initialized);
   return ok;
 }
 
@@ -8252,10 +8251,8 @@ static bool PCodeStoreElidedInitializer(ConstEvalContext* ctx,
     return true;
   }
   size_t slot_count = object->slots.length;
-  bool* initialized = slot_count > 0 ? calloc(slot_count, sizeof(bool)) : NULL;
-  if (slot_count > 0 && initialized == NULL) {
-    return false;
-  }
+  BitSet initialized;
+  BitSetInit(&initialized);
   bool ok = true;
   size_t slot_index = 0;
   TypeRecord* slot_type = NULL;
@@ -8270,11 +8267,11 @@ static bool PCodeStoreElidedInitializer(ConstEvalContext* ctx,
         ctx, slot_type, entries, next,
         PCodeConstexprObjectSlot(object, slot_index));
     if (ok && slot_index < slot_count) {
-      initialized[slot_index] = true;
+      BitSetInsert(&initialized, slot_index);
     }
   }
-  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, initialized);
-  free(initialized);
+  ok = ok && PCodeInitializeOmittedSubobjects(ctx, type, object, &initialized);
+  BitSetDestruct(&initialized);
   return ok;
 }
 

@@ -532,7 +532,7 @@ static ASTNode* NewCXXMemberDestructorCall(TypeRecord* func,
 // Applies `depth` constant subscripts (`indices[0..depth)`) to a freshly-built
 // member receiver so that a multidimensional array member is addressed down to
 // one of its innermost elements (e.g. `dst.g[i][j]`).
-static ASTNode* ApplyConstantSubscripts(ASTNode* base, const size_t* indices,
+static ASTNode* ApplyConstantSubscripts(ASTNode* base, const uint64_t* indices,
                                         size_t depth, SourceLocation location) {
   ASTNode* node = base;
   for (size_t d = 0; d < depth; d++) {
@@ -570,7 +570,9 @@ void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
       total *= (size_t)t->info.array.size.fixed;
       depth++;
     }
-    size_t* indices = malloc(depth * sizeof(size_t));
+    Vector indices;
+    VectorInit(&indices);
+    VectorResize(&indices, depth);
     for (size_t flat = total; flat > 0; flat--) {
       size_t rest = flat - 1;
       TypeRecord* level = member_type;
@@ -579,11 +581,11 @@ void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
         for (TypeRecord* t = level->next; TypeIsFixedArray(t); t = t->next) {
           stride *= (size_t)t->info.array.size.fixed;
         }
-        indices[d] = rest / stride;
+        indices.value.u[d] = rest / stride;
         rest %= stride;
       }
       ASTNode* receiver = ApplyConstantSubscripts(
-          NewCXXMemberReceiver(func, member, location), indices, depth,
+          NewCXXMemberReceiver(func, member, location), indices.value.u, depth,
           location);
       ASTNode* call =
           NewCXXMemberDestructorCall(func, object_type, receiver, location);
@@ -591,7 +593,7 @@ void AppendCXXSingleMemberDestructorCalls(TypeRecord* func,
         VectorAppend(body, call);
       }
     }
-    free(indices);
+    VectorDestruct(&indices);
   } else {
     ASTNode* receiver = NewCXXMemberReceiver(func, member, location);
     ASTNode* call =
@@ -644,7 +646,7 @@ static ASTNode* CXXMoveMemberwiseSource(ASTNode* source, TypeRecord* type,
 // is ill-formed, so a naive single-dimension loop breaks for such members.
 static void AppendCXXArrayMemberwiseAssignments(
     TypeRecord* func, Symbol* source, StructMember* member,
-    TypeRecord* array_type, size_t* indices, size_t depth,
+    TypeRecord* array_type, uint64_t* indices, size_t depth,
     bool is_constructor_initializer, bool move_source, Vector* body,
     SourceLocation location) {
   TypeRecord* element_type = array_type->next;
@@ -717,11 +719,13 @@ void AppendCXXMemberwiseAssignments(TypeParser* parser, TypeRecord* func,
       for (TypeRecord* t = member_type; TypeIsFixedArray(t); t = t->next) {
         ndims++;
       }
-      size_t* indices = calloc(ndims, sizeof(size_t));
-      AppendCXXArrayMemberwiseAssignments(func, source, member, member_type,
-                                          indices, 0, is_constructor_initializer,
-                                          move_source, body, location);
-      free(indices);
+      Vector indices;
+      VectorInit(&indices);
+      VectorResize(&indices, ndims);
+      AppendCXXArrayMemberwiseAssignments(
+          func, source, member, member_type, indices.value.u, 0,
+          is_constructor_initializer, move_source, body, location);
+      VectorDestruct(&indices);
     } else {
       ASTNode* target = NewCXXMemberReceiver(func, member, location);
       ASTNode* value = NewCXXSourceMemberReceiver(source, member, location);

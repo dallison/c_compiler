@@ -176,14 +176,14 @@ typedef struct {
 
   // Live nodes at the start and end of each block.
   size_t words;
-  uint64_t* live_in;
-  uint64_t* live_out;
-  bool* pads;  // Exception landing pads, by block id.
+  Vector live_in;
+  Vector live_out;
+  BitSet pads;  // Exception landing pads, by block id.
 
   // Interference edges between nodes that are not physical registers: a
   // triangular bit matrix by MatrixBit, or for a large function a set by
   // EdgeKey.  Node::fixed_adj holds the edges to physical registers.
-  uint64_t* matrix;
+  Vector matrix;
   HashSet edges;
   ChunkArray moves;  // Move.
   Vector simplify_list;
@@ -279,14 +279,14 @@ static uint64_t* EdgeWord(RA* ra, int a, int b, uint64_t* mask) {
   }
   size_t bit = MatrixBit(a, b);
   *mask = UINT64_C(1) << (bit % 64);
-  return &ra->matrix[bit / 64];
+  return &ra->matrix.value.u[bit / 64];
 }
 
 static bool Interferes(RA* ra, int a, int b) {
   if (a == b || (IsPrecolored(a) && IsPrecolored(b))) {
     return false;
   }
-  if (ra->matrix == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
+  if (ra->matrix.value.u == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
     return HashSetContains(&ra->edges, EdgeKey(a, b));
   }
   uint64_t mask;
@@ -296,7 +296,7 @@ static bool Interferes(RA* ra, int a, int b) {
 // Records the edge between |a| and |b|, which differ and are not both
 // physical registers, and returns whether it is new.
 static bool InsertEdge(RA* ra, int a, int b) {
-  if (ra->matrix == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
+  if (ra->matrix.value.u == NULL && !IsPrecolored(a) && !IsPrecolored(b)) {
     return HashSetInsert(&ra->edges, EdgeKey(a, b));
   }
   uint64_t mask;
@@ -759,13 +759,13 @@ static void ClearBit(uint64_t* bits, int i) {
 static void MarkLandingPads(RA* ra) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
-  ra->pads = calloc(num_blocks + 1, sizeof(bool));
+  BitSetInit(&ra->pads);
   for (size_t e = 0; e < gen->exception_edges.length; e++) {
     const TargetExceptionEdge* edge = gen->exception_edges.value.p[e];
     TargetBasicBlock* pad =
         edge->catch_label == NULL ? NULL : edge->catch_label->block;
     if (pad != NULL && pad->block_id < num_blocks) {
-      ra->pads[pad->block_id] = true;
+      BitSetInsert(&ra->pads, pad->block_id);
     }
   }
 }
@@ -779,8 +779,8 @@ static bool PadLive(RA* ra, TargetBasicBlock* block, uint64_t* bits) {
   bool any = false;
   for (size_t s = 0; s < block->out_edges.length; s++) {
     size_t succ = (size_t)block->out_edges.value.w[s];
-    if (succ < num_blocks && ra->pads[succ]) {
-      const uint64_t* in = ra->live_in + succ * words;
+    if (succ < num_blocks && BitSetContains(&ra->pads, succ)) {
+      const uint64_t* in = ra->live_in.value.u + succ * words;
       for (size_t w = 0; w < words; w++) {
         bits[w] |= in[w];
       }
@@ -795,24 +795,34 @@ static void ComputeLiveness(RA* ra) {
   size_t num_blocks = gen->basic_blocks.length;
   size_t words = ((size_t)NumNodes(ra) + 63) / 64;
   ra->words = words;
-  uint64_t* gen_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  uint64_t* kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  Vector gen_bits;
+  Vector kill_bits;
   // Nodes each block writes before its first call.
-  uint64_t* throw_kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  bool* calls = calloc(num_blocks + 1, sizeof(bool));
-  uint64_t* pad_live = calloc(words + 1, sizeof(uint64_t));
-  uint64_t* live_in = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  ra->live_in = live_in;
-  ra->live_out = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  Vector throw_kill_bits;
+  BitSet calls;
+  Vector pad_live;
+  VectorInit(&gen_bits);
+  VectorInit(&kill_bits);
+  VectorInit(&throw_kill_bits);
+  BitSetInit(&calls);
+  VectorInit(&pad_live);
+  VectorResize(&gen_bits, num_blocks * words + 1);
+  VectorResize(&kill_bits, num_blocks * words + 1);
+  VectorResize(&throw_kill_bits, num_blocks * words + 1);
+  VectorResize(&pad_live, words + 1);
+  VectorInit(&ra->live_in);
+  VectorInit(&ra->live_out);
+  VectorResize(&ra->live_in, num_blocks * words + 1);
+  VectorResize(&ra->live_out, num_blocks * words + 1);
   MarkLandingPads(ra);
 
   for (int i = NumInsts(ra) - 1; i >= 0; i--) {
     const InstInfo* info = InstAt(ra, i);
-    uint64_t* g = gen_bits + (size_t)info->block * words;
-    uint64_t* k = kill_bits + (size_t)info->block * words;
-    uint64_t* tk = throw_kill_bits + (size_t)info->block * words;
+    uint64_t* g = gen_bits.value.u + (size_t)info->block * words;
+    uint64_t* k = kill_bits.value.u + (size_t)info->block * words;
+    uint64_t* tk = throw_kill_bits.value.u + (size_t)info->block * words;
     if (gen->virtuals->is_call(info->inst)) {
-      calls[info->block] = true;
+      BitSetInsert(&calls, (size_t)info->block);
       memset(tk, 0, sizeof(uint64_t) * words);
     }
     for (int d = info->first_def; d < info->end_def; d++) {
@@ -834,26 +844,27 @@ static void ComputeLiveness(RA* ra) {
       if (block == NULL) {
         continue;
       }
-      uint64_t* out = ra->live_out + bb * words;
+      uint64_t* out = ra->live_out.value.u + bb * words;
       for (size_t s = 0; s < block->out_edges.length; s++) {
         size_t succ = (size_t)block->out_edges.value.w[s];
         if (succ >= num_blocks) {
           continue;
         }
-        const uint64_t* in = live_in + succ * words;
+        const uint64_t* in = ra->live_in.value.u + succ * words;
         for (size_t w = 0; w < words; w++) {
           out[w] |= in[w];
         }
       }
-      uint64_t* in = live_in + bb * words;
-      const uint64_t* g = gen_bits + bb * words;
-      const uint64_t* k = kill_bits + bb * words;
-      const uint64_t* tk = throw_kill_bits + bb * words;
-      bool throws = calls[bb] && PadLive(ra, block, pad_live);
+      uint64_t* in = ra->live_in.value.u + bb * words;
+      const uint64_t* g = gen_bits.value.u + bb * words;
+      const uint64_t* k = kill_bits.value.u + bb * words;
+      const uint64_t* tk = throw_kill_bits.value.u + bb * words;
+      bool throws =
+          BitSetContains(&calls, bb) && PadLive(ra, block, pad_live.value.u);
       for (size_t w = 0; w < words; w++) {
         uint64_t next = g[w] | (out[w] & ~k[w]);
         if (throws) {
-          next |= pad_live[w] & ~tk[w];
+          next |= pad_live.value.u[w] & ~tk[w];
         }
         if (next != in[w]) {
           in[w] = next;
@@ -862,11 +873,11 @@ static void ComputeLiveness(RA* ra) {
       }
     }
   }
-  free(gen_bits);
-  free(kill_bits);
-  free(throw_kill_bits);
-  free(calls);
-  free(pad_live);
+  VectorDestruct(&gen_bits);
+  VectorDestruct(&kill_bits);
+  VectorDestruct(&throw_kill_bits);
+  BitSetDestruct(&calls);
+  VectorDestruct(&pad_live);
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,45 +1051,53 @@ static void BuildGraph(RA* ra) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
   size_t n = (size_t)NumNodes(ra) - TARGET_RA_FIXED_KEYS;
+  VectorInit(&ra->matrix);
   if (n <= kMaxMatrixNodes) {
-    ra->matrix = calloc(n * (n + 1) / 2 / 64 + 1, sizeof(uint64_t));
+    VectorResize(&ra->matrix, n * (n + 1) / 2 / 64 + 1);
   } else {
     HashSetInit(&ra->edges, n * 4);
   }
 
   size_t words = ra->words;
-  uint64_t* live = malloc(sizeof(uint64_t) * (words + 1));
-  uint64_t* pad_live = malloc(sizeof(uint64_t) * (words + 1));
+  Vector live;
+  Vector pad_live;
   // The values that the instructions after this one, in its block, keep in a
   // register back to here even when spilled.
-  uint64_t* held = calloc(words + 1, sizeof(uint64_t));
+  Vector held;
+  VectorInit(&live);
+  VectorInit(&pad_live);
+  VectorInit(&held);
+  VectorResize(&live, words + 1);
+  VectorResize(&pad_live, words + 1);
+  VectorResize(&held, words + 1);
   int i = NumInsts(ra) - 1;
   for (size_t bb = num_blocks; bb-- > 0;) {
     if (i < 0 || InstAt(ra, i)->block != (int)bb) {
       continue;
     }
-    memcpy(live, ra->live_out + bb * words, sizeof(uint64_t) * words);
-    memset(held, 0, sizeof(uint64_t) * words);
-    bool reaches_pad = PadLive(ra, InstBlock(ra, i), pad_live);
+    memcpy(live.value.u, ra->live_out.value.u + bb * words,
+           sizeof(uint64_t) * words);
+    memset(held.value.u, 0, sizeof(uint64_t) * words);
+    bool reaches_pad = PadLive(ra, InstBlock(ra, i), pad_live.value.u);
     for (; i >= 0 && InstAt(ra, i)->block == (int)bb; i--) {
       const InstInfo* info = InstAt(ra, i);
       bool throws = reaches_pad && gen->virtuals->is_call(info->inst);
       for (size_t w = 0; throws && w < words; w++) {
-        live[w] |= pad_live[w];
+        live.value.u[w] |= pad_live.value.u[w];
       }
-      CountRelief(ra, info, live, held);
+      CountRelief(ra, info, live.value.u, held.value.u);
       if (ra->desc->held_since_previous != NULL) {
-        UpdateHeld(ra, info, held);
+        UpdateHeld(ra, info, held.value.u);
       }
       for (int d = info->first_def; d < info->end_def;) {
         int def = IntAt(&ra->defs, (size_t)d);
         if (IsPrecolored(def)) {
-          d = AddRegisterDefEdges(ra, info, live, d);
+          d = AddRegisterDefEdges(ra, info, live.value.u, d);
           continue;
         }
         bool grouped = InGroup(info, def);
         for (size_t w = 0; w < words; w++) {
-          uint64_t bits = live[w];
+          uint64_t bits = live.value.u[w];
           while (bits != 0) {
             int l = (int)(w * 64) + __builtin_ctzll(bits);
             bits &= bits - 1;
@@ -1100,19 +1119,19 @@ static void BuildGraph(RA* ra) {
         }
       }
       for (int d = info->first_def; d < info->end_def; d++) {
-        ClearBit(live, IntAt(&ra->defs, (size_t)d));
+        ClearBit(live.value.u, IntAt(&ra->defs, (size_t)d));
       }
       for (size_t w = 0; throws && w < words; w++) {
-        live[w] |= pad_live[w];
+        live.value.u[w] |= pad_live.value.u[w];
       }
       for (int u = info->first_use; u < info->end_use; u++) {
-        SetBit(live, IntAt(&ra->uses, (size_t)u));
+        SetBit(live.value.u, IntAt(&ra->uses, (size_t)u));
       }
     }
   }
-  free(live);
-  free(pad_live);
-  free(held);
+  VectorDestruct(&live);
+  VectorDestruct(&pad_live);
+  VectorDestruct(&held);
 
   int keys[kMaxKeys];
   for (int v = TARGET_RA_FIXED_KEYS; v < NumNodes(ra); v++) {
@@ -1769,14 +1788,10 @@ static void FreeRound(RA* ra) {
   FreeNodes(ra);
   VectorDestruct(&ra->uses);
   VectorDestruct(&ra->defs);
-  free(ra->live_in);
-  ra->live_in = NULL;
-  free(ra->live_out);
-  ra->live_out = NULL;
-  free(ra->pads);
-  ra->pads = NULL;
-  free(ra->matrix);
-  ra->matrix = NULL;
+  VectorDestruct(&ra->live_in);
+  VectorDestruct(&ra->live_out);
+  BitSetDestruct(&ra->pads);
+  VectorDestruct(&ra->matrix);
   HashSetDestruct(&ra->edges);
   ChunkFree(&ra->moves);
   VectorDestruct(&ra->simplify_list);
@@ -1844,13 +1859,13 @@ static TargetBasicBlock* EdgeBlock(RA* ra, const Vector* edges, size_t i) {
 
 // How many of |block|'s predecessors are on the fast path.  |forward| is set
 // when every edge into and out of |block| runs forward in block order.
-static size_t FastPreds(RA* ra, TargetBasicBlock* block, const bool* fast,
+static size_t FastPreds(RA* ra, TargetBasicBlock* block, BitSet* fast,
                         bool* forward) {
   size_t n = 0;
   *forward = true;
   for (size_t i = 0; i < block->in_edges.length; i++) {
     TargetBasicBlock* pred = EdgeBlock(ra, &block->in_edges, i);
-    n += pred != NULL && fast[pred->block_id];
+    n += pred != NULL && BitSetContains(fast, pred->block_id);
     *forward = *forward && pred != NULL && pred->block_id < block->block_id;
   }
   for (size_t i = 0; i < block->out_edges.length; i++) {
@@ -1886,47 +1901,57 @@ static bool IsJumpTableEntryBlock(TargetGenerator* gen,
 // block whose predecessors all lie on it, then short call-free blocks it
 // shares with the slow path.  Returns whether splitting can help, which needs
 // a fast block that returns and a slow block that calls.
-static bool FindFastPath(RA* ra, bool* fast) {
+static bool FindFastPath(RA* ra, BitSet* fast) {
   TargetGenerator* gen = ra->gen;
   size_t num_blocks = gen->basic_blocks.length;
-  bool* calls = calloc(num_blocks, sizeof(bool));
-  bool* returns = calloc(num_blocks, sizeof(bool));
-  int* sizes = calloc(num_blocks, sizeof(int));
+  BitSet calls;
+  BitSet returns;
+  Vector sizes;
+  BitSetInit(&calls);
+  BitSetInit(&returns);
+  VectorInit(&sizes);
+  VectorResize(&sizes, num_blocks);
   for (size_t b = 0; b < num_blocks; b++) {
     TargetBasicBlock* block = BlockAt(gen, b);
     for (TargetInstruction* inst = block == NULL ? NULL : block->code;
          inst != NULL; inst = NextInBlock(block, inst)) {
-      calls[b] = calls[b] || gen->virtuals->is_call(inst);
-      returns[b] = returns[b] || gen->virtuals->is_return(inst);
-      sizes[b] += !TargetIsDebugRangeLabel(inst);
+      if (gen->virtuals->is_call(inst)) {
+        BitSetInsert(&calls, b);
+      }
+      if (gen->virtuals->is_return(inst)) {
+        BitSetInsert(&returns, b);
+      }
+      sizes.value.w[b] += !TargetIsDebugRangeLabel(inst);
     }
   }
   bool useful = false;
   size_t entry = gen->entry_block->block_id;
-  if (entry < num_blocks && BlockAt(gen, entry) != NULL && !calls[entry]) {
-    fast[entry] = true;
+  if (entry < num_blocks && BlockAt(gen, entry) != NULL &&
+      !BitSetContains(&calls, entry)) {
+    BitSetInsert(fast, entry);
     int joined = 0;
     for (;;) {
       bool grew = false;
       for (size_t b = 0; b < num_blocks; b++) {
         TargetBasicBlock* block = BlockAt(gen, b);
         bool forward;
-        if (block != NULL && !fast[b] && !calls[b] &&
-            block->in_edges.length > 0 &&
+        if (block != NULL && !BitSetContains(fast, b) &&
+            !BitSetContains(&calls, b) && block->in_edges.length > 0 &&
             FastPreds(ra, block, fast, &forward) == block->in_edges.length) {
-          fast[b] = true;
+          BitSetInsert(fast, b);
           grew = true;
         }
       }
       for (size_t b = 0; b < num_blocks && !grew; b++) {
         TargetBasicBlock* block = BlockAt(gen, b);
         bool forward;
-        if (block != NULL && !fast[b] && !calls[b] &&
-            sizes[b] <= kMaxJoinedSize &&
-            joined + sizes[b] <= kMaxJoinedTotal &&
+        int bsize = (int)sizes.value.w[b];
+        if (block != NULL && !BitSetContains(fast, b) &&
+            !BitSetContains(&calls, b) && bsize <= kMaxJoinedSize &&
+            joined + bsize <= kMaxJoinedTotal &&
             FastPreds(ra, block, fast, &forward) > 0 && forward) {
-          fast[b] = true;
-          joined += sizes[b];
+          BitSetInsert(fast, b);
+          joined += bsize;
           grew = true;
         }
       }
@@ -1936,29 +1961,33 @@ static bool FindFastPath(RA* ra, bool* fast) {
     }
     // Prune blocks in |fast| that cannot reach a fast return while staying on
     // |fast| (for example LICM preheaders of call-containing slow loops).
-    bool* can_return = calloc(num_blocks, sizeof(bool));
-    size_t* queue = malloc((num_blocks + 1) * sizeof(size_t));
+    BitSet can_return;
+    BitSetInit(&can_return);
+    Vector queue;
+    VectorInit(&queue);
     size_t head = 0;
-    size_t tail = 0;
     for (size_t b = 0; b < num_blocks; b++) {
-      if (fast[b] && returns[b] && BlockAt(gen, b) != NULL) {
-        can_return[b] = true;
-        queue[tail++] = b;
+      if (BitSetContains(fast, b) && BitSetContains(&returns, b) &&
+          BlockAt(gen, b) != NULL) {
+        BitSetInsert(&can_return, b);
+        VectorAppend(&queue, (void*)(uintptr_t)b);
       }
     }
-    while (head < tail) {
-      TargetBasicBlock* cur = BlockAt(gen, queue[head++]);
+    while (head < queue.length) {
+      TargetBasicBlock* cur = BlockAt(gen, queue.value.u[head++]);
       for (size_t i = 0; cur != NULL && i < cur->in_edges.length; i++) {
         TargetBasicBlock* pred = EdgeBlock(ra, &cur->in_edges, i);
-        if (pred != NULL && fast[pred->block_id] &&
-            !can_return[pred->block_id]) {
-          can_return[pred->block_id] = true;
-          queue[tail++] = pred->block_id;
+        if (pred != NULL && BitSetContains(fast, pred->block_id) &&
+            !BitSetContains(&can_return, pred->block_id)) {
+          BitSetInsert(&can_return, pred->block_id);
+          VectorAppend(&queue, (void*)(uintptr_t)pred->block_id);
         }
       }
     }
     for (size_t b = 0; b < num_blocks; b++) {
-      fast[b] = fast[b] && can_return[b];
+      if (BitSetContains(fast, b) && !BitSetContains(&can_return, b)) {
+        BitSetRemove(fast, b);
+      }
     }
     // Keep every hardware jump-table entry block on the same side as its
     // table-jump dispatch block so any fast-to-slow transition happens on the
@@ -1971,35 +2000,36 @@ static bool FindFastPath(RA* ra, bool* fast) {
       }
       for (size_t i = 0; i < block->in_edges.length; i++) {
         TargetBasicBlock* pred = EdgeBlock(ra, &block->in_edges, i);
-        if (IsTableJumpBlock(pred) && fast[pred->block_id]) {
-          fast[b] = true;
+        if (IsTableJumpBlock(pred) && BitSetContains(fast, pred->block_id)) {
+          BitSetInsert(fast, b);
           break;
         }
       }
     }
-    free(can_return);
-    free(queue);
+    BitSetDestruct(&can_return);
+    VectorDestruct(&queue);
 
-    bool fast_returns = fast[entry];
+    bool fast_returns = BitSetContains(fast, entry);
     bool slow_calls = false;
     for (size_t b = 0; b < num_blocks; b++) {
       if (BlockAt(gen, b) != NULL) {
-        slow_calls = slow_calls || (!fast[b] && calls[b]);
+        slow_calls = slow_calls ||
+                     (!BitSetContains(fast, b) && BitSetContains(&calls, b));
       }
     }
     useful = fast_returns && slow_calls;
   }
-  free(calls);
-  free(returns);
-  free(sizes);
+  BitSetDestruct(&calls);
+  BitSetDestruct(&returns);
+  VectorDestruct(&sizes);
   return useful;
 }
 
-static bool AllEdgesOnSide(RA* ra, const Vector* edges, const bool* fast,
+static bool AllEdgesOnSide(RA* ra, const Vector* edges, BitSet* fast,
                            bool side) {
   for (size_t i = 0; i < edges->length; i++) {
     TargetBasicBlock* block = EdgeBlock(ra, edges, i);
-    if (block == NULL || fast[block->block_id] != side) {
+    if (block == NULL || BitSetContains(fast, block->block_id) != side) {
       return false;
     }
   }
@@ -2066,14 +2096,16 @@ static TargetInstruction* PlaceNear(RA* ra, TargetBasicBlock* from) {
   return NULL;
 }
 
-static Placement PlaceCopies(RA* ra, const bool* fast, TargetBasicBlock* from,
+static Placement PlaceCopies(RA* ra, BitSet* fast, TargetBasicBlock* from,
                              TargetBasicBlock* to) {
   if (!IsJumpTableEntryBlock(ra->gen, to) &&
-      AllEdgesOnSide(ra, &to->in_edges, fast, fast[from->block_id])) {
+      AllEdgesOnSide(ra, &to->in_edges, fast,
+                     BitSetContains(fast, from->block_id))) {
     return kPlaceAtStart;
   }
   if (!IsTableJumpBlock(from) && !IsJumpTableEntryBlock(ra->gen, from) &&
-      AllEdgesOnSide(ra, &from->out_edges, fast, fast[to->block_id])) {
+      AllEdgesOnSide(ra, &from->out_edges, fast,
+                     BitSetContains(fast, to->block_id))) {
     return kPlaceAtEnd;
   }
   bool falls = FallthroughBlock(ra, from) == to;
@@ -2153,20 +2185,23 @@ static void EmitAtEnd(RA* ra, TargetBasicBlock* block,
 }
 
 // The name |inst| has on one side of a split, or NULL if it is not split.
-static TargetInstruction* SplitName(RA* ra, const SplitNames* names,
-                                    int num_nodes, TargetInstruction* inst,
-                                    bool fast) {
+static TargetInstruction* SplitName(RA* ra, const Vector* names, int num_nodes,
+                                    TargetInstruction* inst, bool fast) {
   TargetRAKind kind = ra->info->kind(inst);
   int n = kind == kTargetRAValue      ? ValueNode(ra, inst)
           : kind == kTargetRALocation ? LocationNode(ra, inst)
                                       : kNoNode;
-  if (n < TARGET_RA_FIXED_KEYS || n >= num_nodes || names[n].other == NULL) {
+  if (n < TARGET_RA_FIXED_KEYS || n >= num_nodes) {
     return NULL;
   }
-  return fast == names[n].fast_home ? names[n].home : names[n].other;
+  const SplitNames* entry = names->value.p[n];
+  if (entry == NULL || entry->other == NULL) {
+    return NULL;
+  }
+  return fast == entry->fast_home ? entry->home : entry->other;
 }
 
-static void RenameReads(RA* ra, const SplitNames* names, int num_nodes,
+static void RenameReads(RA* ra, const Vector* names, int num_nodes,
                         TargetInstruction* holder, bool fast, int depth) {
   for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
     TargetInstruction* read = holder->operand[op];
@@ -2188,18 +2223,19 @@ static void RenameReads(RA* ra, const SplitNames* names, int num_nodes,
 
 // Copies every split node in |live| from its name on one side to its name on
 // the other, at the start or the end of |block|.
-static void EmitSplitCopies(RA* ra, const SplitNames* names, int num_nodes,
+static void EmitSplitCopies(RA* ra, const Vector* names, int num_nodes,
                             const uint64_t* live, bool from_fast,
                             TargetBasicBlock* block, bool at_start) {
   const TargetRegAllocDesc* desc = ra->desc;
   for (int n = TARGET_RA_FIXED_KEYS; n < num_nodes; n++) {
+    const SplitNames* entry = names->value.p[n];
     if ((live[n / 64] & (UINT64_C(1) << (n % 64))) == 0 ||
-        names[n].other == NULL) {
+        entry == NULL || entry->other == NULL) {
       continue;
     }
-    bool home_first = from_fast == names[n].fast_home;
-    TargetInstruction* from = home_first ? names[n].home : names[n].other;
-    TargetInstruction* to = home_first ? names[n].other : names[n].home;
+    bool home_first = from_fast == entry->fast_home;
+    TargetInstruction* from = home_first ? entry->home : entry->other;
+    TargetInstruction* to = home_first ? entry->other : entry->home;
     TargetInstruction* copy = desc->create_copy(desc->ctx, from, to);
     GetSlot(ra, copy)->split_copy = true;
     if (at_start) {
@@ -2211,38 +2247,42 @@ static void EmitSplitCopies(RA* ra, const SplitNames* names, int num_nodes,
 }
 
 // Picks the nodes to split from the edges between the two paths, and where
-// their copies go.  Returns the number of crossing edges, or 0 when there is
-// nothing to split or a copy has nowhere to go.
-static size_t PlanSplit(RA* ra, const bool* fast, uint64_t* split,
-                        CrossingEdge* crossing) {
+// their copies go.  Leaves |crossing| empty when there is nothing to split or
+// a copy has nowhere to go.
+static void PlanSplit(RA* ra, BitSet* fast, BitSet* split, Vector* crossing) {
   TargetGenerator* gen = ra->gen;
   size_t words = ra->words;
-  size_t num_crossing = 0;
   bool any = false;
   for (size_t b = 0; b < gen->basic_blocks.length; b++) {
     TargetBasicBlock* from = BlockAt(gen, b);
     for (size_t i = 0; from != NULL && i < from->out_edges.length; i++) {
       TargetBasicBlock* to = EdgeBlock(ra, &from->out_edges, i);
-      if (to == NULL || fast[b] == fast[to->block_id]) {
+      if (to == NULL ||
+          BitSetContains(fast, b) == BitSetContains(fast, to->block_id)) {
         continue;
       }
-      const uint64_t* live = ra->live_in + to->block_id * words;
+      const uint64_t* live = ra->live_in.value.u + to->block_id * words;
       bool live_across = false;
       for (int n = TARGET_RA_FIXED_KEYS; n < NumNodes(ra); n++) {
         if ((live[n / 64] & (UINT64_C(1) << (n % 64))) != 0) {
-          split[n / 64] |= UINT64_C(1) << (n % 64);
+          BitSetInsert(split, (size_t)n);
           live_across = true;
         }
       }
       Placement placement = PlaceCopies(ra, fast, from, to);
       if (live_across && placement == kPlaceNowhere) {
-        return 0;
+        VectorClearWithContents(crossing, NULL, /*free_element=*/true);
+        return;
       }
       any = any || live_across;
-      crossing[num_crossing++] = (CrossingEdge){from, to, placement};
+      CrossingEdge* edge = malloc(sizeof(CrossingEdge));
+      *edge = (CrossingEdge){from, to, placement};
+      VectorAppend(crossing, edge);
     }
   }
-  return any ? num_crossing : 0;
+  if (!any) {
+    VectorClearWithContents(crossing, NULL, /*free_element=*/true);
+  }
 }
 
 // Returns whether it left the analysis BuildRound would make, having split
@@ -2255,36 +2295,38 @@ static bool SplitAtFastPath(RA* ra) {
       gen->exception_edges.length != 0) {
     return false;
   }
-  size_t num_blocks = gen->basic_blocks.length;
-  bool* fast = calloc(num_blocks, sizeof(bool));
-  if (!FindFastPath(ra, fast)) {
-    free(fast);
+  BitSet fast;
+  BitSetInit(&fast);
+  if (!FindFastPath(ra, &fast)) {
+    BitSetDestruct(&fast);
     return false;
   }
   CollectInstructions(ra);
   BuildNodes(ra);
   ComputeLiveness(ra);
 
-  size_t num_edges = 0;
-  for (size_t b = 0; b < num_blocks; b++) {
-    TargetBasicBlock* block = BlockAt(gen, b);
-    num_edges += block == NULL ? 0 : block->out_edges.length;
-  }
-  uint64_t* split = calloc(ra->words + 1, sizeof(uint64_t));
-  CrossingEdge* crossing = calloc(num_edges + 1, sizeof(CrossingEdge));
-  size_t num_crossing = PlanSplit(ra, fast, split, crossing);
+  BitSet split;
+  BitSetInit(&split);
+  Vector crossing;
+  VectorInit(&crossing);
+  PlanSplit(ra, &fast, &split, &crossing);
+  size_t num_crossing = crossing.length;
   int num_nodes = NumNodes(ra);
-  SplitNames* names = calloc((size_t)num_nodes, sizeof(SplitNames));
+  Vector names;
+  VectorInit(&names);
+  VectorResize(&names, (size_t)num_nodes);
   // Name both sides.  A value's reads all move to locations, so that the
   // side it is made on can be written by copies too.
   for (int n = TARGET_RA_FIXED_KEYS; num_crossing > 0 && n < num_nodes; n++) {
-    if ((split[n / 64] & (UINT64_C(1) << (n % 64))) == 0) {
+    if (!BitSetContains(&split, (size_t)n)) {
       continue;
     }
     TargetInstruction* inst = NodeAt(ra, n)->inst;
-    SplitNames* name = &names[n];
+    SplitNames* name = calloc(1, sizeof(SplitNames));
+    names.value.p[n] = name;
     if (ra->info->kind(inst) == kTargetRAValue) {
-      name->fast_home = fast[InstAt(ra, Position(ra, inst))->block];
+      name->fast_home =
+          BitSetContains(&fast, (size_t)InstAt(ra, Position(ra, inst))->block);
       name->home = desc->create_location(desc->ctx, inst);
     } else {
       name->fast_home = true;
@@ -2298,11 +2340,11 @@ static bool SplitAtFastPath(RA* ra) {
 
   for (int i = 0; num_crossing > 0 && i < NumInsts(ra); i++) {
     TargetInstruction* inst = InstOf(ra, i);
-    bool side = fast[InstAt(ra, i)->block];
-    RenameReads(ra, names, num_nodes, inst, side, 0);
+    bool side = BitSetContains(&fast, (size_t)InstAt(ra, i)->block);
+    RenameReads(ra, &names, num_nodes, inst, side, 0);
     if (inst->dest != NULL) {
       TargetInstruction* dest =
-          SplitName(ra, names, num_nodes, inst->dest, side);
+          SplitName(ra, &names, num_nodes, inst->dest, side);
       if (dest != NULL) {
         inst->dest = dest;
       }
@@ -2310,53 +2352,59 @@ static bool SplitAtFastPath(RA* ra) {
   }
   for (int n = TARGET_RA_FIXED_KEYS; num_crossing > 0 && n < num_nodes; n++) {
     TargetInstruction* value = NodeAt(ra, n)->inst;
-    if (names[n].other == NULL || names[n].home == value) {
+    const SplitNames* entry = names.value.p[n];
+    if (entry == NULL || entry->other == NULL || entry->home == value) {
       continue;
     }
-    TargetInstruction* copy = desc->create_copy(desc->ctx, value, names[n].home);
+    TargetInstruction* copy = desc->create_copy(desc->ctx, value, entry->home);
     TargetBasicBlockEmitAfter(gen, InstBlock(ra, Position(ra, value)), copy,
                               value);
     GetSlot(ra, copy)->transparent = true;
   }
 
-  bool* start_done = calloc(num_blocks, sizeof(bool));
-  bool* end_done = calloc(num_blocks, sizeof(bool));
-  uint64_t* live = calloc(ra->words + 1, sizeof(uint64_t));
+  BitSet start_done;
+  BitSet end_done;
+  Vector live;
+  BitSetInit(&start_done);
+  BitSetInit(&end_done);
+  VectorInit(&live);
+  VectorResize(&live, ra->words + 1);
   for (size_t e = 0; e < num_crossing; e++) {
-    TargetBasicBlock* from = crossing[e].from;
-    TargetBasicBlock* to = crossing[e].to;
-    bool from_fast = fast[from->block_id];
-    const uint64_t* live_in = ra->live_in + to->block_id * ra->words;
-    switch (crossing[e].placement) {
+    const CrossingEdge* edge_info = crossing.value.p[e];
+    TargetBasicBlock* from = edge_info->from;
+    TargetBasicBlock* to = edge_info->to;
+    bool from_fast = BitSetContains(&fast, from->block_id);
+    const uint64_t* live_in = ra->live_in.value.u + to->block_id * ra->words;
+    switch (edge_info->placement) {
       case kPlaceAtStart:
-        if (!start_done[to->block_id]) {
-          start_done[to->block_id] = true;
-          EmitSplitCopies(ra, names, num_nodes, live_in, from_fast, to,
+        if (!BitSetContains(&start_done, to->block_id)) {
+          BitSetInsert(&start_done, to->block_id);
+          EmitSplitCopies(ra, &names, num_nodes, live_in, from_fast, to,
                           /*at_start=*/true);
         }
         break;
       case kPlaceAtEnd:
-        if (!end_done[from->block_id]) {
-          end_done[from->block_id] = true;
+        if (!BitSetContains(&end_done, from->block_id)) {
+          BitSetInsert(&end_done, from->block_id);
           // Successors that take the copies at their start need none here.
-          memset(live, 0, sizeof(uint64_t) * ra->words);
+          memset(live.value.u, 0, sizeof(uint64_t) * ra->words);
           for (size_t c = 0; c < num_crossing; c++) {
-            if (crossing[c].from != from ||
-                crossing[c].placement != kPlaceAtEnd) {
+            const CrossingEdge* other = crossing.value.p[c];
+            if (other->from != from || other->placement != kPlaceAtEnd) {
               continue;
             }
-            size_t succ = crossing[c].to->block_id;
+            size_t succ = other->to->block_id;
             for (size_t w = 0; w < ra->words; w++) {
-              live[w] |= ra->live_in[succ * ra->words + w];
+              live.value.u[w] |= ra->live_in.value.u[succ * ra->words + w];
             }
           }
-          EmitSplitCopies(ra, names, num_nodes, live, from_fast, from,
+          EmitSplitCopies(ra, &names, num_nodes, live.value.u, from_fast, from,
                           /*at_start=*/false);
         }
         break;
       case kPlaceOnEdge: {
         TargetBasicBlock* edge = SplitEdge(ra, from, to);
-        EmitSplitCopies(ra, names, num_nodes, live_in, from_fast, edge,
+        EmitSplitCopies(ra, &names, num_nodes, live_in, from_fast, edge,
                         /*at_start=*/false);
         break;
       }
@@ -2364,13 +2412,13 @@ static bool SplitAtFastPath(RA* ra) {
         break;
     }
   }
-  free(live);
-  free(start_done);
-  free(end_done);
-  free(names);
-  free(crossing);
-  free(split);
-  free(fast);
+  VectorDestruct(&live);
+  BitSetDestruct(&start_done);
+  BitSetDestruct(&end_done);
+  VectorDestructWithContents(&names, NULL, /*free_element=*/true);
+  VectorDestructWithContents(&crossing, NULL, /*free_element=*/true);
+  BitSetDestruct(&split);
+  BitSetDestruct(&fast);
   if (num_crossing > 0) {
     ra->changed_ir = true;
     FreeRound(ra);

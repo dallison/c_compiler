@@ -7,6 +7,7 @@
 //
 
 #include "statement_semantics.h"
+#include "bitset.h"
 #include "contracts.h"
 #include "expansion_semantics.h"
 #include "reflection_semantics.h"
@@ -2208,6 +2209,9 @@ static int CompareEnumSwitchValues(const void* a, const void* b) {
 // Index of value in the sorted enum_values, or -1.
 static ptrdiff_t FindEnumSwitchValue(const int64_t* enum_values,
                                      size_t num_values, int64_t value) {
+  if (num_values == 0 || enum_values == NULL) {
+    return -1;
+  }
   const int64_t* found = bsearch(&value, enum_values, num_values,
                                  sizeof(int64_t), CompareEnumSwitchValues);
   return found == NULL ? -1 : found - enum_values;
@@ -2219,21 +2223,25 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   // Enumerators may be negative or sparse (kNegativeInfinity = -1000), so
   // they are looked up by value rather than used as bit indices.
   size_t num_values = info->constants.length;
-  int64_t* enum_values = calloc(num_values + 1, sizeof(int64_t));
-  bool* found_values = calloc(num_values + 1, sizeof(bool));
+  Vector enum_values;
+  VectorInit(&enum_values);
+  VectorReserve(&enum_values, num_values);
+  BitSet found_values;
+  BitSetInit(&found_values);
   for (size_t i = 0; i < num_values; i++) {
     Symbol* ec = info->constants.value.p[i];
-    enum_values[i] = ec->value.ivalue;
+    VectorAppend(&enum_values, (void*)(intptr_t)ec->value.ivalue);
   }
-  qsort(enum_values, num_values, sizeof(int64_t), CompareEnumSwitchValues);
+  VectorSortInts(&enum_values, CompareEnumSwitchValues);
 
   // Go through all the cases and make sure they are in the enum_constants.
   size_t num_cases = node->cases.length;
   for (size_t i = 0; i < num_cases; i++) {
     int64_t case_value = ((CaseLabelASTNode*)(node->cases.value.p[i]))->value;
-    ptrdiff_t index = FindEnumSwitchValue(enum_values, num_values, case_value);
+    ptrdiff_t index =
+        FindEnumSwitchValue(enum_values.value.w, num_values, case_value);
      if (index >= 0) {
-       found_values[index] = true;
+       BitSetInsert(&found_values, (size_t)index);
      } else {
        SemanticWarning(&node->base, "switch",
                        "Case value %" PRId64 " is not valid for enumeration %s",
@@ -2246,8 +2254,8 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   for (size_t i = 0; i < info->constants.length; i++) {
     Symbol* ec = info->constants.value.p[i];
     ptrdiff_t index =
-        FindEnumSwitchValue(enum_values, num_values, ec->value.ivalue);
-    if (index < 0 || !found_values[index]) {
+        FindEnumSwitchValue(enum_values.value.w, num_values, ec->value.ivalue);
+    if (index < 0 || !BitSetContains(&found_values, (size_t)index)) {
       VectorAppend(&missing_constants, ec);
     }
   }
@@ -2288,8 +2296,8 @@ static void AnalyzeEnumSwitch(SwitchStatementASTNode* node, Type control_type) {
   }
   
   VectorDestruct(&missing_constants);
-  free(enum_values);
-  free(found_values);
+  VectorDestruct(&enum_values);
+  BitSetDestruct(&found_values);
 }
   
 static void AnalyzeSwitchStatement(SwitchStatementASTNode* node) {

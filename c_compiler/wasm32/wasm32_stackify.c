@@ -285,16 +285,16 @@ static bool Dominates(Vector* blocks, size_t dominator, size_t block) {
 // Reverse postorder, which puts every block after at least one predecessor
 // and so makes every edge that is not a back edge point forward.
 static void ComputeReversePostorder(Vector* blocks, Vector* order) {
-  size_t count = blocks->length;
-  char* state = calloc(count, 1);  // 0 unvisited, 1 on stack, 2 done.
-  Vector stack;                    // Block index, then successor cursor.
+  BitSet visited;
+  BitSetInit(&visited);
+  Vector stack;  // Block index, then successor cursor.
   VectorInit(&stack);
   Vector postorder;
   VectorInit(&postorder);
 
   VectorAppend(&stack, (void*)(intptr_t)0);
   VectorAppend(&stack, (void*)(intptr_t)0);
-  state[0] = 1;
+  BitSetInsert(&visited, 0);
   while (stack.length > 0) {
     size_t cursor = (size_t)(intptr_t)stack.value.p[stack.length - 1];
     size_t index = (size_t)(intptr_t)stack.value.p[stack.length - 2];
@@ -302,14 +302,13 @@ static void ComputeReversePostorder(Vector* blocks, Vector* order) {
     if (cursor < block->successors.length) {
       stack.value.p[stack.length - 1] = (void*)(intptr_t)(cursor + 1);
       size_t next = (size_t)(intptr_t)block->successors.value.p[cursor];
-      if (state[next] == 0) {
-        state[next] = 1;
+      if (!BitSetContains(&visited, next)) {
+        BitSetInsert(&visited, next);
         VectorAppend(&stack, (void*)(intptr_t)next);
         VectorAppend(&stack, (void*)(intptr_t)0);
       }
       continue;
     }
-    state[index] = 2;
     VectorAppend(&postorder, (void*)(intptr_t)index);
     VectorPop(&stack);
     VectorPop(&stack);
@@ -322,7 +321,7 @@ static void ComputeReversePostorder(Vector* blocks, Vector* order) {
   }
   VectorDestruct(&postorder);
   VectorDestruct(&stack);
-  free(state);
+  BitSetDestruct(&visited);
 }
 
 // The blocks of the natural loop a back edge closes: the header, the latch,
@@ -389,12 +388,12 @@ static bool FindLoops(Vector* blocks, BitSet** loops) {
 // comes first.  Reverse postorder alone does not give that: a loop written
 // with its test at the bottom has the header last, which is why the order
 // the instructions arrived in cannot be used as it stands.
-static void PlaceBlockAndLoop(Vector* order, BitSet** loops, char* placed,
+static void PlaceBlockAndLoop(Vector* order, BitSet** loops, BitSet* placed,
                               size_t index, Vector* result) {
-  if (placed[index]) {
+  if (BitSetContains(placed, index)) {
     return;
   }
-  placed[index] = true;
+  BitSetInsert(placed, index);
   VectorAppend(result, (void*)(intptr_t)index);
   if (loops[index] == NULL) {
     return;
@@ -410,20 +409,21 @@ static void PlaceBlockAndLoop(Vector* order, BitSet** loops, char* placed,
 
 static void OrderBlocks(Vector* blocks, Vector* order, BitSet** loops,
                         Vector* result) {
-  char* placed = calloc(blocks->length, 1);
+  BitSet placed;
+  BitSetInit(&placed);
   for (size_t i = 0; i < order->length; i++) {
-    PlaceBlockAndLoop(order, loops, placed,
+    PlaceBlockAndLoop(order, loops, &placed,
                       (size_t)(intptr_t)order->value.p[i], result);
   }
   // Anything unreachable never made it into the ordering but still has to
   // appear somewhere, because its instructions are still in the list.
   for (size_t i = 0; i < blocks->length; i++) {
-    if (!placed[i]) {
-      placed[i] = true;
+    if (!BitSetContains(&placed, i)) {
+      BitSetInsert(&placed, i);
       VectorAppend(result, (void*)(intptr_t)i);
     }
   }
-  free(placed);
+  BitSetDestruct(&placed);
 }
 
 // Moving blocks apart breaks the fallthroughs between them, so every one has

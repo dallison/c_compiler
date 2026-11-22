@@ -1,5 +1,6 @@
 #include "disassembler_internal.h"
 
+#include "vector.h"
 #include "wasm32_machine.h"
 #include "wasm32_object.h"
 
@@ -602,23 +603,21 @@ bool DAsmDisassembleWasmFile(const char* filename, const DAsmOptions* options,
 
   size_t import_funcs = 0;
   size_t nfuncs = CountImportsAndFuncs(sections, nsec, &import_funcs);
-  char** names = calloc(nfuncs == 0 ? 1 : nfuncs, sizeof(*names));
-  if (names == NULL) {
-    free(bytes);
-    return false;
-  }
+  Vector names;
+  VectorInit(&names);
+  VectorResize(&names, nfuncs == 0 ? 1 : nfuncs);
   for (size_t i = 0; i < nsec; i++) {
     WasmCursor c = {.bytes = sections[i].bytes + sections[i].start,
                     .length = sections[i].length,
                     .pos = 0};
     if (sections[i].id == WASM_SECTION_EXPORT) {
-      CollectExportNames(&c, names, nfuncs);
+      CollectExportNames(&c, (char**)names.value.p, nfuncs);
     } else if (sections[i].id == WASM_SECTION_CUSTOM &&
                sections[i].name != NULL) {
       if (strcmp(sections[i].name, "name") == 0) {
-        CollectNameSection(&c, names, nfuncs);
+        CollectNameSection(&c, (char**)names.value.p, nfuncs);
       } else if (strcmp(sections[i].name, "linking") == 0) {
-        CollectLinkingNames(&c, names, nfuncs, import_funcs);
+        CollectLinkingNames(&c, (char**)names.value.p, nfuncs, import_funcs);
       }
     }
   }
@@ -641,11 +640,10 @@ bool DAsmDisassembleWasmFile(const char* filename, const DAsmOptions* options,
         break;
       }
       size_t func_index = import_funcs + (size_t)fi;
+      const char* func_name =
+          func_index < nfuncs ? (const char*)names.value.p[func_index] : NULL;
       const char* label =
-          func_index < nfuncs && names[func_index] != NULL &&
-                  names[func_index][0] != '\0'
-              ? names[func_index]
-              : NULL;
+          func_name != NULL && func_name[0] != '\0' ? func_name : NULL;
       if (label != NULL) {
         fprintf(fp, "%s:\n", label);
       } else {
@@ -685,10 +683,7 @@ bool DAsmDisassembleWasmFile(const char* filename, const DAsmOptions* options,
   for (size_t i = 0; i < nsec; i++) {
     free(sections[i].name);
   }
-  for (size_t i = 0; i < nfuncs; i++) {
-    free(names[i]);
-  }
-  free(names);
+  VectorDestructWithContents(&names, NULL, /*free_element=*/true);
   free(bytes);
   return true;
 }

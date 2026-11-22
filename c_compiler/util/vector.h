@@ -22,6 +22,7 @@ typedef struct Vector {
   union {
     void** p;       // Pointers.
     int64_t* w;     // 64-bit values.
+    uint64_t* u;    // Unsigned 64-bit values.
   } value;
   size_t length;    // Number of pointers in memory.
   size_t capacity;  // Number of pointers we have space for.
@@ -47,6 +48,10 @@ typedef void (*VectorElementDestructor)(void*);
 // capacity this will have no effect.  Otherwise the capacity is
 // increased to n.
 void VectorReserve(Vector* vec, size_t n);
+
+// Resizes the vector to 'n' elements, zero-initializing any newly added
+// elements.
+void VectorResize(Vector* vec, size_t n);
 
 // Destroys a vector by freeing up the pointer storage, not the memory
 // used by the things being pointed to.

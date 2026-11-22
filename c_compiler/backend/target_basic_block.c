@@ -726,7 +726,7 @@ static void TargetComputeReversePostorder(TargetGenerator* gen,
 
 static TargetBasicBlock* TargetIntersectImmediateDominators(
     TargetBasicBlock* left, TargetBasicBlock* right, TargetBasicBlock** idoms,
-    const size_t* rpo_number) {
+    const uint64_t* rpo_number) {
   while (left != right) {
     while (rpo_number[left->block_id] > rpo_number[right->block_id]) {
       left = idoms[left->block_id];
@@ -752,18 +752,22 @@ static void CalculateDominators(TargetGenerator* gen) {
   BitSetInit(&reachable);
   TargetComputeReversePostorder(gen, &postorder, &reachable);
 
-  size_t* rpo_number = malloc(num_blocks * sizeof(*rpo_number));
-  TargetBasicBlock** idoms = calloc(num_blocks, sizeof(*idoms));
+  Vector rpo_number;
+  Vector idoms;
+  VectorInit(&rpo_number);
+  VectorInit(&idoms);
+  VectorResize(&rpo_number, num_blocks);
+  VectorResize(&idoms, num_blocks);
   for (size_t i = 0; i < num_blocks; i++) {
-    rpo_number[i] = SIZE_MAX;
+    rpo_number.value.u[i] = UINT64_MAX;
   }
   for (size_t i = 0; i < postorder.length; i++) {
     TargetBlockId id = postorder.value.w[postorder.length - i - 1];
-    rpo_number[id] = i;
+    rpo_number.value.u[id] = i;
   }
 
   TargetBlockId entry_id = gen->entry_block->block_id;
-  idoms[entry_id] = gen->entry_block;
+  idoms.value.p[entry_id] = gen->entry_block;
   bool changed = true;
   while (changed) {
     changed = false;
@@ -773,7 +777,7 @@ static void CalculateDominators(TargetGenerator* gen) {
       TargetBasicBlock* new_idom = NULL;
       for (size_t j = 0; j < block->in_edges.length; j++) {
         TargetBlockId predecessor_id = block->in_edges.value.w[j];
-        if (idoms[predecessor_id] == NULL) {
+        if (idoms.value.p[predecessor_id] == NULL) {
           continue;
         }
         TargetBasicBlock* predecessor =
@@ -782,10 +786,11 @@ static void CalculateDominators(TargetGenerator* gen) {
             new_idom == NULL
                 ? predecessor
                 : TargetIntersectImmediateDominators(
-                      new_idom, predecessor, idoms, rpo_number);
+                      new_idom, predecessor,
+                      (TargetBasicBlock**)idoms.value.p, rpo_number.value.u);
       }
-      if (new_idom != NULL && idoms[id] != new_idom) {
-        idoms[id] = new_idom;
+      if (new_idom != NULL && idoms.value.p[id] != new_idom) {
+        idoms.value.p[id] = new_idom;
         changed = true;
       }
     }
@@ -801,18 +806,18 @@ static void CalculateDominators(TargetGenerator* gen) {
     if (block->is_unreachable) {
       continue;
     }
-    block->idom = i == entry_id ? NULL : idoms[i];
+    block->idom = i == entry_id ? NULL : idoms.value.p[i];
     for (TargetBasicBlock* dominator = block; dominator != NULL;
          dominator = dominator->block_id == entry_id
                          ? NULL
-                         : idoms[dominator->block_id]) {
+                         : idoms.value.p[dominator->block_id]) {
       BitSetInsert(&block->dominators, dominator->block_id);
       block->num_dominators++;
     }
   }
 
-  free(idoms);
-  free(rpo_number);
+  VectorDestruct(&idoms);
+  VectorDestruct(&rpo_number);
   BitSetDestruct(&reachable);
   VectorDestruct(&postorder);
 }
@@ -1130,17 +1135,26 @@ static void AppendLiveValues(Vector* values, BitSet* ids,
 
 static void TargetBuildDataflowLiveness(TargetGenerator* gen) {
   size_t block_count = gen->basic_blocks.length;
-  BitSet* use = calloc(block_count, sizeof(*use));
-  BitSet* def = calloc(block_count, sizeof(*def));
-  BitSet* live_in = calloc(block_count, sizeof(*live_in));
-  BitSet* live_out = calloc(block_count, sizeof(*live_out));
+  Vector use;
+  Vector def;
+  Vector live_in;
+  Vector live_out;
+  VectorInit(&use);
+  VectorInit(&def);
+  VectorInit(&live_in);
+  VectorInit(&live_out);
+  VectorReserve(&use, block_count);
+  VectorReserve(&def, block_count);
+  VectorReserve(&live_in, block_count);
+  VectorReserve(&live_out, block_count);
   for (size_t i = 0; i < block_count; i++) {
-    BitSetInit(&use[i]);
-    BitSetInit(&def[i]);
-    BitSetInit(&live_in[i]);
-    BitSetInit(&live_out[i]);
-    BuildDataflowBlockUseAndDef(
-        gen, gen->basic_blocks.value.p[i], &use[i], &def[i]);
+    BitSet* u = NewBitSet();
+    BitSet* d = NewBitSet();
+    VectorAppend(&use, u);
+    VectorAppend(&def, d);
+    VectorAppend(&live_in, NewBitSet());
+    VectorAppend(&live_out, NewBitSet());
+    BuildDataflowBlockUseAndDef(gen, gen->basic_blocks.value.p[i], u, d);
   }
 
   BitSet new_out;
@@ -1155,13 +1169,14 @@ static void TargetBuildDataflowLiveness(TargetGenerator* gen) {
       BitSetClear(&new_out);
       for (size_t j = 0; j < block->out_edges.length; j++) {
         TargetBlockId successor = block->out_edges.value.w[j];
-        BitSetUnionInPlace(&new_out, &live_in[successor]);
+        BitSetUnionInPlace(&new_out, live_in.value.p[successor]);
       }
-      BuildDataflowLiveIn(&use[i - 1], &def[i - 1], &new_out, &new_in);
-      if (!BitSetEqual(&live_out[i - 1], &new_out) ||
-          !BitSetEqual(&live_in[i - 1], &new_in)) {
-        BitSetCopy(&live_out[i - 1], &new_out);
-        BitSetCopy(&live_in[i - 1], &new_in);
+      BuildDataflowLiveIn(use.value.p[i - 1], def.value.p[i - 1], &new_out,
+                          &new_in);
+      if (!BitSetEqual(live_out.value.p[i - 1], &new_out) ||
+          !BitSetEqual(live_in.value.p[i - 1], &new_in)) {
+        BitSetCopy(live_out.value.p[i - 1], &new_out);
+        BitSetCopy(live_in.value.p[i - 1], &new_in);
         changed = true;
       }
     }
@@ -1187,41 +1202,44 @@ static void TargetBuildDataflowLiveness(TargetGenerator* gen) {
     }
   }
   size_t values_by_id_count = max_id + 1;
-  TargetInstruction** values_by_id =
-      calloc(values_by_id_count, sizeof(*values_by_id));
+  Vector values_by_id;
+  VectorInit(&values_by_id);
+  VectorResize(&values_by_id, values_by_id_count);
   for (size_t i = 0; i < block_count; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
     for (TargetInstruction* inst = block->code; inst != NULL;
          inst = inst == block->end_code ? NULL : TargetNext(inst)) {
       if (TargetValueNeedsLiveness(gen, inst)) {
-        values_by_id[inst->id] = inst;
+        values_by_id.value.p[inst->id] = inst;
       }
       for (size_t j = 0; j < TARGET_MAX_OPERANDS; j++) {
         TargetInstruction* operand = inst->operand[j];
         if (TargetValueNeedsLiveness(gen, operand)) {
-          values_by_id[operand->id] = operand;
+          values_by_id.value.p[operand->id] = operand;
         }
       }
     }
   }
   for (size_t i = 0; i < block_count; i++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[i];
-    BitSetCopy(&block->input_ids, &live_in[i]);
-    BitSetCopy(&block->output_ids, &live_out[i]);
-    AppendLiveValues(&block->inputs, &block->input_ids, values_by_id,
+    BitSetCopy(&block->input_ids, live_in.value.p[i]);
+    BitSetCopy(&block->output_ids, live_out.value.p[i]);
+    AppendLiveValues(&block->inputs, &block->input_ids,
+                     (TargetInstruction**)values_by_id.value.p,
                      values_by_id_count);
-    AppendLiveValues(&block->outputs, &block->output_ids, values_by_id,
+    AppendLiveValues(&block->outputs, &block->output_ids,
+                     (TargetInstruction**)values_by_id.value.p,
                      values_by_id_count);
-    BitSetDestruct(&live_out[i]);
-    BitSetDestruct(&live_in[i]);
-    BitSetDestruct(&def[i]);
-    BitSetDestruct(&use[i]);
   }
-  free(values_by_id);
-  free(live_out);
-  free(live_in);
-  free(def);
-  free(use);
+  VectorDestruct(&values_by_id);
+  VectorDestructWithContents(&live_out, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&live_in, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&def, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
+  VectorDestructWithContents(&use, (VectorElementDestructor)BitSetDestruct,
+                             /*free_element=*/true);
 }
 
 // An unreachable block may still hold a label the exception tables name, such
@@ -1391,8 +1409,9 @@ void TargetRebuildBasicBlocks(TargetGenerator* gen) {
 static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
   Vector work;
   VectorInit(&work);
-  size_t* propagated_inputs =
-      calloc(gen->basic_blocks.length, sizeof(*propagated_inputs));
+  Vector propagated_inputs;
+  VectorInit(&propagated_inputs);
+  VectorResize(&propagated_inputs, gen->basic_blocks.length);
   for (size_t i = 0; i < gen->basic_blocks.length; i++) {
     VectorAppend(&work, gen->basic_blocks.value.p[i]);
   }
@@ -1410,7 +1429,7 @@ static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
       }
     }
     size_t first_input =
-        has_self_edge ? 0 : propagated_inputs[block->block_id];
+        has_self_edge ? 0 : propagated_inputs.value.u[block->block_id];
     size_t input_count = block->inputs.length;
     for (size_t i = 0; i < block->in_edges.length; i++) {
       TargetBasicBlock* pred =
@@ -1445,10 +1464,10 @@ static void PropagateLiveInToPredecessors(TargetGenerator* gen) {
       }
     }
     if (!has_self_edge) {
-      propagated_inputs[block->block_id] = input_count;
+      propagated_inputs.value.u[block->block_id] = input_count;
     }
   }
-  free(propagated_inputs);
+  VectorDestruct(&propagated_inputs);
   VectorDestruct(&work);
 }
 
@@ -1791,23 +1810,25 @@ bool TargetPathUnclobberedBetween(
   if (num_blocks == 0) {
     return false;
   }
-  bool* visited = calloc(num_blocks, sizeof(bool));
-  size_t* queue = malloc(num_blocks * sizeof(size_t));
+  BitSet visited;
+  BitSetInit(&visited);
+  Vector queue;
+  VectorInit(&queue);
   size_t head = 0;
-  size_t tail = 0;
   bool reached_def_block = false;
   bool ok = true;
 
   for (size_t i = 0; i < use->block->in_edges.length; i++) {
     int32_t pred_id = use->block->in_edges.value.w[i];
-    if (pred_id >= 0 && (size_t)pred_id < num_blocks && !visited[pred_id]) {
-      visited[pred_id] = true;
-      queue[tail++] = (size_t)pred_id;
+    if (pred_id >= 0 && (size_t)pred_id < num_blocks &&
+        !BitSetContains(&visited, (size_t)pred_id)) {
+      BitSetInsert(&visited, (size_t)pred_id);
+      VectorAppend(&queue, (void*)(uintptr_t)pred_id);
     }
   }
 
-  while (head < tail) {
-    size_t bid = queue[head++];
+  while (head < queue.length) {
+    size_t bid = queue.value.u[head++];
     TargetBasicBlock* b = gen->basic_blocks.value.p[bid];
     if (b == NULL) {
       continue;
@@ -1847,15 +1868,16 @@ bool TargetPathUnclobberedBetween(
     }
     for (size_t i = 0; i < b->in_edges.length; i++) {
       int32_t pred_id = b->in_edges.value.w[i];
-      if (pred_id >= 0 && (size_t)pred_id < num_blocks && !visited[pred_id]) {
-        visited[pred_id] = true;
-        queue[tail++] = (size_t)pred_id;
+      if (pred_id >= 0 && (size_t)pred_id < num_blocks &&
+          !BitSetContains(&visited, (size_t)pred_id)) {
+        BitSetInsert(&visited, (size_t)pred_id);
+        VectorAppend(&queue, (void*)(uintptr_t)pred_id);
       }
     }
   }
 
 done:
-  free(queue);
-  free(visited);
+  VectorDestruct(&queue);
+  BitSetDestruct(&visited);
   return ok && reached_def_block;
 }

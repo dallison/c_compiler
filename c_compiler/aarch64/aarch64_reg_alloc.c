@@ -283,12 +283,9 @@ static bool HoistRefsValue(TargetInstruction* inst, TargetInstruction* value) {
 // the new block to the predecessor edge lists, so a dominator or edge
 // dataflow still sees the fast path falling into the slow path.  The list
 // order matches emission: fast blocks, then `save`, then the framed body.
-static bool* HoistFramedAtEnd(TargetGenerator* gen) {
+static void HoistFramedAtEnd(TargetGenerator* gen, BitSet* framed) {
   size_t n = gen->basic_blocks.length;
-  bool* framed = calloc(n, sizeof(bool));
-  if (framed == NULL) {
-    return NULL;
-  }
+  BitSetInit(framed);
   bool seen_save = false;
   for (TargetInstruction* inst = TargetFirstInstruction(gen); inst != NULL;
        inst = TargetNext(inst)) {
@@ -300,21 +297,25 @@ static bool* HoistFramedAtEnd(TargetGenerator* gen) {
     }
     size_t id = inst->block->block_id;
     if (id < n && gen->basic_blocks.value.p[id] == inst->block) {
-      framed[id] = true;
+      BitSetInsert(framed, id);
     }
   }
-  return framed;
 }
 
 typedef struct {
   int header;
   int depth;
-  int nlatches;
-  int nentries;
-  int* latches;
-  int* entries;
+  Vector latches;
+  Vector entries;
   BitSet blocks;
 } HoistLoop;
+
+static void HoistLoopDestruct(void* ptr) {
+  HoistLoop* loop = ptr;
+  VectorDestruct(&loop->latches);
+  VectorDestruct(&loop->entries);
+  BitSetDestruct(&loop->blocks);
+}
 
 typedef struct {
   TargetInstruction* spill;
@@ -328,11 +329,12 @@ typedef struct {
 
 static bool HoistDominatesLatches(TargetGenerator* gen, TargetBasicBlock* block,
                                   HoistLoop* loop) {
-  if (block == NULL || loop->nlatches <= 0) {
+  if (block == NULL || loop->latches.length == 0) {
     return false;
   }
-  for (int i = 0; i < loop->nlatches; i++) {
-    TargetBasicBlock* latch = gen->basic_blocks.value.p[loop->latches[i]];
+  for (size_t i = 0; i < loop->latches.length; i++) {
+    TargetBasicBlock* latch =
+        gen->basic_blocks.value.p[loop->latches.value.w[i]];
     if (latch == NULL ||
         !BitSetContains(&latch->dominators, block->block_id)) {
       return false;
@@ -341,13 +343,15 @@ static bool HoistDominatesLatches(TargetGenerator* gen, TargetBasicBlock* block,
   return true;
 }
 
-static uint64_t HoistLiveAtInsert(TargetBasicBlock* pred, uint64_t* live_out,
-                                  uint64_t* extra_live) {
+static uint64_t HoistLiveAtInsert(TargetBasicBlock* pred,
+                                  const Vector* live_out,
+                                  const Vector* extra_live) {
   uint64_t live = 0;
   if (pred->block_id < 0) {
     return ~UINT64_C(0);
   }
-  live = live_out[pred->block_id] | extra_live[pred->block_id];
+  live = live_out->value.u[pred->block_id] |
+         extra_live->value.u[pred->block_id];
   if (pred->end_code != NULL && HoistIsBranch(pred->end_code)) {
     uint64_t uses = 0;
     uint64_t defs = 0;
@@ -358,12 +362,12 @@ static uint64_t HoistLiveAtInsert(TargetBasicBlock* pred, uint64_t* live_out,
 }
 
 static bool HoistEntriesReady(TargetGenerator* gen, HoistLoop* loop,
-                              bool need_frame, const bool* framed) {
-  if (loop->nentries <= 0) {
+                              bool need_frame, BitSet* framed) {
+  if (loop->entries.length == 0) {
     return false;
   }
-  for (int i = 0; i < loop->nentries; i++) {
-    size_t pred_id = (size_t)loop->entries[i];
+  for (size_t i = 0; i < loop->entries.length; i++) {
+    size_t pred_id = (size_t)loop->entries.value.w[i];
     TargetBasicBlock* pred = gen->basic_blocks.value.p[pred_id];
     if (pred == NULL || pred->code == NULL || pred->end_code == NULL) {
       return false;
@@ -374,7 +378,7 @@ static bool HoistEntriesReady(TargetGenerator* gen, HoistLoop* loop,
         return false;
       }
     }
-    if (need_frame && (framed == NULL || !framed[pred_id])) {
+    if (need_frame && !BitSetContains(framed, pred_id)) {
       return false;
     }
   }
@@ -413,21 +417,23 @@ static TargetInstruction* HoistMakeImmediate(AARCH64RegisterAllocator* allocator
 }
 
 static void HoistOneGroup(AARCH64RegisterAllocator* allocator, HoistLoop* loop,
-                          HoistGroup* group, int reg, uint64_t* extra_live) {
+                          HoistGroup* group, int reg, Vector* extra_live) {
   TargetGenerator* gen = &allocator->g->base;
-  TargetBasicBlock* first_pred = gen->basic_blocks.value.p[loop->entries[0]];
+  TargetBasicBlock* first_pred =
+      gen->basic_blocks.value.p[loop->entries.value.w[0]];
   TargetInstruction* primary =
       group->is_imm ? HoistMakeImmediate(allocator, group, reg)
                     : HoistMakeReload(allocator, group->spill, reg, group->size);
   HoistInsert(gen, first_pred, primary);
-  extra_live[first_pred->block_id] |= UINT64_C(1) << reg;
-  for (int e = 1; e < loop->nentries; e++) {
-    TargetBasicBlock* pred = gen->basic_blocks.value.p[loop->entries[e]];
+  extra_live->value.u[first_pred->block_id] |= UINT64_C(1) << reg;
+  for (size_t e = 1; e < loop->entries.length; e++) {
+    TargetBasicBlock* pred =
+        gen->basic_blocks.value.p[loop->entries.value.w[e]];
     TargetInstruction* copy =
         group->is_imm ? HoistMakeImmediate(allocator, group, reg)
                       : HoistMakeReload(allocator, group->spill, reg, group->size);
     HoistInsert(gen, pred, copy);
-    extra_live[pred->block_id] |= UINT64_C(1) << reg;
+    extra_live->value.u[pred->block_id] |= UINT64_C(1) << reg;
   }
   for (int m = 0; m < group->nmembers; m++) {
     TargetInstruction* old = group->members[m];
@@ -531,9 +537,9 @@ static int HoistGroupWeight(const HoistGroup* group) {
 }
 
 static void HoistGroupsInLoop(AARCH64RegisterAllocator* allocator,
-                              HoistLoop* loop, uint64_t* live_in,
-                              uint64_t* live_out, uint64_t* extra_live,
-                              const bool* framed) {
+                              HoistLoop* loop, const Vector* live_in,
+                              const Vector* live_out, Vector* extra_live,
+                              BitSet* framed) {
   TargetGenerator* gen = &allocator->g->base;
   if (HoistLoopHasSideEffect(gen, &loop->blocks)) {
     return;
@@ -682,9 +688,10 @@ static void HoistGroupsInLoop(AARCH64RegisterAllocator* allocator,
     BitSetIteratorNext(&it);
   }
 
-  uint64_t blocked = used | live_in[loop->header];
-  for (int e = 0; e < loop->nentries; e++) {
-    TargetBasicBlock* pred = gen->basic_blocks.value.p[loop->entries[e]];
+  uint64_t blocked = used | live_in->value.u[loop->header];
+  for (size_t e = 0; e < loop->entries.length; e++) {
+    TargetBasicBlock* pred =
+        gen->basic_blocks.value.p[loop->entries.value.w[e]];
     blocked |= HoistLiveAtInsert(pred, live_out, extra_live);
   }
   // Heaviest groups first so a scarce register covers the hottest reload.
@@ -711,9 +718,12 @@ static void HoistGroupsInLoop(AARCH64RegisterAllocator* allocator,
 }
 
 static int HoistLoopDeeper(const void* lhs, const void* rhs) {
-  const HoistLoop* a = lhs;
-  const HoistLoop* b = rhs;
-  return b->depth - a->depth;
+  const HoistLoop* a = *(HoistLoop* const*)lhs;
+  const HoistLoop* b = *(HoistLoop* const*)rhs;
+  if (b->depth != a->depth) {
+    return b->depth - a->depth;
+  }
+  return a->header - b->header;
 }
 
 static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
@@ -723,15 +733,16 @@ static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
     return;
   }
 
-  uint64_t* live_in = calloc(nblocks, sizeof(uint64_t));
-  uint64_t* live_out = calloc(nblocks, sizeof(uint64_t));
-  uint64_t* extra_live = calloc(nblocks, sizeof(uint64_t));
-  if (live_in == NULL || live_out == NULL || extra_live == NULL) {
-    free(live_in);
-    free(live_out);
-    free(extra_live);
-    return;
-  }
+  Vector live_in;
+  Vector live_out;
+  Vector extra_live;
+  VectorInit(&live_in);
+  VectorInit(&live_out);
+  VectorInit(&extra_live);
+  VectorResize(&live_in, nblocks);
+  VectorResize(&live_out, nblocks);
+  VectorResize(&extra_live, nblocks);
+
   // Live sets only grow, so a full reverse sweep converges.  Poison the
   // result if it does not: hoisting then sees every register as live and
   // leaves the function unchanged.
@@ -747,11 +758,11 @@ static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
         for (size_t e = 0; e < block->out_edges.length; e++) {
           size_t succ = block->out_edges.value.w[e];
           if (succ < nblocks) {
-            out |= live_in[succ];
+            out |= live_in.value.u[succ];
           }
         }
       }
-      live_out[id] = out;
+      live_out.value.u[id] = out;
       uint64_t cur = out;
       if (block != NULL && block->code != NULL && block->end_code != NULL) {
         for (TargetInstruction* inst = block->end_code; inst != NULL;
@@ -765,112 +776,100 @@ static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
           }
         }
       }
-      if (cur != live_in[id]) {
-        live_in[id] = cur;
+      if (cur != live_in.value.u[id]) {
+        live_in.value.u[id] = cur;
         grew = true;
       }
     }
   }
   if (grew) {
     for (size_t i = 0; i < nblocks; i++) {
-      live_in[i] = ~UINT64_C(0);
-      live_out[i] = ~UINT64_C(0);
+      live_in.value.u[i] = ~UINT64_C(0);
+      live_out.value.u[i] = ~UINT64_C(0);
     }
   }
 
-  HoistLoop* loops = calloc(nblocks, sizeof(HoistLoop));
-  int nloops = 0;
-  if (loops != NULL) {
-    for (size_t header_id = 0; header_id < nblocks; header_id++) {
-      TargetBasicBlock* header = gen->basic_blocks.value.p[header_id];
-      if (header == NULL || header->is_unreachable) {
+  Vector loops;
+  VectorInit(&loops);
+  Vector work;
+  VectorInit(&work);
+  for (size_t header_id = 0; header_id < nblocks; header_id++) {
+    TargetBasicBlock* header = gen->basic_blocks.value.p[header_id];
+    if (header == NULL || header->is_unreachable) {
+      continue;
+    }
+    int nlatch = 0;
+    for (size_t i = 0; i < header->in_edges.length; i++) {
+      size_t pred = header->in_edges.value.w[i];
+      TargetBasicBlock* latch = gen->basic_blocks.value.p[pred];
+      if (latch != NULL &&
+          BitSetContains(&latch->dominators, header_id)) {
+        nlatch++;
+      }
+    }
+    if (nlatch == 0 || loops.length >= nblocks) {
+      continue;
+    }
+    HoistLoop* loop = calloc(1, sizeof(HoistLoop));
+    if (loop == NULL) {
+      break;
+    }
+    BitSetInit(&loop->blocks);
+    VectorInit(&loop->latches);
+    VectorInit(&loop->entries);
+    BitSetInsert(&loop->blocks, header_id);
+    VectorClear(&work);
+    for (size_t i = 0; i < header->in_edges.length; i++) {
+      size_t pred = header->in_edges.value.w[i];
+      TargetBasicBlock* latch = gen->basic_blocks.value.p[pred];
+      if (latch != NULL &&
+          BitSetContains(&latch->dominators, header_id) &&
+          !BitSetContains(&loop->blocks, pred)) {
+        BitSetInsert(&loop->blocks, pred);
+        VectorAppend(&work, (void*)(uintptr_t)pred);
+      }
+    }
+    while (work.length > 0) {
+      size_t id = (size_t)work.value.u[--work.length];
+      TargetBasicBlock* block = gen->basic_blocks.value.p[id];
+      if (block == NULL) {
         continue;
       }
-      int nlatch = 0;
-      for (size_t i = 0; i < header->in_edges.length; i++) {
-        size_t pred = header->in_edges.value.w[i];
-        TargetBasicBlock* latch = gen->basic_blocks.value.p[pred];
-        if (latch != NULL &&
-            BitSetContains(&latch->dominators, header_id)) {
-          nlatch++;
-        }
-      }
-      if (nlatch == 0 || nloops >= (int)nblocks) {
-        continue;
-      }
-      HoistLoop* loop = &loops[nloops];
-      BitSetInit(&loop->blocks);
-      BitSetInsert(&loop->blocks, header_id);
-      size_t* work = malloc(nblocks * sizeof(size_t));
-      size_t nw = 0;
-      if (work == NULL) {
-        BitSetDestruct(&loop->blocks);
-        break;
-      }
-      for (size_t i = 0; i < header->in_edges.length; i++) {
-        size_t pred = header->in_edges.value.w[i];
-        TargetBasicBlock* latch = gen->basic_blocks.value.p[pred];
-        if (latch != NULL &&
-            BitSetContains(&latch->dominators, header_id) &&
-            !BitSetContains(&loop->blocks, pred)) {
+      for (size_t i = 0; i < block->in_edges.length; i++) {
+        size_t pred = block->in_edges.value.w[i];
+        if (!BitSetContains(&loop->blocks, pred)) {
           BitSetInsert(&loop->blocks, pred);
-          work[nw++] = pred;
+          VectorAppend(&work, (void*)(uintptr_t)pred);
         }
       }
-      while (nw > 0) {
-        size_t id = work[--nw];
-        TargetBasicBlock* block = gen->basic_blocks.value.p[id];
-        if (block == NULL) {
-          continue;
-        }
-        for (size_t i = 0; i < block->in_edges.length; i++) {
-          size_t pred = block->in_edges.value.w[i];
-          if (!BitSetContains(&loop->blocks, pred)) {
-            BitSetInsert(&loop->blocks, pred);
-            work[nw++] = pred;
-          }
-        }
-      }
-      free(work);
-      loop->header = (int)header_id;
-      loop->depth = header->loop_nesting;
-      loop->latches = malloc((size_t)nlatch * sizeof(int));
-      loop->entries = malloc(header->in_edges.length * sizeof(int));
-      loop->nlatches = 0;
-      loop->nentries = 0;
-      if (loop->latches == NULL || loop->entries == NULL) {
-        free(loop->latches);
-        free(loop->entries);
-        BitSetDestruct(&loop->blocks);
-        break;
-      }
-      for (size_t i = 0; i < header->in_edges.length; i++) {
-        size_t pred = header->in_edges.value.w[i];
-        if (BitSetContains(&loop->blocks, pred)) {
-          loop->latches[loop->nlatches++] = (int)pred;
-        } else {
-          loop->entries[loop->nentries++] = (int)pred;
-        }
-      }
-      nloops++;
     }
-    qsort(loops, (size_t)nloops, sizeof(HoistLoop), HoistLoopDeeper);
-    bool* framed = HoistFramedAtEnd(gen);
-    for (int i = 0; i < nloops; i++) {
-      HoistGroupsInLoop(allocator, &loops[i], live_in, live_out, extra_live,
-                        framed);
+    loop->header = (int)header_id;
+    loop->depth = header->loop_nesting;
+    for (size_t i = 0; i < header->in_edges.length; i++) {
+      size_t pred = header->in_edges.value.w[i];
+      if (BitSetContains(&loop->blocks, pred)) {
+        VectorAppend(&loop->latches, (void*)(intptr_t)pred);
+      } else {
+        VectorAppend(&loop->entries, (void*)(intptr_t)pred);
+      }
     }
-    free(framed);
-    for (int i = 0; i < nloops; i++) {
-      BitSetDestruct(&loops[i].blocks);
-      free(loops[i].latches);
-      free(loops[i].entries);
-    }
+    VectorAppend(&loops, loop);
   }
-  free(loops);
-  free(live_in);
-  free(live_out);
-  free(extra_live);
+  VectorDestruct(&work);
+  if (loops.length > 0) {
+    VectorSortPointers(&loops, HoistLoopDeeper);
+    BitSet framed;
+    HoistFramedAtEnd(gen, &framed);
+    for (size_t i = 0; i < loops.length; i++) {
+      HoistGroupsInLoop(allocator, loops.value.p[i], &live_in, &live_out,
+                        &extra_live, &framed);
+    }
+    BitSetDestruct(&framed);
+  }
+  VectorDestructWithContents(&loops, HoistLoopDestruct, /*free_element=*/true);
+  VectorDestruct(&live_in);
+  VectorDestruct(&live_out);
+  VectorDestruct(&extra_live);
 }
 
 // `mov xD, xS` left by allocation.  Forward xS to same-block users when

@@ -377,41 +377,42 @@ static void ComputeRPO(ShrinkWrap* w) {
   if (w->entry_id >= n || Block(w, w->entry_id) == NULL) {
     return;
   }
-  uint8_t* vis = calloc(n, sizeof(uint8_t));
-  size_t* stk_blk = malloc(n * sizeof(size_t));
-  size_t* stk_edge = malloc(n * sizeof(size_t));
-  size_t* post = malloc(n * sizeof(size_t));
-  size_t top = 0;
-  size_t npost = 0;
-  vis[w->entry_id] = 1;
-  stk_blk[top] = w->entry_id;
-  stk_edge[top] = 0;
-  top++;
-  while (top > 0) {
-    size_t u = stk_blk[top - 1];
-    size_t e = stk_edge[top - 1];
+  BitSet vis;
+  BitSetInit(&vis);
+  Vector stk_blk;
+  Vector stk_edge;
+  Vector post;
+  VectorInit(&stk_blk);
+  VectorInit(&stk_edge);
+  VectorInit(&post);
+  BitSetInsert(&vis, w->entry_id);
+  VectorAppend(&stk_blk, (void*)(uintptr_t)w->entry_id);
+  VectorAppend(&stk_edge, (void*)0);
+  while (stk_blk.length > 0) {
+    size_t u = (size_t)stk_blk.value.u[stk_blk.length - 1];
+    size_t e = (size_t)stk_edge.value.u[stk_edge.length - 1];
     TargetBasicBlock* blk = Block(w, u);
     if (blk != NULL && e < blk->out_edges.length) {
-      stk_edge[top - 1] = e + 1;
+      stk_edge.value.u[stk_edge.length - 1] = e + 1;
       size_t v = (size_t)blk->out_edges.value.w[e];
-      if (v < n && !vis[v] && Block(w, v) != NULL) {
-        vis[v] = 1;
-        stk_blk[top] = v;
-        stk_edge[top] = 0;
-        top++;
+      if (v < n && !BitSetContains(&vis, v) && Block(w, v) != NULL) {
+        BitSetInsert(&vis, v);
+        VectorAppend(&stk_blk, (void*)(uintptr_t)v);
+        VectorAppend(&stk_edge, (void*)0);
       }
     } else {
-      top--;
-      post[npost++] = u;
+      VectorPop(&stk_blk);
+      VectorPop(&stk_edge);
+      VectorAppend(&post, (void*)(uintptr_t)u);
     }
   }
-  for (size_t i = 0; i < npost; i++) {
-    w->rpo_pos[post[i]] = npost - 1 - i;
+  for (size_t i = 0; i < post.length; i++) {
+    w->rpo_pos[post.value.u[i]] = post.length - 1 - i;
   }
-  free(post);
-  free(stk_edge);
-  free(stk_blk);
-  free(vis);
+  VectorDestruct(&post);
+  VectorDestruct(&stk_edge);
+  VectorDestruct(&stk_blk);
+  BitSetDestruct(&vis);
 }
 
 // Allocates the per-block sets.  |cap| leaves room for the clones the fast
@@ -912,7 +913,8 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
     int64_t soff = w->sunk_slot_off[idx];
     TargetInstruction* proto = w->sunk_slot_proto[idx];
     bool clobbered = false;
-    bool* reaches_reload = calloc(w->orig_blocks, sizeof(bool));
+    BitSet reaches_reload;
+    BitSetInit(&reaches_reload);
     for (size_t b = 0; b < w->orig_blocks && !clobbered; b++) {
       TargetBasicBlock* blk = Block(w, b);
       if (blk == NULL || blk->code == NULL) {
@@ -926,7 +928,7 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
             clobbered = true;
             break;
           }
-          reaches_reload[b] = true;
+          BitSetInsert(&reaches_reload, b);
           break;
         }
         if (p == blk->end_code) {
@@ -939,7 +941,8 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
       while (rprog) {
         rprog = false;
         for (size_t b = 0; b < w->orig_blocks; b++) {
-          if (reaches_reload[b] || b == proto->block->block_id) {
+          if (BitSetContains(&reaches_reload, b) ||
+              b == proto->block->block_id) {
             continue;
           }
           TargetBasicBlock* blk = Block(w, b);
@@ -948,8 +951,9 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
           }
           for (size_t o = 0; o < blk->out_edges.length; o++) {
             size_t sid = (size_t)blk->out_edges.value.w[o];
-            if (sid < w->orig_blocks && reaches_reload[sid]) {
-              reaches_reload[b] = true;
+            if (sid < w->orig_blocks &&
+                BitSetContains(&reaches_reload, sid)) {
+              BitSetInsert(&reaches_reload, b);
               rprog = true;
               break;
             }
@@ -965,7 +969,8 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
         }
         bool is_proto_blk = (b == proto->block->block_id);
         if (!is_proto_blk &&
-            (!BitSetContains(&after_proto, b) || !reaches_reload[b])) {
+            (!BitSetContains(&after_proto, b) ||
+             !BitSetContains(&reaches_reload, b))) {
           continue;
         }
         TargetBasicBlock* blk = Block(w, b);
@@ -986,7 +991,7 @@ static bool SpillsCanMoveToThePrologue(ShrinkWrap* w) {
       }
       BitSetDestruct(&after_proto);
     }
-    free(reaches_reload);
+    BitSetDestruct(&reaches_reload);
     if (clobbered) {
       return false;
     }

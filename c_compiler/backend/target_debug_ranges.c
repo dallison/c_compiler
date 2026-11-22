@@ -98,16 +98,22 @@ static void ComputeLiveOut(Liveness* l, TargetGenerator* gen,
                            uint64_t* live_out) {
   size_t num_blocks = gen->basic_blocks.length;
   size_t words = l->words;
-  uint64_t* gen_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  uint64_t* kill_bits = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  uint64_t* live_in = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  Vector gen_bits;
+  Vector kill_bits;
+  Vector live_in;
+  VectorInit(&gen_bits);
+  VectorInit(&kill_bits);
+  VectorInit(&live_in);
+  VectorResize(&gen_bits, num_blocks * words + 1);
+  VectorResize(&kill_bits, num_blocks * words + 1);
+  VectorResize(&live_in, num_blocks * words + 1);
   for (size_t b = 0; b < num_blocks; b++) {
     TargetBasicBlock* block = gen->basic_blocks.value.p[b];
     if (block == NULL || block->code == NULL || block->end_code == NULL) {
       continue;
     }
-    uint64_t* g = gen_bits + b * words;
-    uint64_t* k = kill_bits + b * words;
+    uint64_t* g = gen_bits.value.u + b * words;
+    uint64_t* k = kill_bits.value.u + b * words;
     for (TargetInstruction* inst = block->end_code; inst != NULL;
          inst = TargetPrev(inst)) {
       int writes[2];
@@ -140,14 +146,14 @@ static void ComputeLiveOut(Liveness* l, TargetGenerator* gen,
         if (succ >= num_blocks) {
           continue;
         }
-        const uint64_t* in = live_in + succ * words;
+        const uint64_t* in = live_in.value.u + succ * words;
         for (size_t w = 0; w < words; w++) {
           out[w] |= in[w];
         }
       }
-      uint64_t* in = live_in + b * words;
-      const uint64_t* g = gen_bits + b * words;
-      const uint64_t* k = kill_bits + b * words;
+      uint64_t* in = live_in.value.u + b * words;
+      const uint64_t* g = gen_bits.value.u + b * words;
+      const uint64_t* k = kill_bits.value.u + b * words;
       for (size_t w = 0; w < words; w++) {
         uint64_t next = g[w] | (out[w] & ~k[w]);
         if (next != in[w]) {
@@ -157,9 +163,9 @@ static void ComputeLiveOut(Liveness* l, TargetGenerator* gen,
       }
     }
   }
-  free(gen_bits);
-  free(kill_bits);
-  free(live_in);
+  VectorDestruct(&gen_bits);
+  VectorDestruct(&kill_bits);
+  VectorDestruct(&live_in);
 }
 
 static int Label(TargetGenerator* gen, TargetInstruction* inst) {
@@ -218,18 +224,27 @@ static bool MayEmitCode(const Liveness* l, TargetInstruction* inst) {
 static void FindRanges(TargetGenerator* gen, Liveness* l, const int64_t* groups,
                        int num_groups, Vector* ranges) {
   size_t num_blocks = gen->basic_blocks.length;
-  uint64_t* live_out = calloc(num_blocks * l->words + 1, sizeof(uint64_t));
-  ComputeLiveOut(l, gen, live_out);
+  Vector live_out;
+  VectorInit(&live_out);
+  VectorResize(&live_out, num_blocks * l->words + 1);
+  ComputeLiveOut(l, gen, live_out.value.u);
 
   // Walk the code backwards, so that each instruction's live locations
   // follow from those of the instruction after it.  A stretch is found at its
   // end, and appended when its start is.
   size_t group_words = ((size_t)num_groups + 63) / 64;
-  uint64_t* live = calloc(l->words + 1, sizeof(uint64_t));
-  uint64_t* held = calloc(group_words + 1, sizeof(uint64_t));  // At |next|.
-  uint64_t* holds = calloc(group_words + 1, sizeof(uint64_t));
-  TargetInstruction** ends =
-      calloc((size_t)num_groups + 1, sizeof(TargetInstruction*));
+  Vector live;
+  Vector held;   // At |next|.
+  Vector holds;
+  Vector ends;
+  VectorInit(&live);
+  VectorInit(&held);
+  VectorInit(&holds);
+  VectorInit(&ends);
+  VectorResize(&live, l->words + 1);
+  VectorResize(&held, group_words + 1);
+  VectorResize(&holds, group_words + 1);
+  VectorResize(&ends, (size_t)num_groups + 1);
   size_t first_range = ranges->length;
   TargetBasicBlock* block = NULL;
   TargetInstruction* next = NULL;
@@ -248,34 +263,36 @@ static void FindRanges(TargetGenerator* gen, Liveness* l, const int64_t* groups,
         ok = false;
         break;
       }
-      memcpy(live, live_out + block->block_id * l->words,
+      memcpy(live.value.u, live_out.value.u + block->block_id * l->words,
              l->words * sizeof(uint64_t));
       entered = true;
     }
-    if (!StepBack(l, inst, live) && !entered) {
+    if (!StepBack(l, inst, live.value.u) && !entered) {
       if (MayEmitCode(l, inst)) {
         next = inst;
       }
       continue;
     }
-    memset(holds, 0, group_words * sizeof(uint64_t));
+    memset(holds.value.u, 0, group_words * sizeof(uint64_t));
     for (size_t w = 0; w < l->words; w++) {
-      for (uint64_t bits = live[w]; bits != 0; bits &= bits - 1) {
-        SetBit(holds, groups[w * 64 + (size_t)__builtin_ctzll(bits)]);
+      for (uint64_t bits = live.value.u[w]; bits != 0; bits &= bits - 1) {
+        SetBit(holds.value.u, groups[w * 64 + (size_t)__builtin_ctzll(bits)]);
       }
     }
     for (size_t w = 0; w < group_words; w++) {
-      for (uint64_t bits = holds[w] ^ held[w]; bits != 0; bits &= bits - 1) {
+      for (uint64_t bits = holds.value.u[w] ^ held.value.u[w]; bits != 0;
+           bits &= bits - 1) {
         int g = (int)(w * 64) + __builtin_ctzll(bits);
-        if (TestBit(holds, g)) {
-          ends[g] = next;
-        } else if (next != ends[g]) {
+        if (TestBit(holds.value.u, g)) {
+          ends.value.p[g] = next;
+        } else if (next != ends.value.p[g]) {
           AppendRange(ranges, g, Label(gen, next),
-                      ends[g] == NULL ? -1 : Label(gen, ends[g]));
+                      ends.value.p[g] == NULL ? -1
+                                              : Label(gen, ends.value.p[g]));
         }
       }
     }
-    uint64_t* swap = held;
+    Vector swap = held;
     held = holds;
     holds = swap;
     if (MayEmitCode(l, inst)) {
@@ -283,9 +300,9 @@ static void FindRanges(TargetGenerator* gen, Liveness* l, const int64_t* groups,
     }
   }
   for (int g = 0; ok && g < num_groups; g++) {
-    if (TestBit(held, g) && next != ends[g]) {
+    if (TestBit(held.value.u, g) && next != ends.value.p[g]) {
       AppendRange(ranges, g, Label(gen, next),
-                  ends[g] == NULL ? -1 : Label(gen, ends[g]));
+                  ends.value.p[g] == NULL ? -1 : Label(gen, ends.value.p[g]));
     }
   }
   while (!ok && ranges->length > first_range) {
@@ -297,11 +314,11 @@ static void FindRanges(TargetGenerator* gen, Liveness* l, const int64_t* groups,
     ranges->value.p[i] = ranges->value.p[j - 1];
     ranges->value.p[j - 1] = swap;
   }
-  free(live_out);
-  free(live);
-  free(held);
-  free(holds);
-  free(ends);
+  VectorDestruct(&live_out);
+  VectorDestruct(&live);
+  VectorDestruct(&held);
+  VectorDestruct(&holds);
+  VectorDestruct(&ends);
 }
 
 // Numbers |location| and puts it in |group|, so that |groups| holds the group
@@ -319,9 +336,14 @@ void TargetSetDebugLocationLists(
     bool (*emits_code)(TargetInstruction* inst)) {
   // A group is the locations of one variable that are in one register.
   size_t max = 2 * (size_t)num_vars + 1;
-  int* group_vars = malloc(max * sizeof(int));
-  int* group_regs = malloc(max * sizeof(int));
-  bool* follows_copies = calloc(max, sizeof(bool));
+  Vector group_vars;
+  Vector group_regs;
+  BitSet follows_copies;
+  VectorInit(&group_vars);
+  VectorInit(&group_regs);
+  BitSetInit(&follows_copies);
+  VectorResize(&group_vars, max);
+  VectorResize(&group_regs, max);
   int num_groups = 0;
   Liveness l;
   l.info = info;
@@ -343,10 +365,11 @@ void TargetSetDebugLocationLists(
         continue;
       }
       int group = first_group;
-      if (num_groups == first_group || group_regs[first_group] != reg) {
+      if (num_groups == first_group ||
+          (int)group_regs.value.w[first_group] != reg) {
         group = num_groups++;
-        group_vars[group] = v;
-        group_regs[group] = reg;
+        group_vars.value.w[group] = v;
+        group_regs.value.w[group] = reg;
       }
       AddLocation(&l, &groups, location, group);
     }
@@ -354,7 +377,7 @@ void TargetSetDebugLocationLists(
     // the variable would overwrite the copy, unless the new value goes to
     // another register.
     if (num_groups == first_group + 1 && !elsewhere) {
-      follows_copies[first_group] = true;
+      BitSetInsert(&follows_copies, (size_t)first_group);
     }
   }
   // Values that copy a location into its own register join its group.  A
@@ -368,8 +391,8 @@ void TargetSetDebugLocationLists(
     }
     int n = LocationNumber(&l, inst->operand[0]);
     int group = n < 0 ? -1 : (int)groups.value.w[n];
-    if (group >= 0 && follows_copies[group] &&
-        dwarf_register(gen, inst->reg) == group_regs[group] &&
+    if (group >= 0 && BitSetContains(&follows_copies, (size_t)group) &&
+        dwarf_register(gen, inst->reg) == (int)group_regs.value.w[group] &&
         LocationNumber(&l, inst) < 0) {
       AddLocation(&l, &groups, inst, group);
     }
@@ -380,9 +403,11 @@ void TargetSetDebugLocationLists(
   FindRanges(gen, &l, groups.value.w, num_groups, &ranges);
   TargetRAIndexDestruct(&l.index);
   VectorDestruct(&groups);
-  free(follows_copies);
+  BitSetDestruct(&follows_copies);
 
-  Vector* lists = calloc((size_t)num_vars + 1, sizeof(Vector));
+  Vector lists;
+  VectorInit(&lists);
+  VectorResize(&lists, (size_t)num_vars + 1);
   String func_end = {0};
   StringAppend(&func_end, ".func_end_");
   StringAppend(&func_end, gen->function_name.value);
@@ -392,23 +417,28 @@ void TargetSetDebugLocationLists(
     char end[32];
     TargetDebugLabelName(range->begin, begin, sizeof(begin));
     TargetDebugLabelName(range->end, end, sizeof(end));
-    int v = group_vars[range->group];
-    VectorAppend(&lists[v],
+    int v = (int)group_vars.value.w[range->group];
+    if (lists.value.p[v] == NULL) {
+      lists.value.p[v] = NewVector();
+    }
+    VectorAppend(lists.value.p[v],
                  NewVariableLocationRange(
                      begin, range->end < 0 ? func_end.value : end,
-                     group_regs[range->group], vars[v].holds_address));
+                     (int)group_regs.value.w[range->group],
+                     vars[v].holds_address));
   }
   for (int v = 0; v < num_vars; v++) {
-    if (lists[v].length != 0) {
-      VariableDIESetLocationList(SymbolDIE(vars[v].symbol), &lists[v]);
+    Vector* list = lists.value.p[v];
+    if (list != NULL && list->length != 0) {
+      VariableDIESetLocationList(SymbolDIE(vars[v].symbol), list);
     }
-    VectorDestruct(&lists[v]);
   }
   StringDestruct(&func_end);
-  free(lists);
+  VectorDestructWithContents(&lists, (VectorElementDestructor)VectorDestruct,
+                             /*free_element=*/true);
   VectorDestructWithContents(&ranges, NULL, /*free_element=*/true);
-  free(group_vars);
-  free(group_regs);
+  VectorDestruct(&group_vars);
+  VectorDestruct(&group_regs);
 }
 
 void TargetDebugLabelName(int label, char* buf, size_t size) {

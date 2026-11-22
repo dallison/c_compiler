@@ -86,8 +86,15 @@ static IRNode* FindVariableReference(IRNode* origin, Symbol* symbol) {
 typedef struct PhiBlockInfo {
   size_t num_phis;
   size_t num_preds;
-  IRNode** inputs;
+  Vector inputs;
 } PhiBlockInfo;
+
+static void PhiBlockInfoDestruct(void* p) {
+  PhiBlockInfo* info = p;
+  if (info != NULL) {
+    VectorDestruct(&info->inputs);
+  }
+}
 
 static IRNode* FirstPhiInBlock(BasicBlock* block) {
   IRNode* inst = block->code;
@@ -104,7 +111,7 @@ static IRNode* FirstPhiInBlock(BasicBlock* block) {
 // definitions and push them onto a stack associated with that variable.  The
 // stack contains references to the IRNode representing the variable.
 static void RenameVariables(Generator* gen, BasicBlock* block,
-                            Map* var_stacks, PhiBlockInfo* phi_info) {
+                            Map* var_stacks, const Vector* phi_info) {
   // Push all variable definitions onto the var_stack.
   for (size_t i = 0; i < block->defined_vars.length; i++) {
     Symbol* sym = block->defined_vars.values[i].key.p;
@@ -178,8 +185,8 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
     if (succ_id < 0 || (size_t)succ_id >= gen->basic_blocks.length) {
       continue;
     }
-    PhiBlockInfo* info = &phi_info[succ_id];
-    if (info->inputs == NULL) {
+    PhiBlockInfo* info = phi_info->value.p[succ_id];
+    if (info == NULL) {
       continue;
     }
     bool duplicate_succ = false;
@@ -203,7 +210,7 @@ static void RenameVariables(Generator* gen, BasicBlock* block,
       while (phi_inst != NULL && phi_inst->block == succ &&
              phi_inst->opcode == IR_OP(phi)) {
         IRVariable* phi = (IRVariable*)phi_inst;
-        info->inputs[p * info->num_preds + k] =
+        info->inputs.value.p[p * info->num_preds + k] =
             GetTopVariable(var_stacks, phi->symbol);
         p++;
         phi_inst = IRNext(phi_inst);
@@ -269,14 +276,14 @@ static void InsertPhiNodes(Generator* gen) {
 }
 
 static void AddPhiInputs(BasicBlock* block, const PhiBlockInfo* info) {
-  if (info->inputs == NULL) {
+  if (info == NULL) {
     return;
   }
   IRNode* inst = FirstPhiInBlock(block);
   size_t p = 0;
   while (inst != NULL && inst->block == block && inst->opcode == IR_OP(phi)) {
     for (size_t k = 0; k < info->num_preds; k++) {
-      IRNode* latest_var = info->inputs[p * info->num_preds + k];
+      IRNode* latest_var = info->inputs.value.p[p * info->num_preds + k];
       if (latest_var != NULL) {
         IRAddInput(inst, latest_var, false);
       }
@@ -303,7 +310,7 @@ static int SymbolCompare(const void* a, const void* b) {
 
 // Rename all variables in basic blocks to generate a Static Single Assignment
 // to them.
-static void GeneratorRenameVariables(Generator* gen, PhiBlockInfo* phi_info) {
+static void GeneratorRenameVariables(Generator* gen, const Vector* phi_info) {
   // We need a mapping for each variable to a stack of values it has been
   // renamed to.
   Map var_stacks;
@@ -325,8 +332,9 @@ void GeneratorConvertToSSA(Generator* gen) {
   InsertPhiNodes(gen);
 
   size_t num_blocks = gen->basic_blocks.length;
-  PhiBlockInfo* phi_info =
-      num_blocks > 0 ? calloc(num_blocks, sizeof(PhiBlockInfo)) : NULL;
+  Vector phi_info;
+  VectorInit(&phi_info);
+  VectorResize(&phi_info, num_blocks);
   for (size_t i = 0; i < num_blocks; i++) {
     BasicBlock* b = gen->basic_blocks.value.p[i];
     if (b->in_edges.length == 0) {
@@ -338,22 +346,24 @@ void GeneratorConvertToSSA(Generator* gen) {
       num_phis++;
     }
     if (num_phis > 0) {
-      phi_info[i].num_phis = num_phis;
-      phi_info[i].num_preds = b->in_edges.length;
-      phi_info[i].inputs =
-          calloc(num_phis * b->in_edges.length, sizeof(IRNode*));
+      PhiBlockInfo* info = calloc(1, sizeof(PhiBlockInfo));
+      info->num_phis = num_phis;
+      info->num_preds = b->in_edges.length;
+      VectorInit(&info->inputs);
+      VectorResize(&info->inputs, num_phis * b->in_edges.length);
+      phi_info.value.p[i] = info;
     }
   }
 
   // Rename all variables, creating a single assignment to each.
-  GeneratorRenameVariables(gen, phi_info);
+  GeneratorRenameVariables(gen, &phi_info);
 
   // Add inputs to all phi nodes in the blocks in exact in_edges order.
   for (size_t i = 0; i < num_blocks; i++) {
-    AddPhiInputs(gen->basic_blocks.value.p[i], &phi_info[i]);
-    free(phi_info[i].inputs);
+    AddPhiInputs(gen->basic_blocks.value.p[i], phi_info.value.p[i]);
   }
-  free(phi_info);
+  VectorDestructWithContents(&phi_info, PhiBlockInfoDestruct,
+                             /*free_element=*/true);
 }
 
 //

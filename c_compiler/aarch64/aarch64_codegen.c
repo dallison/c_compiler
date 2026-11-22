@@ -5514,7 +5514,8 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   // cycle.
   Vector staged_register_args;
   VectorInit(&staged_register_args);
-  bool* direct_register_args = calloc(node->inputs.length, sizeof(bool));
+  BitSet direct_register_args;
+  BitSetInit(&direct_register_args);
   size_t register_locations = 0;
   for (size_t i = 1; i < node->inputs.length; i++) {
     VectorAppend(&staged_register_args, NULL);
@@ -5582,7 +5583,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
       // into its argument register.
       arg->flags |= AARCH64_INST_AVOID_ARG_REGS;
       VectorSet(&staged_register_args, i - 1, arg);
-      direct_register_args[i - 1] = true;
+      BitSetInsert(&direct_register_args, i - 1);
       continue;
     }
     // A lone register argument cannot clobber another argument, so it needs
@@ -5722,7 +5723,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
         if (TypeUsesAArch64FpArgReg(arg_node->type)) {
           mov_opcode = AARCH64_OP(fmov);
         }
-        if (direct_register_args[i - 1]) {
+        if (BitSetContains(&direct_register_args, i - 1)) {
           SetDestOrMoveToArgReg(g, arg_node, arg, arg_location->location.reg,
                                 mov_opcode);
         } else {
@@ -5827,7 +5828,7 @@ static TargetInstruction* LowerCall(AARCH64Generator* g, IRNode* node) {
   SetLoweredNode(node, call);
 
   VectorDestruct(&staged_register_args);
-  free(direct_register_args);
+  BitSetDestruct(&direct_register_args);
   VectorDestructWithContents(&arg_locations, NULL, /*free_element=*/true);
   return call;
 }

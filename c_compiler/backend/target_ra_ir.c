@@ -33,32 +33,30 @@ typedef struct {
 
   // Instructions in block order; each block's instructions are contiguous.
   int num_insts;
-  TargetInstruction** insts;
-  int* inst_block;
-  int* inst_pos;
+  Vector insts;
+  Vector inst_block;
+  Vector inst_pos;
   TargetRAIndex positions;
-  int* block_first;  // Index in insts of each block's first instruction.
+  Vector block_first;  // Index in insts of each block's first instruction.
 
   // Locations: physical register keys first, then one per instruction.
   TargetRAIndex location_ids;
   int num_locations;
-  int location_capacity;
   // A location some value read reaches through the value's dest.
-  unsigned char* candidate;
+  BitSet candidate;
 
   // Definitions of candidate locations, in block order.
   int num_defs;
-  int def_capacity;
-  int* def_inst;
-  int* def_loc;
-  int* block_def_start;  // Per block, plus one past the last block.
-  int* loc_def_start;    // Per location, plus one past the last location.
-  int* loc_defs;         // Definition indices grouped by location.
+  Vector def_inst;
+  Vector def_loc;
+  Vector block_def_start;  // Per block, plus one past the last block.
+  Vector loc_def_start;    // Per location, plus one past the last location.
+  Vector loc_defs;         // Definition indices grouped by location.
 
   // Definitions reaching each block's entry and exit.
   size_t num_words;
-  uint64_t* in;
-  uint64_t* out;
+  Vector in;
+  Vector out;
 } RAFunction;
 
 static TargetInstruction* NextInBlock(TargetBasicBlock* block,
@@ -74,20 +72,6 @@ static TargetBasicBlock* BlockAt(TargetGenerator* gen, size_t i) {
   return block;
 }
 
-static void GrowLocations(RAFunction* fn, int needed) {
-  if (needed <= fn->location_capacity) {
-    return;
-  }
-  int capacity = fn->location_capacity * 2;
-  if (capacity < needed) {
-    capacity = needed;
-  }
-  fn->candidate = realloc(fn->candidate, (size_t)capacity);
-  memset(fn->candidate + fn->location_capacity, 0,
-         (size_t)(capacity - fn->location_capacity));
-  fn->location_capacity = capacity;
-}
-
 static int LocationOf(RAFunction* fn, TargetInstruction* location) {
   int key = fn->info->location_key(location);
   if (key >= 0 && key < TARGET_RA_FIXED_KEYS) {
@@ -96,7 +80,6 @@ static int LocationOf(RAFunction* fn, TargetInstruction* location) {
   int id = TargetRAIndexFind(&fn->location_ids, location);
   if (id < 0) {
     id = fn->num_locations++;
-    GrowLocations(fn, fn->num_locations);
     TargetRAIndexInsert(&fn->location_ids, location, id);
   }
   return id;
@@ -179,34 +162,38 @@ static void CollectInstructions(RAFunction* fn) {
       count++;
     }
   }
-  fn->insts = malloc(sizeof(TargetInstruction*) * (size_t)(count + 1));
-  fn->inst_block = malloc(sizeof(int) * (size_t)(count + 1));
-  fn->inst_pos = malloc(sizeof(int) * (size_t)(count + 1));
-  fn->block_first = malloc(sizeof(int) * (num_blocks + 1));
+  VectorInit(&fn->insts);
+  VectorInit(&fn->inst_block);
+  VectorInit(&fn->inst_pos);
+  VectorInit(&fn->block_first);
+  VectorResize(&fn->insts, (size_t)(count + 1));
+  VectorResize(&fn->inst_block, (size_t)(count + 1));
+  VectorResize(&fn->inst_pos, (size_t)(count + 1));
+  VectorResize(&fn->block_first, num_blocks + 1);
   TargetRAIndexInit(&fn->positions, (size_t)count);
   TargetRAIndexInit(&fn->location_ids, 64);
   fn->num_locations = TARGET_RA_FIXED_KEYS;
-  GrowLocations(fn, TARGET_RA_FIXED_KEYS * 2);
+  BitSetInit(&fn->candidate);
 
   int n = 0;
   for (size_t b = 0; b < num_blocks; b++) {
-    fn->block_first[b] = n;
+    fn->block_first.value.w[b] = n;
     TargetBasicBlock* block = BlockAt(gen, b);
     int pos = 0;
     for (TargetInstruction* inst = block == NULL ? NULL : block->code;
          inst != NULL; inst = NextInBlock(block, inst)) {
-      fn->insts[n] = inst;
-      fn->inst_block[n] = (int)b;
-      fn->inst_pos[n] = pos++;
+      fn->insts.value.p[n] = inst;
+      fn->inst_block.value.w[n] = (int64_t)b;
+      fn->inst_pos.value.w[n] = pos++;
       TargetRAIndexInsert(&fn->positions, inst, n);
       n++;
     }
   }
-  fn->block_first[num_blocks] = n;
+  fn->block_first.value.w[num_blocks] = n;
   fn->num_insts = n;
 
   for (int i = 0; i < n; i++) {
-    TargetInstruction* inst = fn->insts[i];
+    TargetInstruction* inst = fn->insts.value.p[i];
     if (inst->dest != NULL && !IsLocation(fn, inst->dest)) {
       fn->counts.dest_not_location++;
       Detail(fn, kDetailDestNotLocation, "dest-not-location", inst, -1,
@@ -225,55 +212,57 @@ static void CollectInstructions(RAFunction* fn) {
           !IsLocation(fn, value->dest)) {
         continue;
       }
-      fn->candidate[LocationOf(fn, value->dest)] = 1;
+      BitSetInsert(&fn->candidate, (size_t)LocationOf(fn, value->dest));
     }
   }
 }
 
 static void AddDef(RAFunction* fn, int inst_index, int loc) {
-  if (fn->num_defs == fn->def_capacity) {
-    fn->def_capacity = fn->def_capacity == 0 ? 256 : fn->def_capacity * 2;
-    fn->def_inst =
-        realloc(fn->def_inst, sizeof(int) * (size_t)fn->def_capacity);
-    fn->def_loc = realloc(fn->def_loc, sizeof(int) * (size_t)fn->def_capacity);
-  }
-  fn->def_inst[fn->num_defs] = inst_index;
-  fn->def_loc[fn->num_defs] = loc;
+  VectorAppend(&fn->def_inst, (void*)(intptr_t)inst_index);
+  VectorAppend(&fn->def_loc, (void*)(intptr_t)loc);
   fn->num_defs++;
 }
 
 static void CollectDefinitions(RAFunction* fn) {
   size_t num_blocks = fn->gen->basic_blocks.length;
-  fn->block_def_start = malloc(sizeof(int) * (num_blocks + 1));
+  VectorInit(&fn->def_inst);
+  VectorInit(&fn->def_loc);
+  VectorInit(&fn->block_def_start);
+  VectorResize(&fn->block_def_start, num_blocks + 1);
   for (size_t b = 0; b < num_blocks; b++) {
-    fn->block_def_start[b] = fn->num_defs;
-    for (int i = fn->block_first[b]; i < fn->block_first[b + 1]; i++) {
+    fn->block_def_start.value.w[b] = fn->num_defs;
+    for (int i = (int)fn->block_first.value.w[b];
+         i < (int)fn->block_first.value.w[b + 1]; i++) {
       int locs[kMaxDefsPerInst];
-      int n = DefinedLocations(fn, fn->insts[i], locs);
+      int n = DefinedLocations(fn, fn->insts.value.p[i], locs);
       for (int k = 0; k < n; k++) {
-        if (fn->candidate[locs[k]]) {
+        if (BitSetContains(&fn->candidate, (size_t)locs[k])) {
           AddDef(fn, i, locs[k]);
         }
       }
     }
   }
-  fn->block_def_start[num_blocks] = fn->num_defs;
+  fn->block_def_start.value.w[num_blocks] = fn->num_defs;
 
   int num_locations = fn->num_locations;
-  fn->loc_def_start = calloc((size_t)num_locations + 1, sizeof(int));
-  fn->loc_defs = malloc(sizeof(int) * (size_t)(fn->num_defs + 1));
+  VectorInit(&fn->loc_def_start);
+  VectorInit(&fn->loc_defs);
+  VectorResize(&fn->loc_def_start, (size_t)num_locations + 1);
+  VectorResize(&fn->loc_defs, (size_t)(fn->num_defs + 1));
   for (int d = 0; d < fn->num_defs; d++) {
-    fn->loc_def_start[fn->def_loc[d] + 1]++;
+    fn->loc_def_start.value.w[fn->def_loc.value.w[d] + 1]++;
   }
   for (int l = 0; l < num_locations; l++) {
-    fn->loc_def_start[l + 1] += fn->loc_def_start[l];
+    fn->loc_def_start.value.w[l + 1] += fn->loc_def_start.value.w[l];
   }
-  int* fill = malloc(sizeof(int) * (size_t)(num_locations + 1));
-  memcpy(fill, fn->loc_def_start, sizeof(int) * (size_t)num_locations);
+  Vector fill;
+  VectorInit(&fill);
+  VectorCopy(&fill, &fn->loc_def_start);
   for (int d = 0; d < fn->num_defs; d++) {
-    fn->loc_defs[fill[fn->def_loc[d]]++] = d;
+    int64_t loc = fn->def_loc.value.w[d];
+    fn->loc_defs.value.w[fill.value.w[loc]++] = d;
   }
-  free(fill);
+  VectorDestruct(&fill);
 }
 
 static bool TestBit(const uint64_t* bits, int i) {
@@ -294,12 +283,16 @@ static void ComputeReachingDefinitions(RAFunction* fn) {
   size_t num_blocks = gen->basic_blocks.length;
   size_t words = ((size_t)fn->num_defs + 63) / 64;
   fn->num_words = words;
-  fn->in = calloc(num_blocks * words + 1, sizeof(uint64_t));
-  fn->out = calloc(num_blocks * words + 1, sizeof(uint64_t));
+  VectorInit(&fn->in);
+  VectorInit(&fn->out);
+  VectorResize(&fn->in, num_blocks * words + 1);
+  VectorResize(&fn->out, num_blocks * words + 1);
   if (words == 0) {
     return;
   }
-  uint64_t* next = malloc(sizeof(uint64_t) * words);
+  Vector next;
+  VectorInit(&next);
+  VectorResize(&next, words);
   bool changed = true;
   while (changed) {
     changed = false;
@@ -309,58 +302,59 @@ static void ComputeReachingDefinitions(RAFunction* fn) {
       if (block == NULL) {
         continue;
       }
-      uint64_t* in = fn->in + b * words;
+      uint64_t* in = fn->in.value.u + b * words;
       for (size_t e = 0; e < block->in_edges.length; e++) {
         size_t pred = (size_t)block->in_edges.value.w[e];
         if (pred >= num_blocks) {
           continue;
         }
-        const uint64_t* pred_out = fn->out + pred * words;
+        const uint64_t* pred_out = fn->out.value.u + pred * words;
         for (size_t w = 0; w < words; w++) {
           in[w] |= pred_out[w];
         }
       }
-      memcpy(next, in, sizeof(uint64_t) * words);
-      for (int d = fn->block_def_start[b]; d < fn->block_def_start[b + 1];
-           d++) {
-        int loc = fn->def_loc[d];
-        for (int k = fn->loc_def_start[loc]; k < fn->loc_def_start[loc + 1];
-             k++) {
-          ClearBit(next, fn->loc_defs[k]);
+      memcpy(next.value.u, in, sizeof(uint64_t) * words);
+      for (int d = (int)fn->block_def_start.value.w[b];
+           d < (int)fn->block_def_start.value.w[b + 1]; d++) {
+        int loc = (int)fn->def_loc.value.w[d];
+        for (int k = (int)fn->loc_def_start.value.w[loc];
+             k < (int)fn->loc_def_start.value.w[loc + 1]; k++) {
+          ClearBit(next.value.u, (int)fn->loc_defs.value.w[k]);
         }
-        SetBit(next, d);
+        SetBit(next.value.u, d);
       }
-      uint64_t* out = fn->out + b * words;
-      if (memcmp(next, out, sizeof(uint64_t) * words) != 0) {
-        memcpy(out, next, sizeof(uint64_t) * words);
+      uint64_t* out = fn->out.value.u + b * words;
+      if (memcmp(next.value.u, out, sizeof(uint64_t) * words) != 0) {
+        memcpy(out, next.value.u, sizeof(uint64_t) * words);
         changed = true;
       }
     }
   }
-  free(next);
+  VectorDestruct(&next);
 }
 
 // Another write of |loc| that a read at insts[use] can see instead of the
 // write |value| (insts[value_index]) made, or NULL.
 static TargetInstruction* OverwritingDefinition(RAFunction* fn, int use,
                                                 int value_index, int loc) {
-  int block = fn->inst_block[use];
-  for (int i = use - 1; i >= fn->block_first[block]; i--) {
+  int block = (int)fn->inst_block.value.w[use];
+  for (int i = use - 1; i >= (int)fn->block_first.value.w[block]; i--) {
     if (i == value_index) {
       return NULL;
     }
-    if (DefinesLocation(fn, fn->insts[i], loc)) {
-      return fn->insts[i];
+    if (DefinesLocation(fn, fn->insts.value.p[i], loc)) {
+      return fn->insts.value.p[i];
     }
   }
   if (fn->num_words == 0) {
     return NULL;
   }
-  const uint64_t* in = fn->in + (size_t)block * fn->num_words;
-  for (int k = fn->loc_def_start[loc]; k < fn->loc_def_start[loc + 1]; k++) {
-    int d = fn->loc_defs[k];
-    if (TestBit(in, d) && fn->def_inst[d] != value_index) {
-      return fn->insts[fn->def_inst[d]];
+  const uint64_t* in = fn->in.value.u + (size_t)block * fn->num_words;
+  for (int k = (int)fn->loc_def_start.value.w[loc];
+       k < (int)fn->loc_def_start.value.w[loc + 1]; k++) {
+    int d = (int)fn->loc_defs.value.w[k];
+    if (TestBit(in, d) && (int)fn->def_inst.value.w[d] != value_index) {
+      return fn->insts.value.p[fn->def_inst.value.w[d]];
     }
   }
   return NULL;
@@ -369,8 +363,8 @@ static TargetInstruction* OverwritingDefinition(RAFunction* fn, int use,
 static void CheckReads(RAFunction* fn) {
   TargetGenerator* gen = fn->gen;
   for (int u = 0; u < fn->num_insts; u++) {
-    TargetInstruction* inst = fn->insts[u];
-    TargetBasicBlock* block = BlockAt(gen, (size_t)fn->inst_block[u]);
+    TargetInstruction* inst = fn->insts.value.p[u];
+    TargetBasicBlock* block = BlockAt(gen, (size_t)fn->inst_block.value.w[u]);
     int written = fn->info->written_operand(inst);
     for (int op = 0; op < TARGET_MAX_OPERANDS; op++) {
       TargetInstruction* value = inst->operand[op];
@@ -386,9 +380,10 @@ static void CheckReads(RAFunction* fn) {
         continue;
       }
       bool dominated =
-          fn->inst_block[v] == fn->inst_block[u]
-              ? fn->inst_pos[v] < fn->inst_pos[u]
-              : BitSetContains(&block->dominators, (size_t)fn->inst_block[v]);
+          fn->inst_block.value.w[v] == fn->inst_block.value.w[u]
+              ? fn->inst_pos.value.w[v] < fn->inst_pos.value.w[u]
+              : BitSetContains(&block->dominators,
+                               (size_t)fn->inst_block.value.w[v]);
       if (!dominated) {
         fn->counts.undominated++;
         Detail(fn, kDetailUndominated,
@@ -454,18 +449,18 @@ void TargetRACheck(TargetGenerator* gen, const TargetRAInfo* info,
     AddCounts(counts, &fn.counts);
   }
 
-  free(fn.insts);
-  free(fn.inst_block);
-  free(fn.inst_pos);
-  free(fn.block_first);
+  VectorDestruct(&fn.insts);
+  VectorDestruct(&fn.inst_block);
+  VectorDestruct(&fn.inst_pos);
+  VectorDestruct(&fn.block_first);
   TargetRAIndexDestruct(&fn.positions);
   TargetRAIndexDestruct(&fn.location_ids);
-  free(fn.candidate);
-  free(fn.def_inst);
-  free(fn.def_loc);
-  free(fn.block_def_start);
-  free(fn.loc_def_start);
-  free(fn.loc_defs);
-  free(fn.in);
-  free(fn.out);
+  BitSetDestruct(&fn.candidate);
+  VectorDestruct(&fn.def_inst);
+  VectorDestruct(&fn.def_loc);
+  VectorDestruct(&fn.block_def_start);
+  VectorDestruct(&fn.loc_def_start);
+  VectorDestruct(&fn.loc_defs);
+  VectorDestruct(&fn.in);
+  VectorDestruct(&fn.out);
 }

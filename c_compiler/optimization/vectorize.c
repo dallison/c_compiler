@@ -1398,47 +1398,44 @@ static bool TryPackLanes(Generator* gen, BasicBlock* block, SLPLane* lanes,
 static bool SLPVectorizeBlock(Generator* gen, BasicBlock* block) {
   bool changed = false;
   for (;;) {
-    size_t n = 0;
+    Vector lanes;
+    VectorInit(&lanes);
     for (IRNode* inst = BasicBlockBegin(block);
          !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
          inst = IRNext(inst)) {
       SLPLane probe;
       if (AnalyzeSLPStore(inst, &probe)) {
-        n++;
+        SLPLane* lane = calloc(1, sizeof(SLPLane));
+        *lane = probe;
+        VectorAppend(&lanes, lane);
       }
     }
-    if (n < 2) {
+    if (lanes.length < 2) {
+      VectorDestructWithContents(&lanes, NULL, /*free_element=*/true);
       return changed;
-    }
-    SLPLane* lanes = calloc(n, sizeof(SLPLane));
-    if (lanes == NULL) {
-      return changed;
-    }
-    size_t filled = 0;
-    for (IRNode* inst = BasicBlockBegin(block);
-         !BasicBlockIsEmpty(block) && inst != BasicBlockEnd(block);
-         inst = IRNext(inst)) {
-      if (filled < n && AnalyzeSLPStore(inst, &lanes[filled])) {
-        filled++;
-      }
     }
     bool packed = false;
-    for (size_t start = 0; start + 2 <= filled; start++) {
-      int elem_size = lanes[start].elem_size;
+    for (size_t start = 0; start + 2 <= lanes.length; start++) {
+      const SLPLane* first = lanes.value.p[start];
+      int elem_size = first->elem_size;
       if (elem_size <= 0 || kNativeVectorBytes % elem_size != 0) {
         continue;
       }
       int vf = kNativeVectorBytes / elem_size;
-      if (vf < 2 || start + (size_t)vf > filled) {
+      if (vf < 2 || start + (size_t)vf > lanes.length) {
         continue;
       }
-      if (TryPackLanes(gen, block, lanes + start, vf)) {
+      SLPLane window[kNativeVectorBytes];
+      for (int i = 0; i < vf; i++) {
+        window[i] = *(const SLPLane*)lanes.value.p[start + (size_t)i];
+      }
+      if (TryPackLanes(gen, block, window, vf)) {
         packed = true;
         changed = true;
         break;
       }
     }
-    free(lanes);
+    VectorDestructWithContents(&lanes, NULL, /*free_element=*/true);
     if (!packed) {
       return changed;
     }

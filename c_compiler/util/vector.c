@@ -85,10 +85,14 @@ void VectorGrowForAppend(Vector* vec) {
 }
 
 void VectorReserve(Vector* vec, size_t n) {
+  if (n == 0) {
+    return;
+  }
   if (vec->value.p == NULL) {
     vec->capacity = n;
     vec->value.p = malloc(sizeof(int64_t) * vec->capacity);
     memset(vec->value.p, 0, sizeof(int64_t) * vec->capacity);
+    return;
   }
 
   if (n <= vec->capacity) {
@@ -99,6 +103,17 @@ void VectorReserve(Vector* vec, size_t n) {
   vec->value.p = realloc(vec->value.p, sizeof(int64_t) * vec->capacity);
   memset(vec->value.p + old_capacity, 0,
          (vec->capacity - old_capacity) * sizeof(int64_t));
+}
+
+void VectorResize(Vector* vec, size_t n) {
+  if (n > vec->capacity) {
+    VectorReserve(vec, n);
+  }
+  if (n > vec->length && vec->value.p != NULL) {
+    memset(vec->value.p + vec->length, 0,
+           (n - vec->length) * sizeof(int64_t));
+  }
+  vec->length = n;
 }
 
 void VectorCopy(Vector* dest, Vector* src) {
@@ -168,9 +183,15 @@ void VectorDeleteElement(Vector* vec, size_t index) {
 }
 
 void VectorSortPointers(Vector* vec, int (*compare)(const void*, const void*)) {
+  if (vec->length < 2) {
+    return;
+  }
   qsort(vec->value.p, vec->length, sizeof(void*), compare);
 }
 
 void VectorSortInts(Vector* vec, int (*compare)(const void*, const void*)) {
+  if (vec->length < 2) {
+    return;
+  }
   qsort(vec->value.w, vec->length, sizeof(int64_t), compare);
 }
