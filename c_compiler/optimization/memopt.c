@@ -254,17 +254,19 @@ static IRNode* TryExpandIncDecForForwarding(Generator* gen, BasicBlock* block,
     ld->flags |= kIRVarUse;
     ld->var.use = inst->var.use;
   }
+  // An IR node may only consume nodes that are already in the instruction
+  // list (see IRAddInput), so each new node is emitted before the next one is
+  // built from it.
+  BasicBlockEmitBefore(gen, block, ld, inst);
   IRNode* step =
       GeneratorGetIntConstant(gen, inst->type, IRIntConstValue(step_node));
   IRNode* alu = NewIR2(is_inc ? IR_OP(addi) : IR_OP(subi), ld, step);
   IRSetType(alu, inst->type);
   alu->location = inst->location;
+  BasicBlockEmitBefore(gen, block, alu, inst);
   IRNode* st = NewIR2(store_op, addr, alu);
   IRSetType(st, inst->type);
   st->location = inst->location;
-
-  BasicBlockEmitBefore(gen, block, ld, inst);
-  BasicBlockEmitBefore(gen, block, alu, inst);
   BasicBlockEmitBefore(gen, block, st, inst);
   BasicBlockRemoveInstruction(gen, block, inst);
   return ld;
