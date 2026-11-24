@@ -7,6 +7,7 @@ SUP="$ROOT/6502 support"
 WORK="$ROOT/games/build"
 DAVECC="${DAVECC:-$ROOT/bazel-bin/davecc}"
 SSD="${SSD:-$HOME/bbc_micro/games.ssd}"
+ADL="${ADL:-$HOME/bbc_micro/games.adl}"
 TARGET=6502-acorn-bbc-davecc
 
 if [[ ! -x "$DAVECC" ]]; then
@@ -155,4 +156,17 @@ if bad:
 PY
 
 echo "packed $SSD"
-echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN / DEFEND."
+echo "On the emulator (DFS): *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN / DEFEND."
+
+# Double-sided 80-track ADFS-L (.adl): binaries in $, sources under $.Source.
+# Needs beebtools (pip install --user beebtools).
+python3 "$SUP/elf2adl.py" "$ADL" \
+  "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
+  "ASTERO=$WORK/asteroids.elf" "GALAX=$WORK/galaxians.elf" \
+  "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf" \
+  "DEFEND=$WORK/defender.elf" \
+  --source-root "$ROOT/games" \
+  --title "DAVECC"
+
+echo "packed $ADL"
+echo "On the emulator (ADFS): *ADFS then *CAT; *RUN INVADER / ... ; *DIR Source"

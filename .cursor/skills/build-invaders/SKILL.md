@@ -2,8 +2,9 @@
 name: build-invaders
 description: >-
   Build BBC Master games (Invaders, Snake, Asteroids, Galaxians, Centipede,
-  Pac-Man, Defender) with davecc, link at &E00, and pack onto ~/bbc_micro/games.ssd.
-  Use when rebuilding those games, updating games.ssd, or after editing
+  Pac-Man, Defender) with davecc, link at &E00, and pack onto ~/bbc_micro/games.ssd
+  (DFS) plus ~/bbc_micro/games.adl (ADFS-L with sources under $.Source).
+  Use when rebuilding those games, updating games.ssd/games.adl, or after editing
   games/*.cc, *_fx.s, games/sprites.py, screen1.s, or bbc_mode2_e00.ld.
 ---
 
@@ -23,11 +24,18 @@ Override roots if needed:
 
 ```bash
 ROOT=/Users/dallison/c_compiler SSD=$HOME/bbc_micro/games.ssd \
+  ADL=$HOME/bbc_micro/games.adl \
   .cursor/skills/build-invaders/scripts/build_and_pack.sh
 ```
 
-Emulator: mount `~/bbc_micro/games.ssd`, then `*RUN INVADER` / `SNAKE` /
+Needs `beebtools` for the ADFS image (`pip install --user beebtools`).
+
+Emulator (DFS): mount `~/bbc_micro/games.ssd`, then `*RUN INVADER` / `SNAKE` /
 `ASTERO` / `GALAX` / `CENTI` / `PACMAN` / `DEFEND` (or Shift-Break → `*CAT`).
+
+Emulator (ADFS): mount `~/bbc_micro/games.adl` (double-sided 80-track ADFS-L),
+`*ADFS`, then the same `*RUN` names from `$`. Sources are under `$.Source`
+(`*DIR Source`, then e.g. `*DIR Defend` / `*TYPE DefendCC`).
 
 ## Manual steps (same as the script)
 

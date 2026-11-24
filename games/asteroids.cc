@@ -51,21 +51,23 @@ enum { ColBlack = 0, ColGreen = 1, ColRed = 2, ColWhite = 3 };
 class Pace {
  public:
   enum : unsigned {
-    Title = 220,
+    Title = 240,
     TitleSpin = 6,
     Death = 70,
     Wave = 90,
     Over = 80,
     EscapeGuard = 30,
-    FireGap = 1,
-    Invuln = 80,
+    FireGap = 8,
+    Invuln = 100,
     Anim = 40,
-    ShotLife = 28,
-    ShotSpeed = 10,
-    ThrustMax = 4,
-    TurnGap = 2,
-    ThrustGap = 3,
-    FrictionGap = 20
+    ShotLife = 36,
+    ShotSpeed = 2,
+    ThrustMax = 32,
+    SpeedOctMax = 45,
+    TurnDelay = 8,
+    TurnRepeat = 4,
+    ThrustGap = 2,
+    FrictionGap = 5
   };
 };
 
@@ -92,8 +94,6 @@ void keys_read();
 void hud_digits();
 void cell_draw();
 void cell_wipe();
-void cell_draw_large();
-void cell_wipe_large();
 void shot_draw();
 void shot_wipe();
 void soft_draw_large();
@@ -117,6 +117,14 @@ extern const unsigned char k_as_ship4[];
 extern const unsigned char k_as_ship5[];
 extern const unsigned char k_as_ship6[];
 extern const unsigned char k_as_ship7[];
+extern const unsigned char k_as_ship8[];
+extern const unsigned char k_as_ship9[];
+extern const unsigned char k_as_ship10[];
+extern const unsigned char k_as_ship11[];
+extern const unsigned char k_as_ship12[];
+extern const unsigned char k_as_ship13[];
+extern const unsigned char k_as_ship14[];
+extern const unsigned char k_as_ship15[];
 extern const unsigned char k_as_ship_t0[];
 extern const unsigned char k_as_ship_t1[];
 extern const unsigned char k_as_ship_t2[];
@@ -125,6 +133,14 @@ extern const unsigned char k_as_ship_t4[];
 extern const unsigned char k_as_ship_t5[];
 extern const unsigned char k_as_ship_t6[];
 extern const unsigned char k_as_ship_t7[];
+extern const unsigned char k_as_ship_t8[];
+extern const unsigned char k_as_ship_t9[];
+extern const unsigned char k_as_ship_t10[];
+extern const unsigned char k_as_ship_t11[];
+extern const unsigned char k_as_ship_t12[];
+extern const unsigned char k_as_ship_t13[];
+extern const unsigned char k_as_ship_t14[];
+extern const unsigned char k_as_ship_t15[];
 extern const unsigned char k_as_rock_l0[];
 extern const unsigned char k_as_rock_l1[];
 extern const unsigned char k_as_rock_m0[];
@@ -195,12 +211,16 @@ u8 ship_dir_shown;
 u8 ship_thrust_shown;
 i8 ship_vx;
 i8 ship_vy;
+u8 ship_fx;
+u8 ship_fy;
 u8 ship_dir;
 u8 ship_fire_t;
 u8 fire_held;
+u8 turn_held;
 u8 ship_invuln;
 u8 ship_turn_t;
 u8 ship_thrust_t;
+u8 thrust_snd_t;
 u8 ship_fric_t;
 u8 ship_thrusting;
 
@@ -453,22 +473,56 @@ static u8 pix_col(u16 x) { return static_cast<u8>(x >> 2); }
 
 static u8 pix_row(u16 y) { return static_cast<u8>(y >> 3); }
 
-// Tables beat long if-ladders for size under HIMEM (thrust frames cost
-// 512 bytes of art; every code byte counts).
-static const unsigned char* const k_ship_img[16] = {
-    k_as_ship0,   k_as_ship1,   k_as_ship2,   k_as_ship3,
-    k_as_ship4,   k_as_ship5,   k_as_ship6,   k_as_ship7,
-    k_as_ship_t0, k_as_ship_t1, k_as_ship_t2, k_as_ship_t3,
-    k_as_ship_t4, k_as_ship_t5, k_as_ship_t6, k_as_ship_t7};
+// 16 headings (22.5 deg steps) + 16 thrust frames.
+static const unsigned char* const k_ship_img[32] = {
+    k_as_ship0,    k_as_ship1,    k_as_ship2,    k_as_ship3,
+    k_as_ship4,    k_as_ship5,    k_as_ship6,    k_as_ship7,
+    k_as_ship8,    k_as_ship9,    k_as_ship10,   k_as_ship11,
+    k_as_ship12,   k_as_ship13,   k_as_ship14,   k_as_ship15,
+    k_as_ship_t0,  k_as_ship_t1,  k_as_ship_t2,  k_as_ship_t3,
+    k_as_ship_t4,  k_as_ship_t5,  k_as_ship_t6,  k_as_ship_t7,
+    k_as_ship_t8,  k_as_ship_t9,  k_as_ship_t10, k_as_ship_t11,
+    k_as_ship_t12, k_as_ship_t13, k_as_ship_t14, k_as_ship_t15};
 
 static const unsigned char* ship_image(u8 dir, u8 thrusting) {
-  return k_ship_img[static_cast<u8>(dir + (thrusting ? 8 : 0))];
+  return k_ship_img[static_cast<u8>(dir + (thrusting ? 16 : 0))];
 }
 
-static const i8 k_thrust_dx[8] = {0, 1, 1, 1, 0, static_cast<i8>(-1),
-                                    static_cast<i8>(-1), static_cast<i8>(-1)};
-static const i8 k_thrust_dy[8] = {static_cast<i8>(-1), static_cast<i8>(-1), 0, 1,
-                                    1, 1, 0, static_cast<i8>(-1)};
+// Unit-circle thrust vectors in 1/16 px/frame (radius ~3 across all 16 angles).
+static const i8 k_thrust_dx[16] = {
+    0,
+    1,
+    2,
+    3,
+    3,
+    3,
+    2,
+    1,
+    0,
+    static_cast<i8>(-1),
+    static_cast<i8>(-2),
+    static_cast<i8>(-3),
+    static_cast<i8>(-3),
+    static_cast<i8>(-3),
+    static_cast<i8>(-2),
+    static_cast<i8>(-1)};
+static const i8 k_thrust_dy[16] = {
+    static_cast<i8>(-3),
+    static_cast<i8>(-3),
+    static_cast<i8>(-2),
+    static_cast<i8>(-1),
+    0,
+    1,
+    2,
+    3,
+    3,
+    3,
+    2,
+    1,
+    0,
+    static_cast<i8>(-1),
+    static_cast<i8>(-2),
+    static_cast<i8>(-3)};
 
 static i8 thrust_dx(u8 dir) { return k_thrust_dx[dir]; }
 static i8 thrust_dy(u8 dir) { return k_thrust_dy[dir]; }
@@ -550,23 +604,13 @@ static void rock_erase(u8 i) {
 // marks the rock unshown and the next beat paints it.
 static void rock_spawn_draw(u8 i) { rock_shown[i] = 0; }
 
-static const unsigned char* shot_image(u8 phase) {
-  if (phase == 0) {
-    return k_as_shot0;
-  }
-  if (phase == 1) {
-    return k_as_shot1;
-  }
-  if (phase == 2) {
-    return k_as_shot2;
-  }
-  return k_as_shot3;
-}
+static const unsigned char* const k_shot_img[4] = {k_as_shot0, k_as_shot1,
+                                                   k_as_shot2, k_as_shot3};
 
 static void paint_shot(u8 col, u8 y, u8 phase) {
   as_col = col;
   as_y = y;
-  as_src = shot_image(phase);
+  as_src = k_shot_img[phase];
   shot_draw();
 }
 
@@ -582,9 +626,6 @@ static void shot_erase(u8 i) {
     shot_shown[i] = 0;
   }
 }
-
-static const unsigned char* const k_shot_img[4] = {k_as_shot0, k_as_shot1,
-                                                   k_as_shot2, k_as_shot3};
 
 static void shot_present(u8 i) {
   u8 ncol;
@@ -639,6 +680,20 @@ static i8 clamp_vel(i8 v) {
   return static_cast<i8>(-Pace::ThrustMax);
 }
 
+static u8 abs_vel(i8 v) {
+  u8 u = static_cast<u8>(v);
+  return (u < 128) ? u : static_cast<u8>(0 - u);
+}
+
+static i8 vel_px(i8 v) {
+  u8 u = static_cast<u8>(v);
+  if (u < 128) {
+    return static_cast<i8>((u + 8) >> 4);
+  }
+  u = static_cast<u8>((static_cast<u8>(0 - u) + 8) >> 4);
+  return static_cast<i8>(0 - u);
+}
+
 static void friction(i8* v) {
   u8 u = static_cast<u8>(*v);
   if (u == 0) {
@@ -661,11 +716,12 @@ static u8 free_rock() {
   return 255;
 }
 
-static void spawn_rock(u8 size, u16 x, u16 y) {
+static u8 spawn_rock(u8 size, u16 x, u16 y) {
   u8 i = free_rock();
-  i8 speed;
+  i8 vx;
+  i8 vy;
   if (i == 255) {
-    return;
+    return 255;
   }
   rock_on[i] = 1;
   rock_shown[i] = 0;
@@ -673,36 +729,30 @@ static void spawn_rock(u8 size, u16 x, u16 y) {
   rock_x[i] = wrap_x(x);
   rock_y[i] = wrap_y(y);
   rock_look[i] = static_cast<u8>(rng_next() & 1);
-  speed = static_cast<i8>(1 + (rng_next() & 1));
+  // Rocks step at 25 Hz: 1 = 25 px/s, 2 = 50 px/s.
+  // Large rocks drift calmly; medium/small pick up modest speed.
+  vx = 1;
+  vy = 1;
   if (size == ROCK_SMALL) {
-    speed = static_cast<i8>(speed + 1);
+    if ((rng_next() & 1) != 0) {
+      vx = 2;
+    } else {
+      vy = 2;
+    }
+  } else if (size == ROCK_MED && wave >= 2 && (rng_next() & 3) == 0) {
+    vx = 2;
   }
   if ((rng_next() & 1) != 0) {
-    speed = static_cast<i8>(-speed);
+    vx = static_cast<i8>(0 - static_cast<u8>(vx));
   }
-  rock_vx[i] = speed;
-  speed = static_cast<i8>(1 + (rng_next() & 1));
   if ((rng_next() & 1) != 0) {
-    speed = static_cast<i8>(-speed);
+    vy = static_cast<i8>(0 - static_cast<u8>(vy));
   }
-  rock_vy[i] = speed;
-  // Keep rocks from racing — large ones drift, small ones a little faster.
-  if (size == ROCK_LARGE) {
-    if (rock_vx[i] > 1) {
-      rock_vx[i] = 1;
-    }
-    if (rock_vx[i] < -1) {
-      rock_vx[i] = -1;
-    }
-    if (rock_vy[i] > 1) {
-      rock_vy[i] = 1;
-    }
-    if (rock_vy[i] < -1) {
-      rock_vy[i] = -1;
-    }
-  }
+  rock_vx[i] = vx;
+  rock_vy[i] = vy;
   rock_alive++;
   rock_spawn_draw(i);
+  return i;
 }
 
 static void clear_shots() {
@@ -726,6 +776,19 @@ static void clear_rocks() {
   rock_alive = 0;
 }
 
+static void split_pair(u8 child_size, u16 x, u16 y, u8 off) {
+  u8 c0 = spawn_rock(child_size, static_cast<u16>(x + off), y);
+  u8 c1 = spawn_rock(child_size, x, static_cast<u16>(y + off));
+  if (c0 != 255 && c1 != 255 && rock_vx[c0] == rock_vx[c1] &&
+      rock_vy[c0] == rock_vy[c1]) {
+    if ((rng_next() & 1) != 0) {
+      rock_vx[c1] = static_cast<i8>(0 - static_cast<u8>(rock_vx[c1]));
+    } else {
+      rock_vy[c1] = static_cast<i8>(0 - static_cast<u8>(rock_vy[c1]));
+    }
+  }
+}
+
 static void split_rock(u8 i) {
   u8 size = rock_size[i];
   u16 x = rock_x[i];
@@ -738,12 +801,10 @@ static void split_rock(u8 i) {
   sound_boom();
   if (size == ROCK_LARGE) {
     score = static_cast<unsigned>(score + 20);
-    spawn_rock(ROCK_MED, x + 4, y);
-    spawn_rock(ROCK_MED, x, y + 4);
+    split_pair(ROCK_MED, x, y, 4);
   } else if (size == ROCK_MED) {
     score = static_cast<unsigned>(score + 50);
-    spawn_rock(ROCK_SMALL, x + 2, y);
-    spawn_rock(ROCK_SMALL, x, y + 2);
+    split_pair(ROCK_SMALL, x, y, 2);
   } else {
     score = static_cast<unsigned>(score + 100);
   }
@@ -757,16 +818,18 @@ static void fire_shot() {
   u8 i;
   for (i = 0; i < AS_SHOTS; i++) {
     if (!shot_on[i]) {
+      i8 dx = thrust_dx(ship_dir);
+      i8 dy = thrust_dy(ship_dir);
       shot_on[i] = 1;
-      // Spawn from the nose of the 16x16 hull.
-      shot_x[i] = advance_x(ship_x, static_cast<i8>(8 + thrust_dx(ship_dir) * 6));
-      shot_y[i] = advance_y(ship_y, static_cast<i8>(8 + thrust_dy(ship_dir) * 6));
-      shot_vx[i] =
-          static_cast<i8>(ship_vx + thrust_dx(ship_dir) * static_cast<i8>(Pace::ShotSpeed));
-      shot_vy[i] =
-          static_cast<i8>(ship_vy + thrust_dy(ship_dir) * static_cast<i8>(Pace::ShotSpeed));
+      // Spawn from the nose of the 16x16 hull (shot is 2x3 centred at +1,+1).
+      shot_x[i] = advance_x(ship_x, static_cast<i8>(6 + dx * 2));
+      shot_y[i] = advance_y(ship_y, static_cast<i8>(6 + dy * 2));
+      shot_vx[i] = static_cast<i8>(vel_px(ship_vx) +
+                                   dx * static_cast<i8>(Pace::ShotSpeed));
+      shot_vy[i] = static_cast<i8>(vel_px(ship_vy) +
+                                   dy * static_cast<i8>(Pace::ShotSpeed));
       if (shot_vx[i] == 0 && shot_vy[i] == 0) {
-        shot_vy[i] = static_cast<i8>(-Pace::ShotSpeed);
+        shot_vy[i] = static_cast<i8>(-6);
       }
       shot_life[i] = Pace::ShotLife;
       shot_spawn_draw(i);
@@ -778,7 +841,7 @@ static void fire_shot() {
 }
 
 static void place_wave() {
-  u8 n = static_cast<u8>(3 + wave);
+  u8 n = static_cast<u8>(2 + wave);
   u8 i;
   if (n > 6) {
     n = 6;
@@ -786,14 +849,16 @@ static void place_wave() {
   clear_rocks();
   for (i = 0; i < n; i++) {
     u16 x = static_cast<u16>(20 + (rng_next() & 255));
-    u16 y = static_cast<u16>(24 + (rng_next() & 127));
+    u16 y = static_cast<u16>(24 + (rng_next() & 191));
     if (x > 280) {
       x = 280;
     }
-    // Keep clear of the ship spawn.
-    if (x > 140 && x < 180 && y > 100 && y < 140) {
-      x = 40;
-      y = 40;
+    if (y > 216) {
+      y = 216;
+    }
+    // Keep a generous safe berth around the ship spawn at (156, 120).
+    if (x > 96 && x < 216 && y > 68 && y < 176) {
+      x = (x < 156) ? 32 : 264;
     }
     spawn_rock(ROCK_LARGE, x, y);
   }
@@ -806,11 +871,15 @@ static void ship_reset() {
   ship_y = 120;
   ship_vx = 0;
   ship_vy = 0;
+  ship_fx = 0;
+  ship_fy = 0;
   ship_dir = 0;
   ship_fire_t = 0;
   fire_held = 0;
+  turn_held = 0;
   ship_turn_t = 0;
   ship_thrust_t = 0;
+  thrust_snd_t = 0;
   ship_fric_t = 0;
   ship_thrusting = 0;
   ship_invuln = Pace::Invuln;
@@ -877,7 +946,7 @@ u8 Title::show() {
     spin--;
     if (spin == 0) {
       spin = Pace::TitleSpin;
-      dir = static_cast<u8>((dir + 1) & 7);
+      dir = static_cast<u8>((dir + 1) & 15);
       paint_title_ship(ship_image(dir, 0));
     }
   }
@@ -929,20 +998,64 @@ static void dying() {
   phase = PhasePlay;
 }
 
+static void step_axis(u16* pos, u8* frac, i8 vel, u16 lo, u16 span) {
+  u8 uv = static_cast<u8>(vel);
+  if (uv == 0) {
+    return;
+  }
+  if (uv < 128) {
+    u8 sum = static_cast<u8>(*frac + uv);
+    u8 step = static_cast<u8>(sum >> 4);
+    *frac = static_cast<u8>(sum & 15);
+    if (step != 0) {
+      u16 next = static_cast<u16>(*pos + step);
+      if (next >= static_cast<u16>(lo + span)) {
+        next = static_cast<u16>(next - span);
+      }
+      *pos = next;
+    }
+  } else {
+    u8 mag = static_cast<u8>(0 - uv);
+    u8 diff = static_cast<u8>(*frac + 48 - mag);
+    u8 step = static_cast<u8>(3 - (diff >> 4));
+    *frac = static_cast<u8>(diff & 15);
+    if (step != 0) {
+      if (*pos >= static_cast<u16>(lo + step)) {
+        *pos = static_cast<u16>(*pos - step);
+      } else {
+        *pos = static_cast<u16>(*pos + (span - step));
+      }
+    }
+  }
+}
+
 void beat_ship() {
   if (phase != PhasePlay || !ship_on) {
     return;
   }
-  if (ship_turn_t > 0) {
-    ship_turn_t--;
-  }
-  if (ship_turn_t == 0) {
-    if (key_bits & KeyLeft) {
-      ship_dir = static_cast<u8>((ship_dir + 7) & 7);
-      ship_turn_t = Pace::TurnGap;
-    } else if (key_bits & KeyRight) {
-      ship_dir = static_cast<u8>((ship_dir + 1) & 7);
-      ship_turn_t = Pace::TurnGap;
+  // Tap = exact single 22.5 deg step; hold = initial pause then smooth sweep.
+  {
+    u8 turn_key = static_cast<u8>(key_bits & (KeyLeft | KeyRight));
+    if (turn_key == 0) {
+      turn_held = 0;
+      ship_turn_t = 0;
+    } else if (turn_key != turn_held) {
+      turn_held = turn_key;
+      if (turn_key & KeyLeft) {
+        ship_dir = static_cast<u8>((ship_dir + 15) & 15);
+      } else {
+        ship_dir = static_cast<u8>((ship_dir + 1) & 15);
+      }
+      ship_turn_t = Pace::TurnDelay;
+    } else if (ship_turn_t > 0) {
+      ship_turn_t--;
+    } else {
+      if (turn_key & KeyLeft) {
+        ship_dir = static_cast<u8>((ship_dir + 15) & 15);
+      } else {
+        ship_dir = static_cast<u8>((ship_dir + 1) & 15);
+      }
+      ship_turn_t = Pace::TurnRepeat;
     }
   }
   ship_thrusting = 0;
@@ -953,16 +1066,30 @@ void beat_ship() {
     } else {
       ship_vx = clamp_vel(static_cast<i8>(ship_vx + thrust_dx(ship_dir)));
       ship_vy = clamp_vel(static_cast<i8>(ship_vy + thrust_dy(ship_dir)));
-      sound_thrust();
+      while (static_cast<u8>(abs_vel(ship_vx) + abs_vel(ship_vy)) >
+             Pace::SpeedOctMax) {
+        friction(&ship_vx);
+        friction(&ship_vy);
+      }
       ship_thrust_t = Pace::ThrustGap;
     }
+    if (thrust_snd_t > 0) {
+      thrust_snd_t--;
+    } else {
+      sound_thrust();
+      thrust_snd_t = 3;
+    }
     ship_fric_t = Pace::FrictionGap;
-  } else if (ship_fric_t > 0) {
-    ship_fric_t--;
   } else {
-    friction(&ship_vx);
-    friction(&ship_vy);
-    ship_fric_t = Pace::FrictionGap;
+    ship_thrust_t = 0;
+    thrust_snd_t = 0;
+    if (ship_fric_t > 0) {
+      ship_fric_t--;
+    } else {
+      friction(&ship_vx);
+      friction(&ship_vy);
+      ship_fric_t = Pace::FrictionGap;
+    }
   }
   // Tap = one shot (even mid-gap). Hold = autofire when ship_fire_t hits 0.
   {
@@ -979,40 +1106,11 @@ void beat_ship() {
       fire_held = 0;
     }
   }
-  // Move in byte arithmetic; advance_x/advance_y are 16-bit helper
-  // calls that cost more than the move when called every tick.
-  if (static_cast<u8>(ship_vx) != 0) {
-    u8 uv = static_cast<u8>(ship_vx);
-    if (uv < 128) {
-      ship_x = static_cast<u16>(ship_x + uv);
-      if (ship_x >= FieldW) {
-        ship_x = static_cast<u16>(ship_x - FieldW);
-      }
-    } else if (ship_x >= static_cast<u8>(0 - uv)) {
-      ship_x = static_cast<u16>(ship_x - static_cast<u8>(0 - uv));
-    } else {
-      ship_x = static_cast<u16>(ship_x + (FieldW - static_cast<u8>(0 - uv)));
-    }
-  }
-  if (static_cast<u8>(ship_vy) != 0) {
-    u8 uv = static_cast<u8>(ship_vy);
-    if (uv < 128) {
-      ship_y = static_cast<u16>(ship_y + uv);
-      if (ship_y >= FieldY1) {
-        ship_y = static_cast<u16>(ship_y - (FieldY1 - FieldY0));
-      }
-    } else if (ship_y >= static_cast<u8>(FieldY0 + static_cast<u8>(0 - uv))) {
-      ship_y = static_cast<u16>(ship_y - static_cast<u8>(0 - uv));
-    } else {
-      ship_y = static_cast<u16>(ship_y + ((FieldY1 - FieldY0) - static_cast<u8>(0 - uv)));
-    }
-  }
+  step_axis(&ship_x, &ship_fx, ship_vx, 0, FieldW);
+  step_axis(&ship_y, &ship_fy, ship_vy, FieldY0, FieldY1 - FieldY0);
   if (ship_invuln > 0) {
     ship_invuln--;
   }
-  // The paint decision (including the every-other-tick repair
-  // repaint of a stationary ship) is ship_paint in asteroids_fx.s;
-  // the C++ version of this check cost ~8K cycles a call.
   ship_paint();
 }
 

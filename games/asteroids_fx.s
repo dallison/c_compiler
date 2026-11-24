@@ -186,57 +186,6 @@ cell_wipe:
   STA fx_len
   JMP fx_wipe
 
-// Large rock: 16x16 as two 32-byte character-row windows. as_src points at
-// the top half; the bottom half follows immediately.
-.global cell_draw_large
-cell_draw_large:
-  LDA as_col
-  STA fx_col
-  LDA as_row
-  STA fx_row
-  LDA as_src
-  STA fx_src
-  LDA as_src+1
-  STA fx_src+1
-  LDA #AS_LARGE_LEN
-  STA fx_len
-  JSR fx_cell
-  LDA as_col
-  STA fx_col
-  LDA as_row
-  CLC
-  ADC #1
-  STA fx_row
-  CLC
-  LDA as_src
-  ADC #AS_LARGE_LEN
-  STA fx_src
-  LDA as_src+1
-  ADC #0
-  STA fx_src+1
-  LDA #AS_LARGE_LEN
-  STA fx_len
-  JMP fx_cell
-
-.global cell_wipe_large
-cell_wipe_large:
-  LDA as_col
-  STA fx_col
-  LDA as_row
-  STA fx_row
-  LDA #AS_LARGE_LEN
-  STA fx_len
-  JSR fx_wipe
-  LDA as_col
-  STA fx_col
-  LDA as_row
-  CLC
-  ADC #1
-  STA fx_row
-  LDA #AS_LARGE_LEN
-  STA fx_len
-  JMP fx_wipe
-
 // Missile strip: as_col = byte column, as_y = top pixel row, as_src =
 // AS_SHOT_LEN bytes (one Mode-1 byte per row).
 .global shot_draw
@@ -359,8 +308,13 @@ rs_live:
   TXA
   ASL A
   STA R_OFF
-  // Every rock moves every call; repaints are staggered by index
-  // parity further down (see rs_moved).
+  // Advance each rock on its parity tick (25 Hz) so rocks drift at
+  // classic arcade pace and logical position matches the drawn cell.
+  TXA
+  AND #1
+  CMP rs_parity
+  BEQ rs_move
+  JMP rs_ydone
 rs_move:
   // x += vx (sign-extended), wrapped into 0..303.
   LDY R_OFF
@@ -598,7 +552,7 @@ rs_dxabs:
 rs_dxchk:
   LDA R_DX+1
   BNE rs_nohit
-  LDA #5
+  LDA #3
   CLC
   ADC R_RAD
   CMP R_DX
@@ -644,7 +598,7 @@ rs_dyabs:
 rs_dychk:
   LDA R_DX+1
   BNE rs_nohit
-  LDA #5
+  LDA #3
   CLC
   ADC R_RAD
   CMP R_DX
@@ -811,7 +765,7 @@ ss_ron:
   LDY B_CNT
   LDA rock_rad_tab, Y
   STA R_RAD
-  // dx = (shot_x + 4) - (rock_x + rad), absolute.
+  // dx = (shot_x + 1) - (rock_x + rad), absolute.
   LDY R_T0
   LDA rock_x, Y
   CLC
@@ -823,7 +777,7 @@ ss_ron:
   LDY R_OFF
   LDA shot_x, Y
   CLC
-  ADC #4
+  ADC #1
   SEC
   SBC R_DX
   STA R_DX
@@ -845,7 +799,7 @@ ss_dxchk:
   BEQ ss_dxok
   JMP ss_rnext
 ss_dxok:
-  LDA #2
+  LDA #3
   CLC
   ADC R_RAD
   CMP R_DX
@@ -863,7 +817,7 @@ ss_dxok:
   LDY R_OFF
   LDA shot_y, Y
   CLC
-  ADC #4
+  ADC #1
   SEC
   SBC R_DX
   STA R_DX
@@ -885,7 +839,7 @@ ss_dychk:
   BEQ ss_dyok
   JMP ss_rnext
 ss_dyok:
-  LDA #2
+  LDA #3
   CLC
   ADC R_RAD
   CMP R_DX
@@ -1268,6 +1222,14 @@ ship_img_tab:
   .hword k_as_ship5
   .hword k_as_ship6
   .hword k_as_ship7
+  .hword k_as_ship8
+  .hword k_as_ship9
+  .hword k_as_ship10
+  .hword k_as_ship11
+  .hword k_as_ship12
+  .hword k_as_ship13
+  .hword k_as_ship14
+  .hword k_as_ship15
   .hword k_as_ship_t0
   .hword k_as_ship_t1
   .hword k_as_ship_t2
@@ -1276,12 +1238,36 @@ ship_img_tab:
   .hword k_as_ship_t5
   .hword k_as_ship_t6
   .hword k_as_ship_t7
+  .hword k_as_ship_t8
+  .hword k_as_ship_t9
+  .hword k_as_ship_t10
+  .hword k_as_ship_t11
+  .hword k_as_ship_t12
+  .hword k_as_ship_t13
+  .hword k_as_ship_t14
+  .hword k_as_ship_t15
 
 ship_repair:
 .byte 0
 
 .global ship_paint
 ship_paint:
+  // Flash the hull at 6.25 Hz while post-respawn invulnerability is active.
+  LDA ship_invuln
+  AND #4
+  BEQ sp_vis
+  LDA ship_shown
+  BEQ sp_blink_ret
+  LDA ship_px
+  STA as_col
+  LDA ship_py
+  STA as_y
+  JSR soft_wipe_ship
+  LDA #0
+  STA ship_shown
+sp_blink_ret:
+  RTS
+sp_vis:
   // ncol = ship_x >> 2 (ship_y < 256, so sy is its low byte).
   LDA ship_x
   LSR A
@@ -1327,6 +1313,7 @@ sp_paint:
   STA ship_dir_shown
   LDA ship_thrusting
   STA ship_thrust_shown
+  ASL A
   ASL A
   ASL A
   ASL A
