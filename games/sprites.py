@@ -1479,13 +1479,13 @@ def main():
         emit("k_as_shot%d" % i, [encode(r)[0] for r in rows(art)], per_line=3)
     emit("k_as_boom0", cell(AS_BOOM0))
     emit("k_as_boom1", cell(AS_BOOM1))
-    # Galaxian convoy + player (6-col windows like Invaders aliens).
+    # Galaxian convoy + divers (96B 2px-phase pairs) + player.
     for frame, art in enumerate(GX_FLAG):
-        emit("k_gx_flag%d" % frame, window(art, 0))
+        emit("k_gx_flag%d" % frame, pair(art))
     for frame, art in enumerate(GX_RED):
-        emit("k_gx_red%d" % frame, window(art, 0))
+        emit("k_gx_red%d" % frame, pair(art))
     for frame, art in enumerate(GX_BLUE):
-        emit("k_gx_blue%d" % frame, window(art, 0))
+        emit("k_gx_blue%d" % frame, pair(art))
     emit("k_gx_ship", pair(GX_SHIP))
     emit("k_gx_ship_red", pair(GX_SHIP.replace("W", "R").replace("G", "R")))
     # Centipede: 8x8 cells (head/body/mushroom/spider) + 16x8 player.

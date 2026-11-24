@@ -29,6 +29,9 @@
 shot_pat:
 .space SHOT_SPAN
 
+dv_col_buf:
+.space 12
+
 // ---------------------------------------------------------------- misc
 
 .global frame_wait
@@ -308,7 +311,9 @@ dl_free:
   STX E_SLOT
   LDY dive_pick
   LDA fl_on, Y
-  BEQ dl_out
+  BNE dl_go
+  RTS
+dl_go:
   LDA #0
   STA fl_on, Y
   // Wipe formation cell (6-col window starts one column left of the pitch).
@@ -332,15 +337,17 @@ dl_free:
   TAY
   LDA #1
   STA dv_on, X
-  // Pixel x of the formation slot (byte col * 4).
+  // 16-bit pixel x of the formation slot (byte col * 4).
+  LDA #0
+  STA dv_xh, X
   LDA idx_col5, Y
   CLC
   ADC fl_col
   ASL A
+  ROL dv_xh, X
   ASL A
+  ROL dv_xh, X
   STA dv_x, X
-  LDA #0
-  STA dv_xh, X
   // Character row -> pixel y.
   LDA idx_rank, Y
   ASL A
@@ -350,9 +357,11 @@ dl_free:
   ASL A
   ASL A
   STA dv_y, X
-  // Aim toward the cannon: left or right.
+  // 16-bit aim toward the cannon: left or right.
   LDA cannon_x
   CMP dv_x, X
+  LDA cannon_x+1
+  SBC dv_xh, X
   BCS dl_right
   LDA #256-2
   STA dv_vx, X
@@ -367,6 +376,7 @@ dl_vy:
   STA dv_phase, X
   LDA #1
   STA dive_event
+  JSR diver_paint
 dl_out:
   RTS
 
@@ -388,14 +398,9 @@ ds_next:
   RTS
 
 diver_move:
-  // Remember the old cell; paint the new pose first. Wipe the old cell
-  // only when the character row changes (no vertical overlap). Horizontal
-  // steps rely on the window's blank pads, like the convoy sway.
-  JSR diver_cell
-  LDA fx_col
-  STA E_OC
-  LDA fx_row
-  STA E_OR
+  // Each 2px step blits a 6-col x 12-scanline padded strip (1 blank col left
+  // & right, 2 blank scanlines top & bottom), wiping trailing edges in-pass
+  // with smooth pixel-level diagonal motion and zero flicker.
   LDX E_SLOT
   // Horizontal.
   LDA dv_vx, X
@@ -478,36 +483,26 @@ dm_home:
   BCS dm_draw
   JMP diver_rejoin
 dm_draw:
-  JSR diver_paint
-  JSR diver_cell
-  LDA fx_row
-  CMP E_OR
-  BEQ dm_out
-  LDA E_OC
-  STA fx_col
-  LDA E_OR
-  STA fx_row
-  LDA #48
-  STA fx_len
-  JMP fx_wipe
-dm_out:
-  RTS
+  JMP diver_paint
 
-diver_cell:
+diver_wipe:
   LDX E_SLOT
-  LDA dv_xh, X
-  LSR A
   LDA dv_x, X
-  ROR A
-  LSR A
-  SEC
-  SBC #1
-  STA fx_col
+  STA E_X
+  LDA dv_xh, X
+  STA E_X+1
   LDA dv_y, X
-  LSR A
-  LSR A
-  LSR A
-  STA fx_row
+  STA fx_y
+  JSR window_col
+  LDA #8
+  STA fx_len
+  LDA #6
+  STA E_LEFT
+dw_col:
+  JSR fx_blank
+  INC fx_col
+  DEC E_LEFT
+  BNE dw_col
   RTS
 
 diver_paint:
@@ -519,19 +514,55 @@ diver_paint:
   ASL A
   TAY
   LDA alien_spr, Y
-  STA fx_src
+  STA E_T0
   LDA alien_spr+1, Y
-  STA fx_src+1
+  STA E_T1
   LDA dv_x, X
   STA E_X
   LDA dv_xh, X
   STA E_X+1
+  AND #0
+  LDA E_X
+  AND #2
+  BEQ dp_even
+  CLC
+  LDA E_T0
+  ADC #48
+  STA E_T0
+  BCC dp_even
+  INC E_T1
+dp_even:
+  JSR window_col
+  LDX E_SLOT
   LDA dv_y, X
-  LSR A
-  LSR A
-  LSR A
-  STA fx_row
-  JMP window_draw
+  SEC
+  SBC #2
+  STA fx_y
+  LDA #12
+  STA fx_len
+  LDA #%lo(dv_col_buf)
+  STA fx_src
+  LDA #%hi(dv_col_buf)
+  STA fx_src+1
+  LDY #0
+  LDA #6
+  STA E_LEFT
+dp_col:
+  LDX #0
+dp_row:
+  LDA (E_T0), Y
+  STA dv_col_buf+2, X
+  INY
+  INX
+  CPX #8
+  BCC dp_row
+  STY E_C4
+  JSR fx_strip
+  LDY E_C4
+  INC fx_col
+  DEC E_LEFT
+  BNE dp_col
+  RTS
 
 diver_vs_cannon:
   LDX E_SLOT
@@ -570,6 +601,7 @@ dvc_out:
   RTS
 
 diver_rejoin:
+  JSR diver_wipe
   LDX E_SLOT
   LDY dv_idx, X
   LDA #1
@@ -616,10 +648,7 @@ dc_loop:
   STX E_SLOT
   LDA dv_on, X
   BEQ dc_next
-  JSR diver_cell
-  LDA #48
-  STA fx_len
-  JSR fx_wipe
+  JSR diver_wipe
   LDX E_SLOT
   LDY dv_idx, X
   LDA #1
@@ -640,10 +669,7 @@ diver_kill:
   LDA dv_on, X
   BEQ dk_out
   STX E_SLOT
-  JSR diver_cell
-  LDA #48
-  STA fx_len
-  JSR fx_wipe
+  JSR diver_wipe
   LDX E_SLOT
   LDY dv_idx, X
   LDA idx_rank, Y
@@ -779,12 +805,12 @@ hd_loop:
   ADC #1
   CMP #4
   BCS hd_next
-  LDA dv_y, X
-  CMP shot_y
-  BCC hd_next
   SEC
-  SBC #8
-  CMP shot_y
+  LDA shot_y
+  SBC dv_y, X
+  CLC
+  ADC #5
+  CMP #13
   BCS hd_next
   // Hit.
   LDA #2

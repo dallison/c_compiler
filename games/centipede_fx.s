@@ -25,6 +25,15 @@
 shot_pat:
 .space CE_SHOT_SPAN
 
+old_px_lo:
+.byte 0
+old_px_hi:
+.byte 0
+old_prow:
+.byte 0
+row_cd:
+.byte 0
+
 .global frame_wait
 frame_wait:
   LDA #19
@@ -271,16 +280,34 @@ player_step:
   AND #KEY_FIRE
   ORA fire_want
   STA fire_want
+  LDA player_x
+  STA old_px_lo
+  LDA player_x+1
+  STA old_px_hi
+  LDA player_row
+  STA old_prow
+  LDA #0
+  STA E_OLD
+
+  // Reset vertical repeat timer on release so fresh taps respond immediately.
   LDA key_bits
-  LSR A
-  BCS ps_left
-  LSR A
-  BCS ps_right
-  LSR A
-  BCS ps_up
-  LSR A
-  BCS ps_down
-  BCC ps_fire
+  AND #(KEY_UP | KEY_DOWN)
+  BNE ps_cd_tick
+  STA row_cd
+  JMP ps_horiz
+ps_cd_tick:
+  LDA row_cd
+  BEQ ps_horiz
+  DEC row_cd
+
+ps_horiz:
+  LDA key_bits
+  AND #KEY_LEFT
+  BNE ps_left
+  LDA key_bits
+  AND #KEY_RIGHT
+  BNE ps_right
+  JMP ps_vert
 ps_left:
   LDA player_x+1
   BNE ps_go_l
@@ -295,7 +322,9 @@ ps_go_l:
   LDA player_x+1
   SBC #0
   STA player_x+1
-  JMP ps_moved
+  LDA #1
+  STA E_OLD
+  JMP ps_vert
 ps_right:
   LDA player_x+1
   BNE ps_go_r
@@ -310,30 +339,80 @@ ps_go_r:
   LDA player_x+1
   ADC #0
   STA player_x+1
-  JMP ps_moved
-ps_up:
-  LDA player_row
-  CMP #CE_PLAYER_MIN_ROW
-  BEQ ps_fire
-  BCC ps_fire
-  DEC player_row
-  JMP ps_moved
-ps_down:
-  LDA player_row
-  CMP #CE_ROWS-1
-  BCS ps_fire
-  INC player_row
-  JMP ps_moved
+  LDA #1
+  STA E_OLD
+
 ps_vert:
+  LDA row_cd
+  BNE ps_apply
   LDA key_bits
   AND #KEY_UP
   BNE ps_up
   LDA key_bits
   AND #KEY_DOWN
   BNE ps_down
-  JMP ps_fire
-ps_moved:
+  JMP ps_apply
+ps_up:
+  LDA player_row
+  CMP #CE_PLAYER_MIN_ROW
+  BEQ ps_apply
+  BCC ps_apply
+  DEC player_row
+  JMP ps_vset
+ps_down:
+  LDA player_row
+  CMP #CE_ROWS-1
+  BCS ps_apply
+  INC player_row
+ps_vset:
+  LDA #3
+  STA row_cd
+  LDA E_OLD
+  ORA #2
+  STA E_OLD
+
+ps_apply:
+  LDA E_OLD
+  BEQ ps_fire
   JSR player_draw
+  LDA E_OLD
+  AND #2
+  BEQ ps_fire
+  // Row changed: wipe old 6-col window and restore any mushrooms on old_prow.
+  LDA old_px_lo
+  STA E_X
+  LDA old_px_hi
+  STA E_X+1
+  LDA old_prow
+  CLC
+  ADC #CE_ORIGIN_ROW
+  STA fx_row
+  JSR window_wipe
+  LDA fx_col
+  SEC
+  SBC #CE_ORIGIN_COL
+  BCS ps_mc_ok
+  LDA #0
+  JMP ps_mc_go
+ps_mc_ok:
+  LSR A
+ps_mc_go:
+  STA E_C
+  LDA #4
+  STA E_SLOT
+ps_mush_loop:
+  LDA E_C
+  CMP #CE_COLS
+  BCS ps_mush_done
+  STA ce_col
+  LDA old_prow
+  STA ce_row
+  JSR mush_draw
+  INC E_C
+  DEC E_SLOT
+  BNE ps_mush_loop
+ps_mush_done:
+
 ps_fire:
   LDA fire_want
   BEQ ps_out
@@ -375,11 +454,13 @@ shot_fire:
   LSR A
   STA shot_col
   LDA player_row
+  CLC
+  ADC #CE_ORIGIN_ROW
   ASL A
   ASL A
   ASL A
   SEC
-  SBC #2
+  SBC #CE_SHOT_SPAN
   STA shot_y
   LDA #1
   STA shot_on
