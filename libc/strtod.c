@@ -129,6 +129,111 @@ static void PackSubnormal(int* exp, uint64_t* fraction, uint64_t top,
 }
 #endif
 
+// Enough decimal digits to fill the upper fixed-point half (~19.27 digits
+// per 64-bit word). Digits past this only affect the decimal exponent.
+enum { kMaxSigDigits = FIXED_SIZE_HALF * 20 };
+
+// Active word count: highest non-zero word + 1 (at least 1).
+static size_t ActiveWords(const uint64_t* words, size_t count) {
+  while (count > 1 && words[count - 1] == 0) {
+    --count;
+  }
+  return count;
+}
+
+// Divide `words[0..count)` by a small constant (10 or 1e9). Leading zero
+// words are skipped so sparse values stay cheap on soft-float targets.
+static uint32_t DivModWordsByConst(uint64_t* words, size_t count,
+                                   uint32_t divisor) {
+  count = ActiveWords(words, count);
+  uint64_t remainder = 0;
+  for (size_t i = count; i > 0; --i) {
+    uint64_t word = words[i - 1];
+    uint64_t high = (remainder << 32) | (word >> 32);
+    uint64_t quotient_high = high / divisor;
+    remainder = high % divisor;
+    uint64_t low = (remainder << 32) | (uint32_t)word;
+    uint64_t quotient_low = low / divisor;
+    remainder = low % divisor;
+    words[i - 1] = (quotient_high << 32) | quotient_low;
+  }
+  return (uint32_t)remainder;
+}
+
+// Multiply the multiword little-endian value by a small constant in place.
+static void MultiplyWordsByConst(uint64_t* words, size_t capacity,
+                                 uint32_t m) {
+  size_t count = ActiveWords(words, capacity);
+  uint64_t carry = 0;
+  for (size_t i = 0; i < count; ++i) {
+    uint64_t lo = (uint32_t)words[i];
+    uint64_t hi = words[i] >> 32;
+    uint64_t p_lo = lo * m + (uint32_t)carry;
+    uint64_t c1 = p_lo >> 32;
+    p_lo &= 0xffffffffu;
+    uint64_t p_hi = hi * m + (carry >> 32) + c1;
+    words[i] = p_lo | (p_hi << 32);
+    carry = p_hi >> 32;
+  }
+  if (carry != 0 && count < capacity) {
+    words[count] = carry;
+  }
+}
+
+// Multiply the full fixed-point value by 10^|scale| (scale > 0) or divide
+// by 10^|scale| (scale < 0). Uses 1e9 chunks so large exponents are not a
+// soft-float timeout.
+static void ScaleByPowerOf10(uint64_t fx[FIXED_SIZE_WORDS], int scale) {
+  if (scale == 0) {
+    return;
+  }
+  if (scale > 0) {
+    while (scale >= 9) {
+      MultiplyWordsByConst(fx, FIXED_SIZE_WORDS, 1000000000u);
+      scale -= 9;
+    }
+    while (scale-- > 0) {
+      MultiplyWordsByConst(fx, FIXED_SIZE_WORDS, 10u);
+    }
+    return;
+  }
+  scale = -scale;
+  while (scale >= 9) {
+    DivModWordsByConst(fx, FIXED_SIZE_WORDS, 1000000000u);
+    scale -= 9;
+  }
+  while (scale-- > 0) {
+    DivModWordsByConst(fx, FIXED_SIZE_WORDS, 10u);
+  }
+}
+
+// Append one decimal digit to the integer half, or fold it into exp_adjust
+// once the significand is already full.
+static void AppendDigit(uint64_t* half, uint64_t digit_word[FIXED_SIZE_HALF],
+                        int digit, int* sig_digits, int* exp_adjust) {
+  if (*sig_digits < kMaxSigDigits) {
+    digit_word[0] = (uint64_t)digit;
+    __MultiplyBy10Half(half);
+    __AddHalf(half, digit_word);
+    ++(*sig_digits);
+  } else {
+    ++(*exp_adjust);
+  }
+}
+
+static void FlushPendingZeros(uint64_t* half, int* pending_zeros,
+                              int* sig_digits, int* exp_adjust) {
+  while (*pending_zeros > 0) {
+    if (*sig_digits < kMaxSigDigits) {
+      __MultiplyBy10Half(half);
+      ++(*sig_digits);
+    } else {
+      ++(*exp_adjust);
+    }
+    --(*pending_zeros);
+  }
+}
+
 double strtod(const char* str, char** endptr) {
   uint64_t fx[FIXED_SIZE_WORDS] = {0};
   uint64_t n[FIXED_SIZE_HALF] = {0};
@@ -149,41 +254,63 @@ double strtod(const char* str, char** endptr) {
   
   bool converted = false;
   bool nonzero_digit = false;
+  int sig_digits = 0;
+  // Powers of ten not yet applied to fx (positive => multiply later).
+  int exp_adjust = 0;
+  int pending_zeros = 0;
+  uint64_t* half = fx + FIXED_SIZE_HALF;
 
-  // Convert integral part to binary.  This is put into the top
-  // half of the fixed point number - the integral part.
-  int fraction_digits = 0;
+  // Integral digits. Trailing zeros become exp_adjust instead of ×10 loops.
   while (isdigit(*p)) {
     converted = true;
-    if (*p != '0') {
+    int digit = *p - '0';
+    if (digit == 0) {
+      if (nonzero_digit) {
+        ++pending_zeros;
+      }
+    } else {
+      FlushPendingZeros(half, &pending_zeros, &sig_digits, &exp_adjust);
       nonzero_digit = true;
+      AppendDigit(half, n, digit, &sig_digits, &exp_adjust);
     }
-    n[0] = *p - '0';
-    __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
-    __AddHalf(fx + FIXED_SIZE_HALF, n);
     p++;
   }
+
+  // Fractional digits. Leading zeros before the first nonzero digit are
+  // pure exponent; trailing zeros cancel with the later ÷10 and are dropped.
+  // Integer zeros immediately before '.' are real significand places
+  // (e.g. 1000.5), so flush them into `half` rather than exp_adjust.
+  int fraction_digits = 0;
   if (*p == '.') {
+    FlushPendingZeros(half, &pending_zeros, &sig_digits, &exp_adjust);
     p++;
-    // We have a fractional part, continue accumulating and count the
-    // number of fractional digits.
     while (isdigit(*p)) {
       converted = true;
-      if (*p != '0') {
-        nonzero_digit = true;
+      int digit = *p - '0';
+      if (!nonzero_digit) {
+        if (digit == 0) {
+          --exp_adjust;
+        } else {
+          nonzero_digit = true;
+          AppendDigit(half, n, digit, &sig_digits, &exp_adjust);
+          ++fraction_digits;
+        }
+      } else if (digit == 0) {
+        ++pending_zeros;
+      } else {
+        int zeros = pending_zeros;
+        FlushPendingZeros(half, &pending_zeros, &sig_digits, &exp_adjust);
+        fraction_digits += zeros + 1;
+        AppendDigit(half, n, digit, &sig_digits, &exp_adjust);
       }
-      n[0] = *p - '0';
-      __MultiplyBy10Half(fx + FIXED_SIZE_HALF);
-      __AddHalf(fx + FIXED_SIZE_HALF, n);
       p++;
-      fraction_digits++;
     }
-    
-    // Now shift the fractional part down to the lower half - to the right
-    // of the binary point.
-    for (int i = 0; i < fraction_digits; i++) {
-      __DivideBy10(fx);
-    }
+    // Drop trailing fractional zeros (they would ×10 then ÷10).
+    pending_zeros = 0;
+    exp_adjust -= fraction_digits;
+  } else {
+    exp_adjust += pending_zeros;
+    pending_zeros = 0;
   }
   
   if (!converted) {
@@ -213,55 +340,47 @@ double strtod(const char* str, char** endptr) {
       } while (isdigit(*exponent));
       p = exponent;
 
-      // Skip the digit-by-digit scale only when the coefficient's magnitude
-      // plus this exponent is far outside binary64. A large exponent on a
-      // tiny coefficient can still be finite, so the exponent alone is not
-      // enough.
-      if (nonzero_digit && decimal_exp > 300) {
-        int top_bit = -1;
-        for (int word = FIXED_SIZE_WORDS - 1; word >= 0; --word) {
-          uint64_t bits = fx[word];
-          if (bits == 0) {
-            continue;
-          }
-          int bit = 63;
-          while ((bits & (1ULL << bit)) == 0) {
-            --bit;
-          }
-          top_bit = word * 64 + bit;
-          break;
-        }
-        if (top_bit >= 0) {
-          int binary_point = FIXED_SIZE_HALF * 64;
-          // 3322/1000 approximates log2(10).
-          long long log2_times_1000 =
-              (long long)(top_bit - binary_point) * 1000;
-          long long exp_times_1000 = (long long)decimal_exp * 3322;
-          if (negative_exp) {
-            exp_times_1000 = -exp_times_1000;
-          }
-          log2_times_1000 += exp_times_1000;
-          if (log2_times_1000 > 1200LL * 1000 ||
-              log2_times_1000 < -1200LL * 1000) {
-            if (endptr != NULL) {
-              *endptr = (char*)p;
-            }
-            return RangeResult(log2_times_1000 > 0 ? 1 : 0, negative);
-          }
-        }
-      }
-
       if (negative_exp) {
-        for (int i = 0; i < decimal_exp; i++) {
-          __DivideBy10(fx);
-        }
+        exp_adjust -= decimal_exp;
       } else {
-        for (int i = 0; i < decimal_exp; i++) {
-          __MultiplyBy10(fx);
-        }
+        exp_adjust += decimal_exp;
       }
     }
   }
+
+  // Skip the digit-by-digit scale only when the coefficient's magnitude
+  // plus the net decimal exponent is far outside binary64.
+  if (nonzero_digit && (exp_adjust > 300 || exp_adjust < -300)) {
+    int top_bit = -1;
+    for (int word = FIXED_SIZE_WORDS - 1; word >= 0; --word) {
+      uint64_t bits = fx[word];
+      if (bits == 0) {
+        continue;
+      }
+      int bit = 63;
+      while ((bits & (1ULL << bit)) == 0) {
+        --bit;
+      }
+      top_bit = word * 64 + bit;
+      break;
+    }
+    if (top_bit >= 0) {
+      int binary_point = FIXED_SIZE_HALF * 64;
+      // 3322/1000 approximates log2(10).
+      long long log2_times_1000 =
+          (long long)(top_bit - binary_point) * 1000;
+      log2_times_1000 += (long long)exp_adjust * 3322;
+      if (log2_times_1000 > 1200LL * 1000 ||
+          log2_times_1000 < -1200LL * 1000) {
+        if (endptr != NULL) {
+          *endptr = (char*)p;
+        }
+        return RangeResult(log2_times_1000 > 0 ? 1 : 0, negative);
+      }
+    }
+  }
+
+  ScaleByPowerOf10(fx, exp_adjust);
   if (endptr != NULL) {
     *endptr = p;
   }

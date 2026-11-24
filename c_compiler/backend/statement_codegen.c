@@ -999,7 +999,12 @@ void GenerateCleanupLandingPads(Generator* gen) {
       GeneratorEmit(gen, skip);
     }
     if (pad->end_catch) {
-      EmitCxaEndCatch(gen, location);
+      if (UsesExceptionHeaders(gen)) {
+        EmitCxaEndCatch(gen, location);
+      } else {
+        GenerateNoArgRuntimeCall(gen,
+                                 GetDaveCCConstexprEndCatchFunction(location));
+      }
     }
     if (UsesItaniumUnwind(gen)) {
       EmitUnwindResume(gen, location);
@@ -2315,7 +2320,7 @@ static void GenerateTryStatement(Generator* gen, TryASTNode* node) {
     } else {
       GenerateCatchBinding(gen, handler);
     }
-    if (UsesExceptionHeaders(gen)) {
+    if (UsesExceptionHeaders(gen) || gen->for_constant_evaluation) {
       handler_start = GeneratorEmit(gen, NewIR(IR_OP(label)));
     }
     GenerateStatement(gen, handler->stmt);

@@ -29,7 +29,7 @@ struct allocator_property {
 using property = allocator_property<std::allocator<int>>;
 
 static_assert(!property::copy_propagates);
-static_assert(!property::move_propagates);
+static_assert(property::move_propagates);
 static_assert(!property::swaps);
 static_assert(property::always_equal);
 

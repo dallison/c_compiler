@@ -34,8 +34,11 @@ static int EffectiveMemberAlignment(Struct* str, TypeRecord* type,
   // A packed struct places members on byte boundaries with no padding, so the
   // effective member alignment is 1.
   int alignment = str->packed ? 1 : TypeRecordAlignment(type);
-  // compiler->alignment == 1 means the target cannot honor alignas.
-  if (compiler->alignment > 1 && !str->packed && explicit_alignment > alignment) {
+  // Honor alignas / __attribute__((aligned(N))) even on targets whose default
+  // ABI alignment is 1 (e.g. 6502).  That default only means the target does
+  // not insert natural padding; an explicit alignment still controls layout
+  // and sizeof.
+  if (!str->packed && explicit_alignment > alignment) {
     alignment = explicit_alignment;
   }
   // #pragma pack(n) caps the effective alignment of each member at n bytes.
@@ -70,7 +73,7 @@ void FinalizeStructAlignment(Struct* str) {
     str->size = 1;
     str->alignment = align;
   }
-  if (compiler->alignment > 1 && str->explicit_alignment > align) {
+  if (str->explicit_alignment > align) {
     align = str->explicit_alignment;
     str->alignment = align;
   }

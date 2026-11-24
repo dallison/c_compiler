@@ -5246,8 +5246,13 @@ static void LowerGetBitField(W65C02Generator* g, IRNode* node) {
   int bit_size = (int)IRIntConstValue(node->inputs.value.p[2]);
   int byte_size = BitSizeToByteSize(bit_size);
   TargetInstruction* input = Materialize(g, input_node, Sizeof(input_node->type), true);
-  int output_size = Sizeof(input_node->type);
-  TargetInstruction* output = TempRegister(g, input_node->type, output_size);
+  // Widen to the bit-field result type (often wider than the container load,
+  // e.g. an 8-bit `enum : 8` field promoted to a 16-bit enum/int).
+  int output_size = Sizeof(node->type);
+  if (output_size < byte_size) {
+    output_size = byte_size;
+  }
+  TargetInstruction* output = TempRegister(g, node->type, output_size);
   
   // input is in a zero page register.
   int byte_index = bit_pos / 8;
@@ -5266,36 +5271,53 @@ static void LowerGetBitField(W65C02Generator* g, IRNode* node) {
       // Mask to correct width in byte.
       andi(g, (int)byte_mask);
     }
-    sta(g, output, i);
+    sta(g, output, i - byte_index);
     mask >>= 8;
   }
-  if (TypeIsUnsigned(node->type)) {
+  // Zero-extend when the field or its container load is unsigned.  Enum
+  // bit-fields are often typed as a signed enum even though the IR loads them
+  // with `loadu8`; using only `node->type` would sign-extend values with the
+  // high bit set (e.g. 152) and break switches on those codes.
+  bool zero_extend =
+      TypeIsUnsigned(node->type) || TypeIsUnsigned(input_node->type);
+  if (zero_extend) {
     // Remaining bytes of result are zero.
     ldai(g, 0);
-    for (int i = byte_index + byte_size; i < output_size; i++) {
+    for (int i = byte_size; i < output_size; i++) {
       sta(g, output, i);
     }
   } else {
-    // If the top bit of the input is set fill the remaining bytes with
-    // 0xff, otherwise fill them with zero.
-    lda(g, input, byte_index + byte_size - 1);
-    int top_bit = 1 << (((bit_pos + bit_size) % 8)- 1);
-    int upper_bits = ~((1 << (bit_size % 8)) - 1) & 0xff;
-    bool need_upper_bytes_set = (byte_index + byte_size) < output_size;
+    // If the top bit of the field is set fill the remaining bytes with
+    // 0xff, otherwise fill them with zero.  The extracted field lives at
+    // the low end of |output| (see sta above).
+    int last = byte_size - 1;
+    lda(g, output, last);
+    int top_bit = 1 << (((bit_pos + bit_size) % 8) - 1);
+    if ((bit_size % 8) == 0) {
+      top_bit = 0x80;
+    }
+    int upper_bits = (bit_size % 8) == 0
+                         ? 0
+                         : (~((1 << (bit_size % 8)) - 1) & 0xff);
+    bool need_upper_bytes_set = byte_size < output_size;
     if (need_upper_bytes_set) {
       ldxi(g, 0);
     }
     andi(g, top_bit);
     TargetInstruction* label = NewInstruction(W65C02_OP(label), kAddrModeImplied);
     EmitResolvedBranch(g, W65C02_OP(beq), label);
-    ldai(g, upper_bits);
+    if (upper_bits != 0) {
+      ldai(g, upper_bits);
+    }
     if (need_upper_bytes_set) {
       ldxi(g, 0xff);
     }
     Emit(g, label);
-    ora(g, output, byte_index + byte_size - 1);
-    sta(g, output,  byte_index + byte_size - 1);
-    for (int i = byte_index + byte_size; i < output_size; i++) {
+    if (upper_bits != 0) {
+      ora(g, output, last);
+      sta(g, output, last);
+    }
+    for (int i = byte_size; i < output_size; i++) {
       stx(g, output, i);
     }
   }
@@ -7549,11 +7571,24 @@ static void CompareGreaterOrEqualUnsignedIntegerExpression(W65C02Generator* g,
 }
 
 static void LowerCast(W65C02Generator* g, IRNode* node) {
-  TargetInstruction* expr = GetLoweredNode(node->inputs.value.p[0]);
+  IRNode* src_node = node->inputs.value.p[0];
+  TargetInstruction* expr = GetLoweredNode(src_node);
+  int dest_size = Sizeof(node->type);
+  int src_size = ZeroPageValueBytes(expr);
+  if (src_size < 0 && src_node->type != NULL) {
+    src_size = Sizeof(src_node->type);
+  }
   if (node->dest != NULL) {
     LowerIRNode(g, node->dest);
     TargetInstruction* dest = GetLoweredNode(node->dest);
-    Copy(g, dest, expr, 0, 0, Sizeof(node->type), GetAddrMode(dest), GetAddrMode(expr));
+    Copy(g, dest, expr, 0, 0, dest_size, GetAddrMode(dest), GetAddrMode(expr));
+    return;
+  }
+  // A widening cast must not leave the value in a too-narrow zero-page
+  // cell: later compares walk Sizeof(cast->type) bytes and would otherwise
+  // read the next register (`__b0+1`) as a high byte.
+  if (src_size > 0 && dest_size > src_size) {
+    SetLoweredNode(node, WidenForArithmetic(g, expr, src_node, dest_size));
     return;
   }
   SetLoweredNode(node, expr);

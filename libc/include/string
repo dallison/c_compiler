@@ -138,7 +138,21 @@ class basic_string {
   // True when [s, s + n) refers to characters this string already owns.
   // `*offset` is the index of s. Call this before any reallocation.
   constexpr bool __interior(const CharT* s, size_type n, size_type* offset) const {
-    if (n == 0 || s < __data || s > __data + __size) {
+    if (n == 0) {
+      return false;
+    }
+    if (__builtin_is_constant_evaluated()) {
+      // Relational comparison of pointers into unrelated objects is not a
+      // constant expression, so locate `s` by equality instead.
+      for (size_type i = 0; i < __size; ++i) {
+        if (s == __data + i) {
+          *offset = i;
+          return true;
+        }
+      }
+      return false;
+    }
+    if (s < __data || s > __data + __size) {
       return false;
     }
     *offset = static_cast<size_type>(s - __data);

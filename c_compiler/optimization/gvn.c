@@ -8,9 +8,36 @@
 
 #include "gvn.h"
 #include "compiler.h"
+#include "type_compare.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <inttypes.h>
+
+// Mix a cast's result type into its GVN key.  Casts of the same operand to
+// types that differ only in signedness (e.g. `(int)-1` vs `(unsigned)-1`)
+// must not share a value number: later users read signedness from
+// `node->type` (see `IRComparisonIsUnsigned`), and a shared VN would make an
+// unsigned cast look signed even when the cast instruction itself was left
+// alone.
+static uint64_t CastResultTypeKey(TypeRecord* type) {
+  uint64_t hash = UINT64_C(0xcbf29ce484222325);
+  int depth = 0;
+  while (type != NULL && depth++ < 8) {
+    hash ^= (uint64_t)type->declarator + 1;
+    hash *= UINT64_C(0x100000001b3);
+    hash ^= (uint64_t)type->type;
+    hash *= UINT64_C(0x100000001b3);
+    hash ^= (uint64_t)(uint32_t)type->size;
+    hash *= UINT64_C(0x100000001b3);
+    hash ^= (uint64_t)GetQualifiers(type);
+    hash *= UINT64_C(0x100000001b3);
+    if (TypeIsUnsigned(type)) {
+      hash ^= UINT64_C(0x9e3779b97f4a7c15);
+    }
+    type = type->next;
+  }
+  return hash;
+}
 
 Value* NewValue(int64_t key, int32_t value_number, IRNode* inst) {
   Value* v = malloc(sizeof(Value));
@@ -377,6 +404,10 @@ static uint64_t CalculateInstructionKey(HashTable* table, IRNode* inst,
   key |= (int64_t)op_values[0] << 20;
   key |= (int64_t)op_values[1] << (22 + 20);
 
+  if (inst->opcode == IR_OP(cast)) {
+    key ^= CastResultTypeKey(inst->type);
+  }
+
   return key;
 }
 
@@ -621,7 +652,9 @@ static void DoLocalValueNumbering(Generator* gen, BlockLayout* layout,
         if (inst->opcode == IR_OP(cast) &&
             (prev_inst->type == NULL || inst->type == NULL ||
              !TypeEqual(prev_inst->type, inst->type))) {
-          // Keep distinct cast target types separate for signedness and TBAA.
+          // Defense in depth: cast keys already mix the result type, so
+          // distinct targets should not collide.  Still refuse a rewrite if
+          // they do, so signedness/TBAA cannot be lost through a shared VN.
         } else if (IsConstOffsetAdda(inst) &&
                    HasCallBetweenDominatorAndUse(gen, layout, prev_inst, inst)) {
           // Refresh the entry to the post-call adda so subsequent call-free

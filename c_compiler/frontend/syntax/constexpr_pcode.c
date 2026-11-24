@@ -273,6 +273,12 @@ typedef struct {
   bool handling_exception;
   int exception_handler_depth;
   bool ending_exception;
+  // The exception in flight was rethrown by `throw;` and has not yet left the
+  // handler that rethrew it.
+  bool rethrown_exception;
+  // The destructor running is that of a handled exception replaced by the one
+  // in flight, which stays in flight.
+  bool ending_replaced_exception;
   bool halt_after_exception_destructor;
   // The calling evaluator holds thrown, handled or captured exceptions this
   // run cannot see, so the run must not report what is currently thrown.
@@ -6113,6 +6119,7 @@ static PCodeVMStatus ConstexprPCodeUnwindStep(
                                           &is_catch, &offset);
     if (action != NULL) {
       if (is_catch) {
+        runtime->rethrown_exception = false;
         runtime->handling_exception = true;
         runtime->exception_handler_depth++;
         runtime->exception_base_offset = offset;
@@ -6260,6 +6267,7 @@ static PCodeVMStatus ConstexprPCodeInstallException(
   runtime->has_exception = true;
   runtime->handling_exception = false;
   runtime->exception_handler_depth = 0;
+  runtime->rethrown_exception = false;
   runtime->resume.active = false;
   if (kind == kConstexprPCodeExceptionDirect) {
     const ConstexprPCodeTypeInfo* typeinfo =
@@ -6321,6 +6329,7 @@ static PCodeVMStatus ConstexprPCodeEscapeThrow(
       return kPCodeVMStatusInvalidConstantOperation;
     }
     runtime->handling_exception = false;
+    runtime->rethrown_exception = true;
     runtime->exception_base_offset = 0;
     return ConstexprPCodeBeginUnwind(vm, runtime);
   }
@@ -6500,6 +6509,7 @@ static PCodeVMStatus ConstexprPCodeExceptionPtrRethrow(
   runtime->handling_exception = false;
   runtime->exception_handler_depth = 0;
   runtime->ending_exception = false;
+  runtime->rethrown_exception = false;
   runtime->resume.active = false;
   return ConstexprPCodeBeginUnwind(vm, runtime);
 }
@@ -6538,6 +6548,7 @@ static void ConstexprPCodeClearException(PCodeVM* vm,
   runtime->handling_exception = false;
   runtime->exception_handler_depth = 0;
   runtime->ending_exception = false;
+  runtime->rethrown_exception = false;
   runtime->resume.active = false;
   if (runtime->exception_stack.length != 0) {
     ConstexprPCodeSavedException* saved =
@@ -6560,8 +6571,68 @@ static void ConstexprPCodeClearException(PCodeVM* vm,
   }
 }
 
+static void ConstexprPCodeDropSavedException(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  ConstexprPCodeSavedException* saved = VectorLast(&runtime->exception_stack);
+  runtime->exception_stack.length--;
+  if (saved->storage != NULL) {
+    PCodeVMUnregisterMemoryRegion(vm, saved->storage);
+    free(saved->storage);
+  }
+  free(saved);
+}
+
+// A new exception leaving the handler of the one it replaced ends that
+// handler, destroying the replaced exception unless another handler still
+// holds it.  A rethrown exception leaves its own handler with no such effect.
+static PCodeVMStatus ConstexprPCodeEndReplacedCatch(
+    PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (runtime->rethrown_exception) {
+    runtime->rethrown_exception = false;
+    return kPCodeVMStatusRunning;
+  }
+  if (runtime->exception_stack.length == 0) {
+    return kPCodeVMStatusRunning;
+  }
+  ConstexprPCodeSavedException* saved = VectorLast(&runtime->exception_stack);
+  if (!saved->handling) {
+    return kPCodeVMStatusRunning;
+  }
+  if (saved->handler_depth > 1) {
+    saved->handler_depth--;
+    return kPCodeVMStatusRunning;
+  }
+  if (saved->destructor == 0) {
+    ConstexprPCodeDropSavedException(vm, runtime);
+    return kPCodeVMStatusRunning;
+  }
+  uint64_t object = saved->storage != NULL
+                        ? (uint64_t)(uintptr_t)saved->storage
+                        : saved->direct;
+  uint64_t sp = (uint64_t)vm->iregs[PCODE_SP_REG] - 2 * sizeof(uint64_t);
+  uint64_t normalized_sp = 0;
+  if (!ConstexprPCodeNormalizeAddress(
+          vm, sp, 2 * sizeof(uint64_t), true, &normalized_sp)) {
+    return kPCodeVMStatusInvalidWrite;
+  }
+  memcpy((void*)(uintptr_t)(normalized_sp + sizeof(uint64_t)), &object,
+         sizeof(object));
+  uint64_t completion =
+      (uint64_t)(uintptr_t)constexpr_pcode_end_catch_complete_stub;
+  memcpy((void*)(uintptr_t)normalized_sp, &completion, sizeof(completion));
+  vm->iregs[PCODE_SP_REG] = (int64_t)normalized_sp;
+  PCodeVMForgetEndedStackLifetimes(vm);
+  vm->iregs[PCODE_PC_REG] = (int64_t)saved->destructor;
+  runtime->ending_replaced_exception = true;
+  return kPCodeVMStatusRunning;
+}
+
 static PCodeVMStatus ConstexprPCodeBeginEndCatch(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime, bool halt_after) {
+  if (!halt_after && runtime->has_exception &&
+      !runtime->handling_exception && !runtime->ending_exception) {
+    return ConstexprPCodeEndReplacedCatch(vm, runtime);
+  }
   if (!runtime->has_exception || !runtime->handling_exception) {
     return kPCodeVMStatusInvalidConstantOperation;
   }
@@ -6602,6 +6673,12 @@ static PCodeVMStatus ConstexprPCodeBeginEndCatch(
 
 static PCodeVMStatus ConstexprPCodeCompleteEndCatch(
     PCodeVM* vm, ConstexprPCodeRuntime* runtime) {
+  if (runtime->ending_replaced_exception) {
+    runtime->ending_replaced_exception = false;
+    vm->iregs[PCODE_SP_REG] += sizeof(uint64_t);
+    ConstexprPCodeDropSavedException(vm, runtime);
+    return kPCodeVMStatusRunning;
+  }
   if (!runtime->has_exception || !runtime->ending_exception) {
     return kPCodeVMStatusInvalidConstantOperation;
   }
