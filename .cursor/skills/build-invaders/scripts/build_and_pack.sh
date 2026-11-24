@@ -7,6 +7,7 @@ SUP="$ROOT/6502 support"
 WORK="$ROOT/games/build"
 DAVECC="${DAVECC:-$ROOT/bazel-bin/davecc}"
 SSD="${SSD:-$HOME/bbc_micro/games.ssd}"
+ADL="${ADL:-$HOME/bbc_micro/games.adl}"
 TARGET=6502-acorn-bbc-davecc
 
 if [[ ! -x "$DAVECC" ]]; then
@@ -30,6 +31,7 @@ asm "$ROOT/games/invaders_fx.s" "$WORK/invaders_fx.o"
 asm "$ROOT/games/snake_fx.s" "$WORK/snake_fx.o"
 asm "$ROOT/games/asteroids_fx.s" "$WORK/asteroids_fx.o"
 asm "$ROOT/games/galaxians_fx.s" "$WORK/galaxians_fx.o"
+asm "$ROOT/games/galaga_fx.s" "$WORK/galaga_fx.o"
 asm "$ROOT/games/centipede_fx.s" "$WORK/centipede_fx.o"
 asm "$ROOT/games/pacman_fx.s" "$WORK/pacman_fx.o"
 asm "$ROOT/games/defender_fx.s" "$WORK/defender_fx.o"
@@ -49,6 +51,7 @@ build_game invaders.cc invaders_fx.o invaders.elf
 build_game snake.cc snake_fx.o snake.elf
 build_game asteroids.cc asteroids_fx.o asteroids.elf
 build_game galaxians.cc galaxians_fx.o galaxians.elf
+build_game galaga.cc galaga_fx.o galaga.elf
 build_game centipede.cc centipede_fx.o centipede.elf
 build_game pacman.cc pacman_fx.o pacman.elf
 build_game defender.cc defender_fx.o defender.elf
@@ -76,6 +79,7 @@ check_elf "$WORK/invaders.elf" INVADER
 check_elf "$WORK/snake.elf" SNAKE
 check_elf "$WORK/asteroids.elf" ASTERO
 check_elf "$WORK/galaxians.elf" GALAX
+check_elf "$WORK/galaga.elf" GALAGA
 check_elf "$WORK/centipede.elf" CENTI
 check_elf "$WORK/pacman.elf" PACMAN
 check_elf "$WORK/defender.elf" DEFEND
@@ -84,12 +88,13 @@ check_elf "$WORK/defender.elf" DEFEND
 # (readable while the shadow screen is mapped). Unused per-sprite sections
 # are dropped, so do not require every sprites.o symbol to appear.
 if command -v nm >/dev/null 2>&1; then
-  for elf in invaders snake asteroids galaxians centipede pacman defender; do
+  for elf in invaders snake asteroids galaxians galaga centipede pacman defender; do
     case $elf in
       invaders) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o") ;;
       snake) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/snake_fx.o") ;;
       asteroids) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/asteroids_fx.o") ;;
       galaxians) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/galaxians_fx.o") ;;
+      galaga) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/galaga_fx.o") ;;
       centipede) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/centipede_fx.o") ;;
       pacman) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/pacman_fx.o") ;;
       defender) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/defender_fx.o") ;;
@@ -120,6 +125,7 @@ fi
 python3 "$SUP/elf2ssd.py" "$SSD" \
   "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
   "ASTERO=$WORK/asteroids.elf" "GALAX=$WORK/galaxians.elf" \
+  "GALAGA=$WORK/galaga.elf" \
   "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf" \
   "DEFEND=$WORK/defender.elf"
 
@@ -155,4 +161,18 @@ if bad:
 PY
 
 echo "packed $SSD"
-echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN / DEFEND."
+echo "On the emulator (DFS): *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / GALAGA / CENTI / PACMAN / DEFEND."
+
+# Double-sided 80-track ADFS-L (.adl): binaries in $, sources under $.Source.
+# Needs beebtools (pip install --user beebtools).
+python3 "$SUP/elf2adl.py" "$ADL" \
+  "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
+  "ASTERO=$WORK/asteroids.elf" "GALAX=$WORK/galaxians.elf" \
+  "GALAGA=$WORK/galaga.elf" \
+  "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf" \
+  "DEFEND=$WORK/defender.elf" \
+  --source-root "$ROOT/games" \
+  --title "DAVECC"
+
+echo "packed $ADL"
+echo "On the emulator (ADFS): *ADFS then *CAT; *RUN INVADER / ... ; *DIR Source"
