@@ -2,7 +2,7 @@
 name: build-invaders
 description: >-
   Build BBC Master games (Invaders, Snake, Asteroids, Galaxians, Centipede,
-  Pac-Man) with davecc, link at &E00, and pack onto ~/bbc_micro/games.ssd.
+  Pac-Man, Defender) with davecc, link at &E00, and pack onto ~/bbc_micro/games.ssd.
   Use when rebuilding those games, updating games.ssd, or after editing
   games/*.cc, *_fx.s, games/sprites.py, screen1.s, or bbc_mode2_e00.ld.
 ---
@@ -27,7 +27,7 @@ ROOT=/Users/dallison/c_compiler SSD=$HOME/bbc_micro/games.ssd \
 ```
 
 Emulator: mount `~/bbc_micro/games.ssd`, then `*RUN INVADER` / `SNAKE` /
-`ASTERO` / `GALAX` / `CENTI` / `PACMAN` (or Shift-Break → `*CAT`).
+`ASTERO` / `GALAX` / `CENTI` / `PACMAN` / `DEFEND` (or Shift-Break → `*CAT`).
 
 ## Manual steps (same as the script)
 
@@ -92,16 +92,27 @@ The script does these checks; it fails if any of those symbols lands at or above
 - **Assembler**: in davecc `.s` files `.word` is **4 bytes**; use `.hword` for 16-bit pointers and values.
 - **Mode**: call `bbc::mode(129)` **once** in `main`. A second `mode()` re-parks the soft stack and returns to BASIC.
 
-## Snake, Asteroids, Galaxians, Centipede, Pac-Man (same SSD, same link)
+## Snake, Asteroids, Galaxians, Centipede, Pac-Man, Defender (same SSD, same link)
 
 Snake, Asteroids, Galaxians, and Centipede match Invaders in shadow mode 1;
 Pac-Man uses 8-colour shadow mode 2 (`bbc::mode(130)`) with offscreen
 tile-window compositing (`patch_window` in `pacman_fx.s`) for flicker-free
 sprites. All share `screen1.s`, `sprites.s`, C++20 coroutines, and link at
 `&E00` with `bbc_mode2_e00.ld` (`*RUN SNAKE`, `*RUN INVADER`, `*RUN ASTERO`,
-`*RUN GALAX`, `*RUN CENTI`, `*RUN PACMAN`).
+`*RUN GALAX`, `*RUN CENTI`, `*RUN PACMAN`, `*RUN DEFEND`).
+
+**Defender** (`games/defender.cc`, `defender_fx.s`, `defender.h`; DFS name `DEFEND`) is a
+Planetoid-style scroller in 8-colour shadow mode 2 (`bbc::mode(130)`): 512-unit wrapping
+world (1-pixel Mode-2 horizontal shift), 12-scanline multi-colour sprites, expanding
+streaking laser beams, parallax starfield, two-tone shaded ridge, and a framed colour
+radar scanner. All entity, shot, star, terrain and ship state, the AI and the strip blits
+live in `defender_fx.s` (`.text.blitter`, below `&3000`); C++ owns scoring, waves and
+phases and reaches the state through `extern "C"` globals. Planetoid keys: A/Z (or Up/Down)
+climb and dive, Shift thrusts forward, Space reverses direction, Return fires, Tab/Ctrl/B
+smart bomb, H hyperspace, Escape quits. A tick is one vsync; the build prints
+`DEFEND ... room_7c00` and checks the low symbols like the others.
 
 ## After packing
 
-Tell the user to reload the disc / `*RUN PACMAN` (or any game on `games.ssd`).
+Tell the user to reload the disc / `*RUN DEFEND` (or any game on `games.ssd`).
 Do not commit `games/build/` artifacts unless asked.

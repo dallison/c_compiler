@@ -817,6 +817,294 @@ GX_SHIP = """
     ......GGGG......
     """
 
+# Defender / Planetoid (Shadow Mode 2, 160x256, 8 steady colours):
+#   12x12 delta fighter (coast + 2 animated plasma thruster frames, mirrored left),
+#   12x12 2-stage ship blast, 8x12 lander / mutant / bomber / blast (pair2),
+#   6x12 walking humanoid / twinkling star-mine (pair2), 6x8 HUD icons.
+DF_SHIP_R = (
+    """
+    ...WW.......
+    ...BWW......
+    ....BWWW....
+    ...BBWWCC...
+    ..RBWWWWCCW.
+    ..YWWWWWWWWW
+    ..RBWWWWWWYR
+    ...BBWWWW...
+    ....BWWW....
+    ...BWW......
+    ...WW.......
+    ............
+    """,
+    """
+    ...WW.......
+    ...BWW......
+    ....BWWW....
+    ...BBWWCC...
+    .RYBWWWWCCW.
+    RYWWWWWWWWWW
+    .RYBWWWWWWYR
+    ...BBWWWW...
+    ....BWWW....
+    ...BWW......
+    ...WW.......
+    ............
+    """,
+    """
+    ...WW.......
+    ...BWW......
+    ....BWWW....
+    ..RBBWWCC...
+    RYWBWWWWCCW.
+    YWWWWWWWWWWW
+    RYWBWWWWWWYR
+    ..RBBWWWW...
+    ....BWWW....
+    ...BWW......
+    ...WW.......
+    ............
+    """,
+)
+
+DF_SBOOM = (
+    """
+    ..R..YY..R..
+    .Y.RYWWYR.Y.
+    ..RWWWWWWY..
+    .RYWWWWWWYR.
+    RYWWWWWWWWYR
+    YWWWWWWWWWWY
+    RYWWWWWWWWYR
+    .RYWWWWWWYR.
+    ..YWWWWWWR..
+    .R.RYWWYR.Y.
+    ..Y..RR..R..
+    ............
+    """,
+    """
+    R...Y..C...M
+    ..M......R..
+    .R..Y..R..Y.
+    ...RYYYYR...
+    C.RYWWWWYR.R
+    ..YWW..WWY..
+    R.RYWWWWYR.C
+    ...RYYYYR...
+    .Y..R..Y..R.
+    ..R......M..
+    M...C..Y...R
+    ............
+    """,
+)
+
+DF_LANDER = (
+    """
+    ..YYYY..
+    .GGGGGG.
+    GYYGGYYG
+    GWRGGRWG
+    GGGGGGGG
+    .GGGGGG.
+    ..YYYY..
+    .GG..GG.
+    GG.GG.GG
+    G..GG..G
+    G......G
+    ........
+    """,
+    """
+    ..YYYY..
+    .GGGGGG.
+    GGYYYYGG
+    GRWGGRWG
+    GGGGGGGG
+    .GGGGGG.
+    ..YYYY..
+    ..G..G..
+    .G.GG.G.
+    .G....G.
+    G..GG..G
+    ........
+    """,
+)
+
+DF_MUTANT = (
+    """
+    M.M..M.M
+    .MMMMMM.
+    MCCMMCCM
+    MYWRRWYM
+    .CCCCCC.
+    .MMCCMM.
+    ..RRRR..
+    .M.MM.M.
+    M..RR..M
+    M......M
+    .R....R.
+    ........
+    """,
+    """
+    .M.MM.M.
+    M.MMMM.M
+    MCMMMMCM
+    MWYRRYWM
+    .CCCCCC.
+    ..MCCM..
+    .R.RR.R.
+    M..MM..M
+    .R....R.
+    ..M..M..
+    R......R
+    ........
+    """,
+)
+
+DF_BOMBER = (
+    """
+    .BBBBBB.
+    BBBBBBBB
+    BBMMMMBB
+    BMYWWYMB
+    BMWWWWMB
+    BMYWWYMB
+    BBMMMMBB
+    BBBBBBBB
+    .BBBBBB.
+    ..M..M..
+    ........
+    ........
+    """,
+    """
+    .BBBBBB.
+    BBBBBBBB
+    BBCCCCBB
+    BCMWWMCB
+    BCWWWWCB
+    BCYWWYCB
+    BBMMMMBB
+    BBBBBBBB
+    .BBBBBB.
+    .M....M.
+    ........
+    ........
+    """,
+)
+
+DF_HUMAN = (
+    """
+    ..WW..
+    .WCCW.
+    ..WW..
+    .MMMM.
+    MMMMMM
+    .MMMM.
+    ..MM..
+    .M..M.
+    .M..M.
+    .Y..Y.
+    YY..YY
+    ......
+    """,
+    """
+    ..WW..
+    .WCCW.
+    ..WW..
+    .MMMM.
+    .MMMM.
+    MMMMMM
+    ..MM..
+    ..MM..
+    .M..M.
+    ..YY..
+    .Y..Y.
+    ......
+    """,
+)
+
+DF_BOMB = (
+    """
+    ......
+    ..CC..
+    ..WW..
+    ..WW..
+    CWWWWC
+    CWWWWC
+    ..WW..
+    ..WW..
+    ..CC..
+    ......
+    ......
+    ......
+    """,
+    """
+    ......
+    R....R
+    .Y..Y.
+    ..RR..
+    .YWWY.
+    .YWWY.
+    ..RR..
+    .Y..Y.
+    R....R
+    ......
+    ......
+    ......
+    """,
+)
+
+DF_BOOM = (
+    """
+    .R..Y..R
+    ..Y..R..
+    .RYWWYR.
+    ..WWWW..
+    RYWWWWYR
+    .WWWWWW.
+    RYWWWWYR
+    ..WWWW..
+    .RYWWYR.
+    ..R..Y..
+    .Y..R..R
+    ........
+    """,
+    """
+    R......Y
+    ..M..C..
+    .R....R.
+    Y..RR..M
+    ..RYYR..
+    .C.YY.R.
+    ..RYYR..
+    M..RR..Y
+    .R....R.
+    ..C..M..
+    Y......R
+    ........
+    """,
+)
+
+DF_LIFE = """
+    .W....
+    .BW...
+    RBWWC.
+    YWWWWW
+    RBWWYR
+    .BW...
+    .W....
+    ......
+    """
+
+DF_SBOMB = """
+    ..YY..
+    .BBBB.
+    BWYYWB
+    BWWWWB
+    BWYYWB
+    .BBBB.
+    ..RR..
+    ......
+    """
+
 # Pac-Man (Shadow Mode 2, 160x256, 8 steady colours):
 #   . = 0 black / transparent
 #   R = 1 red     (Blinky)
@@ -1365,6 +1653,14 @@ def cell2(art):
     return column_major([encode2(r) for r in rows(art)])
 
 
+def pair2(art):
+    """Mode-2 1-pixel shift pair: shift 0 (art + '..') then shift 1 ('.' + art + '.')."""
+    r = rows(art)
+    s0 = column_major([encode2(line + "..") for line in r])
+    s1 = column_major([encode2("." + line + ".") for line in r])
+    return s0 + s1
+
+
 def glyph2(hex_rows, ink="W"):
     """Mode-2 8x8 HUD digit (4 byte-cols x 8 scanlines = 32 bytes)."""
     bits = [int(h, 16) for h in hex_rows.split()]
@@ -1500,6 +1796,39 @@ def main():
     emit("k_ce_spider1", cell(CE_SPIDER1))
     emit("k_ce_ship", pair(CE_SHIP))
     emit("k_ce_ship_red", pair(CE_SHIP.replace("G", "R")))
+    # Defender (Mode 2): 12x12 fighter, 8x12 / 6x12 1px-shift pairs, HUD icons + packed digits.
+    for frame, art in enumerate(DF_SHIP_R):
+        emit("k_df_ship_r%d" % frame, cell2(art), per_line=12)
+        emit(
+            "k_df_ship_l%d" % frame,
+            cell2("\n".join(r[::-1] for r in rows(art))),
+            per_line=12,
+        )
+    for frame, art in enumerate(DF_LANDER):
+        emit("k_df_lander%d" % frame, pair2(art), per_line=12)
+    for frame, art in enumerate(DF_MUTANT):
+        emit("k_df_mutant%d" % frame, pair2(art), per_line=12)
+    for frame, art in enumerate(DF_BOMBER):
+        emit("k_df_bomber%d" % frame, pair2(art), per_line=12)
+    for frame, art in enumerate(DF_HUMAN):
+        emit("k_df_human%d" % frame, pair2(art), per_line=12)
+    for frame, art in enumerate(DF_BOMB):
+        emit("k_df_bomb%d" % frame, pair2(art), per_line=12)
+    for frame, art in enumerate(DF_BOOM):
+        emit("k_df_boom%d" % frame, pair2(art), per_line=12)
+    emit("k_df_life", cell2(DF_LIFE))
+    emit("k_df_sbomb", cell2(DF_SBOMB))
+    df_digs = []
+    for d in DIGITS:
+        rb = [int(h, 16) for h in d.split()]
+        for c in range(4):
+            for half in (0, 4):
+                packed = 0
+                for s in range(4):
+                    pair_bits = (rb[half + s] >> (6 - 2 * c)) & 3
+                    packed = (packed << 2) | pair_bits
+                df_digs.append(packed)
+    emit("k_df_digits", df_digs)
     # Pac-Man (Mode 2): 8x12 sprites/tiles (48 bytes) + Mode-2 HUD digits.
     emit("k_pm_digits", [b for d in DIGITS for b in glyph2(d)])
     emit("k_pm_pac_closed", cell2(PM_PAC_CLOSED))

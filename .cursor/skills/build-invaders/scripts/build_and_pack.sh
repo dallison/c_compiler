@@ -32,6 +32,7 @@ asm "$ROOT/games/asteroids_fx.s" "$WORK/asteroids_fx.o"
 asm "$ROOT/games/galaxians_fx.s" "$WORK/galaxians_fx.o"
 asm "$ROOT/games/centipede_fx.s" "$WORK/centipede_fx.o"
 asm "$ROOT/games/pacman_fx.s" "$WORK/pacman_fx.o"
+asm "$ROOT/games/defender_fx.s" "$WORK/defender_fx.o"
 
 build_game() {
   local src="$1" fx="$2" out="$3"
@@ -50,6 +51,7 @@ build_game asteroids.cc asteroids_fx.o asteroids.elf
 build_game galaxians.cc galaxians_fx.o galaxians.elf
 build_game centipede.cc centipede_fx.o centipede.elf
 build_game pacman.cc pacman_fx.o pacman.elf
+build_game defender.cc defender_fx.o defender.elf
 
 check_elf() {
   local elf="$1" name="$2"
@@ -76,12 +78,13 @@ check_elf "$WORK/asteroids.elf" ASTERO
 check_elf "$WORK/galaxians.elf" GALAX
 check_elf "$WORK/centipede.elf" CENTI
 check_elf "$WORK/pacman.elf" PACMAN
+check_elf "$WORK/defender.elf" DEFEND
 
 # Blitter/sprite symbols that survived --gc-sections must stay below &3000
 # (readable while the shadow screen is mapped). Unused per-sprite sections
 # are dropped, so do not require every sprites.o symbol to appear.
 if command -v nm >/dev/null 2>&1; then
-  for elf in invaders snake asteroids galaxians centipede pacman; do
+  for elf in invaders snake asteroids galaxians centipede pacman defender; do
     case $elf in
       invaders) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o") ;;
       snake) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/snake_fx.o") ;;
@@ -89,6 +92,7 @@ if command -v nm >/dev/null 2>&1; then
       galaxians) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/galaxians_fx.o") ;;
       centipede) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/centipede_fx.o") ;;
       pacman) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/pacman_fx.o") ;;
+      defender) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/defender_fx.o") ;;
     esac
     nm "${objs[@]}" |
       awk 'NF == 3 && $2 ~ /[TDB]/ {print $3}' | sort -u >"$WORK/low_syms_$elf.txt"
@@ -116,7 +120,8 @@ fi
 python3 "$SUP/elf2ssd.py" "$SSD" \
   "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
   "ASTERO=$WORK/asteroids.elf" "GALAX=$WORK/galaxians.elf" \
-  "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf"
+  "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf" \
+  "DEFEND=$WORK/defender.elf"
 
 # DFS *RUN loads the reloc wrapper at PAGE (&1F00). Mode-7 HIMEM is &7C00;
 # past that MOS returns "Bad program" before the reloc stub can run.
@@ -150,4 +155,4 @@ if bad:
 PY
 
 echo "packed $SSD"
-echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN."
+echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN / DEFEND."
