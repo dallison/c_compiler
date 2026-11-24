@@ -254,4 +254,61 @@ int main(void) { g.a[3] = 1; return g.a[3] + s.a[0] - 1 + (np != 0); }
 EOF
 run_ok completed_later "$work/completed_later.c"
 
+cat >"$work/nodiscard.c" <<'EOF'
+[[nodiscard]] int must_use(void);
+[[nodiscard("keep")]] int must_keep(void);
+struct [[nodiscard]] Box { int x; };
+enum [[nodiscard]] Color { Red, Green };
+struct Box make_box(void);
+enum Color make_color(void);
+typedef struct Box BoxAlias;
+BoxAlias make_alias(void);
+typedef struct Box (*BoxMaker)(void);
+int main(void) {
+  must_use();
+  must_keep();
+  make_box();
+  make_color();
+  make_alias();
+  BoxMaker maker = make_box;
+  maker();
+  (void)must_use();
+  struct Box b = make_box();
+  enum Color c = make_color();
+  return b.x + (int)c;
+}
+EOF
+run_ok nodiscard "$work/nodiscard.c" -std=c23 -Wall
+expect_warn nodiscard "ignoring return value of function 'must_use' declared with 'nodiscard' attribute"
+expect_warn nodiscard "ignoring return value of function 'must_keep' declared with 'nodiscard' attribute: keep"
+expect_warn nodiscard "ignoring return value of function that returns 'nodiscard' type 'Box'"
+expect_warn nodiscard "ignoring return value of function that returns 'nodiscard' type 'Color'"
+
+cat >"$work/nodiscard.cpp" <<'EOF'
+struct [[nodiscard]] S {
+  [[nodiscard]] S();
+  S(int);
+  int x;
+};
+S make_s();
+struct T {
+  [[nodiscard]] T();
+  T(int);
+};
+int main() {
+  make_s();
+  S{};
+  S(1);
+  T{};
+  T(1);
+  (void)make_s();
+  S s = make_s();
+  return s.x;
+}
+EOF
+run_ok nodiscard_cxx "$work/nodiscard.cpp" -std=c++20 -Wall
+expect_warn nodiscard_cxx "ignoring return value of function that returns 'nodiscard' type 'S'"
+expect_warn nodiscard_cxx "ignoring temporary of 'nodiscard' type 'S'"
+expect_warn nodiscard_cxx "ignoring temporary created by constructor"
+
 echo "warning diagnostics ok"

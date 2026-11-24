@@ -543,6 +543,19 @@ void SymbolSetAttributeCopies(Symbol* symbol, const Vector* attributes) {
   }
 }
 
+void SymbolMergeAttributeCopies(Symbol* symbol, const Vector* attributes) {
+  for (size_t i = 0; attributes != NULL && i < attributes->length; i++) {
+    Attribute* attr = attributes->value.p[i];
+    if (attr == NULL || attr->name.value == NULL) {
+      continue;
+    }
+    if (SymbolHasAttribute(symbol, attr->name.value)) {
+      continue;
+    }
+    SymbolAddAttribute(symbol, AttributeClone(attr));
+  }
+}
+
 static bool CXXSymbolShouldMangle(Symbol* symbol) {
   if (!CompilerIsCXX() || symbol == NULL || symbol->type == NULL ||
       !TypeIsFunction(symbol->type)) {

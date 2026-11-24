@@ -1138,6 +1138,24 @@ bool TypeIsScopedEnum(TypeRecord* type) {
          type->info.enum_info->is_scoped;
 }
 
+Symbol* TypeNodiscardOwner(TypeRecord* type) {
+  if (type == NULL || TypeIsReference(type)) {
+    return NULL;
+  }
+  if (TypeIsStructOrUnion(type) && type->info.struct_info != NULL) {
+    return type->info.struct_info->tag_symbol;
+  }
+  if (TypeIsEnum(type) && type->info.enum_info != NULL) {
+    return type->info.enum_info->tag_symbol;
+  }
+  return NULL;
+}
+
+bool TypeIsNodiscard(TypeRecord* type) {
+  Symbol* owner = TypeNodiscardOwner(type);
+  return owner != NULL && SymbolHasAttribute(owner, "warn_unused_result");
+}
+
 
 bool TypeIsIntConstant(TypeRecord* type);
 bool TypeIsFloatingPointConstant(TypeRecord* type);

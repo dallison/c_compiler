@@ -502,7 +502,8 @@ static Type ParseEnumConstants(TypeParser* parser, Enum* e,
 
 static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
                              bool is_scoped,
-                             TypeRecord* explicit_underlying) {
+                             TypeRecord* explicit_underlying,
+                             Vector* attributes) {
   // We have an enum body.
   // First check that this is not a duplicate definition.
   parser->syntax->enum_bodies_parsed++;
@@ -580,6 +581,11 @@ static Symbol* ParseEnumBody(TypeParser* parser, String* tag_name,
   // forward declared.
   tag->flags.is_forward_declared = false;
   tag->flags.is_defined = true;
+  // Definition-site attributes replace prior copies; an empty list keeps
+  // attributes attached by a forward declaration (e.g. enum [[nodiscard]] E;).
+  if (attributes != NULL && attributes->length > 0) {
+    SymbolSetAttributeCopies(tag, attributes);
+  }
 
   // Now 'tag' will be the struct tag pointer
   // and 'e' will be a pointer to the Enum information.
@@ -681,7 +687,8 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
       SyntaxError(parser->syntax, "Cannot define qualified enum tag %s",
                   qualified_tag.spelling.value);
     }
-    tag = ParseEnumBody(parser, &tag_name, is_scoped, explicit_underlying);
+    tag = ParseEnumBody(parser, &tag_name, is_scoped, explicit_underlying,
+                        &attributes);
   } else {
     // No open brace, this is a reference to an existing enum or the
     // creation of a new one.
@@ -710,6 +717,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
                               is_scoped, false);
       SyntaxAddTag(parser->syntax, tag);
       AddInjectedEnumName(parser, tag);
+      SymbolMergeAttributeCopies(tag, &attributes);
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, false, true);
@@ -724,6 +732,7 @@ Symbol* TypeParserParseEnum(TypeParser* parser) {
         ApplyEnumUnderlyingType(parser->syntax, tag->type->info.enum_info,
                                 tag->type, explicit_underlying, is_scoped, true);
       }
+      SymbolMergeAttributeCopies(tag, &attributes);
     }
   }
 

@@ -2802,7 +2802,8 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
                                     bool is_member_template,
                                     Vector* member_template_parameters,
                                     ConstraintExpr* member_template_requires_clause,
-                                    int member_template_parameter_base) {
+                                    int member_template_parameter_base,
+                                    Vector* leading_attributes) {
   if (!CompilerIsCXX() || class_name->length == 0) {
     return false;
   }
@@ -2947,9 +2948,14 @@ static bool ParseClassSpecialMember(TypeParser* parser, Struct* str,
   }
   FinalizeMemberFunctionTemplateConstraints(
       func, member_template_parameters, member_template_requires_clause);
-  // Constructors and destructors are not parsed as ordinary declarators, so
-  // a trailing GNU attribute (`LogMessage(...) __attribute__((cold))`) would
-  // otherwise be read as the next member.
+  // Leading attributes (`[[nodiscard]] T();`) and trailing GNU attributes
+  // (`T() __attribute__((cold))`) both appertain to the special member.
+  // Constructors are not parsed as ordinary declarators, so trailing attrs
+  // would otherwise be read as the next member.
+  if (leading_attributes != NULL && leading_attributes->length > 0) {
+    SymbolAppendAttributes(member_symbol, leading_attributes);
+    VectorClear(leading_attributes);
+  }
   Vector trailing_attributes = {0};
   VectorInit(&trailing_attributes);
   while (SyntaxParseCXXAlignas(parser->syntax, &trailing_attributes) ||
@@ -3604,7 +3610,8 @@ void ParseStructMembers(TypeParser* parser, Struct* str, bool is_union,
                                 is_consteval_member, is_explicit_member,
                                 is_member_template, member_template_parameters,
                                 member_template_requires_clause,
-                                member_template_parameter_base)) {
+                                member_template_parameter_base,
+                                &member_attributes)) {
       if (is_constinit_member) {
         SyntaxError(parser->syntax,
                     "'constinit' cannot be applied to a function");

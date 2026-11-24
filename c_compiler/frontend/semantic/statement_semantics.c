@@ -1584,27 +1584,166 @@ static ASTNode* ElideCXXMemberInitializerPrvalue(ASTNode* expr) {
   return inner_node;
 }
 
+// [[nodiscard]] / warn_unused_result spelling used in diagnostics.
+static const char* NodiscardAttrSpelling(Attribute* attr) {
+  if (attr != NULL && attr->token.value != NULL &&
+      strcmp(attr->token.value, "nodiscard") == 0) {
+    return "nodiscard";
+  }
+  return "warn_unused_result";
+}
+
+// Nodiscard diagnostics must not use SemanticWarning: constructor temporaries
+// are lowered to `(ctor(&tmp, ...), tmp)`, and SemanticWarning suppresses any
+// subtree that mentions an invented temporary.
+static void WarnUnusedNodiscard(ASTNode* expr, Attribute* attr,
+                                const char* what, const char* name) {
+  const char* spelling = NodiscardAttrSpelling(attr);
+  const char* reason =
+      (attr != NULL && AttributeArgCount(attr) > 0) ? AttributeArgString(attr, 0)
+                                                   : NULL;
+  if (reason != NULL && reason[0] != '\0') {
+    if (name != NULL && name[0] != '\0') {
+      ReportWarningAtLocation(expr->location, "unused-result",
+                              "%s '%s' declared with '%s' attribute: %s", what,
+                              name, spelling, reason);
+    } else {
+      ReportWarningAtLocation(expr->location, "unused-result",
+                              "%s declared with '%s' attribute: %s", what,
+                              spelling, reason);
+    }
+  } else if (name != NULL && name[0] != '\0') {
+    ReportWarningAtLocation(expr->location, "unused-result",
+                            "%s '%s' declared with '%s' attribute", what, name,
+                            spelling);
+  } else {
+    ReportWarningAtLocation(expr->location, "unused-result",
+                            "%s declared with '%s' attribute", what, spelling);
+  }
+}
+
+static void WarnNodiscardType(ASTNode* expr, Attribute* attr,
+                              const char* type_name, bool call_result) {
+  const char* spelling = NodiscardAttrSpelling(attr);
+  const char* reason =
+      (attr != NULL && AttributeArgCount(attr) > 0) ? AttributeArgString(attr, 0)
+                                                   : NULL;
+  if (call_result) {
+    if (reason != NULL && reason[0] != '\0') {
+      ReportWarningAtLocation(
+          expr->location, "unused-result",
+          "ignoring return value of function that returns '%s' type '%s': %s",
+          spelling, type_name, reason);
+    } else {
+      ReportWarningAtLocation(
+          expr->location, "unused-result",
+          "ignoring return value of function that returns '%s' type '%s'",
+          spelling, type_name);
+    }
+  } else if (reason != NULL && reason[0] != '\0') {
+    ReportWarningAtLocation(expr->location, "unused-result",
+                            "ignoring temporary of '%s' type '%s': %s", spelling,
+                            type_name, reason);
+  } else {
+    ReportWarningAtLocation(expr->location, "unused-result",
+                            "ignoring temporary of '%s' type '%s'", spelling,
+                            type_name);
+  }
+}
+
+// Constructor call after functional-cast lowering: `(Ctor(&tmp, args), tmp)`.
+static Symbol* NodiscardConstructorCallee(ASTNode* expr) {
+  if (expr == NULL) {
+    return NULL;
+  }
+  ASTNode* call_node = expr;
+  if (expr->op == AST_OP(comma)) {
+    call_node = ((BinaryASTNode*)expr)->left;
+  }
+  if (call_node == NULL || call_node->op != AST_OP(call)) {
+    return NULL;
+  }
+  VectorASTNode* call = (VectorASTNode*)call_node;
+  if (call->left == NULL || call->left->op != AST_OP(identifier)) {
+    return NULL;
+  }
+  Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
+  if (callee == NULL || callee->type == NULL || !TypeIsFunction(callee->type) ||
+      !callee->type->info.function.is_constructor) {
+    return NULL;
+  }
+  return callee;
+}
+
+// Clang-compatible [[nodiscard]] discard check: function/constructor
+// attributes, nodiscard class/union/enum return types (including through
+// function pointers / typedefs), and discarded prvalues of those types.
+static void DiagnoseDiscardedNodiscard(ASTNode* expr) {
+  if (expr == NULL || expr->type == NULL || TypeIsVoid(expr->type)) {
+    return;
+  }
+
+  Symbol* callee = NULL;
+  bool is_constructor = false;
+  if (expr->op == AST_OP(call)) {
+    VectorASTNode* call = (VectorASTNode*)expr;
+    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
+      callee = ((IdentifierASTNode*)call->left)->symbol;
+      if (callee != NULL && callee->type != NULL && TypeIsFunction(callee->type)) {
+        is_constructor = callee->type->info.function.is_constructor;
+      }
+    }
+  }
+  if (callee == NULL) {
+    callee = NodiscardConstructorCallee(expr);
+    if (callee != NULL) {
+      is_constructor = true;
+    }
+  }
+
+  if (callee != NULL) {
+    Attribute* attr = SymbolFindAttribute(callee, "warn_unused_result");
+    if (attr != NULL) {
+      if (is_constructor) {
+        WarnUnusedNodiscard(expr, attr,
+                            "ignoring temporary created by constructor",
+                            callee->name.value);
+      } else {
+        WarnUnusedNodiscard(expr, attr, "ignoring return value of function",
+                            callee->name.value);
+      }
+      return;
+    }
+  }
+
+  // Type-based nodiscard: only by-value prvalues (temporaries / call results).
+  // References to a nodiscard type are not themselves nodiscard.
+  if (TypeIsReference(expr->type)) {
+    return;
+  }
+  if (CompilerIsCXX() && expr->value_category != kValueCategoryPrvalue) {
+    return;
+  }
+  if (!TypeIsNodiscard(expr->type)) {
+    return;
+  }
+
+  Symbol* owner = TypeNodiscardOwner(expr->type);
+  Attribute* attr =
+      owner != NULL ? SymbolFindAttribute(owner, "warn_unused_result") : NULL;
+  const char* type_name = owner != NULL ? owner->name.value : "<unnamed>";
+  bool call_result = expr->op == AST_OP(call) && !is_constructor;
+  WarnNodiscardType(expr, attr, type_name, call_result);
+}
+
 static void AnalyzeExpressionStatement(ExpressionStatementASTNode* node) {
   node->expr = AnalyzeExpression(node->expr);
   node->expr = ElideCXXMemberInitializerPrvalue(node->expr);
 
-  // warn_unused_result: a discarded call to a function so annotated.
-  ASTNode* expr = node->expr;
-  if (expr != NULL && expr->op == AST_OP(call)) {
-    VectorASTNode* call = (VectorASTNode*)expr;
-    if (call->left != NULL && call->left->op == AST_OP(identifier)) {
-      Symbol* callee = ((IdentifierASTNode*)call->left)->symbol;
-      if (callee != NULL && SymbolHasAttribute(callee, "warn_unused_result")) {
-        SemanticWarning(expr, "unused-result",
-                        "ignoring return value of '%s' declared with "
-                        "warn_unused_result",
-                        callee->name.value);
-      }
-    }
-  }
+  DiagnoseDiscardedNodiscard(node->expr);
   node->expr = SemanticMaterializeClassPrvalue(node->expr);
   node->expr = AppendCXXFullExpressionTemporaryDestructors(node->expr);
-  expr = node->expr;
+  ASTNode* expr = node->expr;
   if (expr != NULL && expr->type != NULL && !TypeIsVoid(expr->type) &&
       !ExpressionHasSideEffects(expr)) {
     SemanticWarning(expr, "unused-value", "expression result unused");

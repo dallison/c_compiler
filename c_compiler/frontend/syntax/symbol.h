@@ -456,6 +456,8 @@ void SymbolAddAttribute(Symbol* symbol, Attribute* attribute);
 void SymbolAppendAttributes(Symbol* symbol, const Vector* attributes);
 // Replaces the symbol's attributes with copies of `attributes`.
 void SymbolSetAttributeCopies(Symbol* symbol, const Vector* attributes);
+// Appends clones of attributes whose normalized names are not already present.
+void SymbolMergeAttributeCopies(Symbol* symbol, const Vector* attributes);
 bool SymbolHasAttribute(Symbol* symbol, const char* attribute);
 // Returns the attribute with the given (normalized) name, or NULL.
 Attribute* SymbolFindAttribute(Symbol* symbol, const char* attribute);

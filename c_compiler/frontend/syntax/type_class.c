@@ -844,8 +844,12 @@ static Symbol* ParseStructBody(TypeParser* parser, String* tag_name,
   // change this struct).
   str->pack = compiler->pack_alignment;
   // Apply layout attributes (packed, aligned) before laying out members so the
-  // member offsets reflect them in a single pass.
-  SymbolSetAttributeCopies(tag, attributes);
+  // member offsets reflect them in a single pass.  An empty attribute list on
+  // the definition keeps attributes from a prior forward declaration
+  // (e.g. struct [[nodiscard]] S;).
+  if (attributes != NULL && attributes->length > 0) {
+    SymbolSetAttributeCopies(tag, attributes);
+  }
   StructApplyLayoutAttributes(str, attributes);
   for (size_t i = 0; i < bases->length; i++) {
     VectorAppend(&str->bases, bases->value.p[i]);
@@ -1279,11 +1283,14 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
         SyntaxAddTag(parser->syntax, tag);
       }
       AddInjectedClassName(parser, tag);
+      SymbolMergeAttributeCopies(tag, &attributes);
     } else if (tag->flags.is_using_alias || tag->type == NULL) {
       AttachNewStructToTag(tag, is_union, is_class);
+      SymbolMergeAttributeCopies(tag, &attributes);
     } else {
       // Tag already exists, make sure it's the same tag type.
       CheckTagType(parser, tag, is_union, false);
+      SymbolMergeAttributeCopies(tag, &attributes);
     }
   }
 

@@ -369,6 +369,13 @@ inline bool TypeChar8IdentityDiffers(TypeRecord* left, TypeRecord* right) {
 
 bool TypeIsScopedEnum(TypeRecord* type);
 
+// True when `type` is a by-value class, union, or enumeration whose tag was
+// declared with [[nodiscard]] / warn_unused_result.  Reference types are never
+// nodiscard for discard diagnostics (a discarded S& is not a temporary of S).
+bool TypeIsNodiscard(TypeRecord* type);
+// Tag that owns the nodiscard attribute for `type`, or NULL.
+struct Symbol* TypeNodiscardOwner(TypeRecord* type);
+
 inline bool TypeIsVoidPointer(TypeRecord* type) {
   return TypeIsPointer(type) && type->next != NULL && TypeIsVoid(type->next);
 }
