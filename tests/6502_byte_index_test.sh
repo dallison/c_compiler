@@ -36,9 +36,26 @@ int store_signed(signed char* base, signed char index) {
   return base[index];
 }
 
+static const char rows[19][20] = {
+    "0000000000000000000", "1111111111111111111", "2222222222222222222",
+    "3333333333333333333", "4444444444444444444", "5555555555555555555",
+    "6666666666666666666", "7777777777777777777", "8888888888888888888",
+    "9999999999999999999", "AAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBB",
+    "CCCCCCCCCCCCCCCCCCC", "DDDDDDDDDPDDDDDDDDD", "EEEEEEEEEEEEEEEEEEE",
+    "FFFFFFFFFFFFFFFFFFF", "GGGGGGGGGGGGGGGGGGG", "HHHHHHHHHHHHHHHHHHH",
+    "IIIIIIIIIIIIIIIIIII",
+};
+
+static int words[220];
+
 int main(void) {
   signed char sbuf[8];
   unsigned char i;
+  unsigned char y = 13;
+  unsigned char x = 9;
+  signed char neg = -40;
+  int k;
+  int* p;
   int err = fill_global();
   if (err != 0) return err;
   for (i = 0; i < 8; i++) {
@@ -47,6 +64,18 @@ int main(void) {
   if (store_signed(sbuf + 3, -1) != 12) return 5;
   if (sbuf[2] != 12) return 6;
   if (sbuf[3] != 0) return 7;
+  if (rows[y][x] != 'P') return 8;
+  y = 18;
+  if (rows[y][18] != 'I') return 9;
+  for (k = 0; k < 220; k++) {
+    words[k] = k + 100;
+  }
+  i = 180;
+  if (words[i] != 280) return 10;
+  p = words + (unsigned char)180;
+  if (*p != 280) return 11;
+  if (*(p + neg) != 240) return 12;
+  if (*(p - (unsigned char)150) != 130) return 13;
   return 0;
 }
 SRC

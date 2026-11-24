@@ -98,6 +98,7 @@ cell_addr:
   RTS
 
 // FX_DST = cell of (fx_col, fx_y), Y = scanline within it.
+.global strip_addr
 strip_addr:
   LDA fx_y
   LSR A
@@ -113,6 +114,7 @@ strip_addr:
 
 // Below scanline 7 a byte column continues at the top of the next
 // character row, 640 bytes on.
+.global next_char_row
 next_char_row:
   LDY #0
   CLC

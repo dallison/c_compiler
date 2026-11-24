@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Master Invaders (+ keep Snake) and pack ~/bbc_micro/games.ssd.
+# Build BBC Master games and pack ~/bbc_micro/games.ssd.
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
@@ -29,6 +29,9 @@ asm "$ROOT/games/sprites.s" "$WORK/sprites.o"
 asm "$ROOT/games/invaders_fx.s" "$WORK/invaders_fx.o"
 asm "$ROOT/games/snake_fx.s" "$WORK/snake_fx.o"
 asm "$ROOT/games/asteroids_fx.s" "$WORK/asteroids_fx.o"
+asm "$ROOT/games/galaxians_fx.s" "$WORK/galaxians_fx.o"
+asm "$ROOT/games/centipede_fx.s" "$WORK/centipede_fx.o"
+asm "$ROOT/games/pacman_fx.s" "$WORK/pacman_fx.o"
 
 build_game() {
   local src="$1" fx="$2" out="$3"
@@ -44,6 +47,9 @@ build_game() {
 build_game invaders.cc invaders_fx.o invaders.elf
 build_game snake.cc snake_fx.o snake.elf
 build_game asteroids.cc asteroids_fx.o asteroids.elf
+build_game galaxians.cc galaxians_fx.o galaxians.elf
+build_game centipede.cc centipede_fx.o centipede.elf
+build_game pacman.cc pacman_fx.o pacman.elf
 
 check_elf() {
   local elf="$1" name="$2"
@@ -67,16 +73,22 @@ PY
 check_elf "$WORK/invaders.elf" INVADER
 check_elf "$WORK/snake.elf" SNAKE
 check_elf "$WORK/asteroids.elf" ASTERO
+check_elf "$WORK/galaxians.elf" GALAX
+check_elf "$WORK/centipede.elf" CENTI
+check_elf "$WORK/pacman.elf" PACMAN
 
 # Blitter/sprite symbols that survived --gc-sections must stay below &3000
 # (readable while the shadow screen is mapped). Unused per-sprite sections
 # are dropped, so do not require every sprites.o symbol to appear.
 if command -v nm >/dev/null 2>&1; then
-  for elf in invaders snake asteroids; do
+  for elf in invaders snake asteroids galaxians centipede pacman; do
     case $elf in
       invaders) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/invaders_fx.o") ;;
       snake) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/snake_fx.o") ;;
       asteroids) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/asteroids_fx.o") ;;
+      galaxians) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/galaxians_fx.o") ;;
+      centipede) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/centipede_fx.o") ;;
+      pacman) objs=("$WORK/screen1.o" "$WORK/sprites.o" "$WORK/pacman_fx.o") ;;
     esac
     nm "${objs[@]}" |
       awk 'NF == 3 && $2 ~ /[TDB]/ {print $3}' | sort -u >"$WORK/low_syms_$elf.txt"
@@ -103,7 +115,8 @@ fi
 
 python3 "$SUP/elf2ssd.py" "$SSD" \
   "SNAKE=$WORK/snake.elf" "INVADER=$WORK/invaders.elf" \
-  "ASTERO=$WORK/asteroids.elf"
+  "ASTERO=$WORK/asteroids.elf" "GALAX=$WORK/galaxians.elf" \
+  "CENTI=$WORK/centipede.elf" "PACMAN=$WORK/pacman.elf"
 
 # DFS *RUN loads the reloc wrapper at PAGE (&1F00). Mode-7 HIMEM is &7C00;
 # past that MOS returns "Bad program" before the reloc stub can run.
@@ -120,10 +133,16 @@ for i in range(nfiles):
     if name.startswith("!"):
         continue
     meta = ssd[0x108 + i * 8 : 0x110 + i * 8]
+    # BeebWiki DFS byte14: load high in bits 2-3, length high in bits 4-5,
+    # start sector high in bits 0-1, exec high in bits 6-7.
     load = meta[0] | (meta[1] << 8) | ((meta[6] & 0x0C) << 14)
     length = meta[4] | (meta[5] << 8) | ((meta[6] & 0x30) << 12)
+    start = meta[7] | ((meta[6] & 0x03) << 8)
     end = load + length
-    print(f"{name} DFS load={load:#x} len={length} end={end:#x} room_7c00={himem - end}")
+    print(
+        f"{name} DFS load={load:#x} len={length} end={end:#x} "
+        f"start_sec={start} room_7c00={himem - end}"
+    )
     if end > himem:
         bad.append(name)
 if bad:
@@ -131,4 +150,4 @@ if bad:
 PY
 
 echo "packed $SSD"
-echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO."
+echo "On the emulator: *CAT then *RUN INVADER / SNAKE / ASTERO / GALAX / CENTI / PACMAN."

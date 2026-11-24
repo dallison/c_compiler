@@ -1951,7 +1951,17 @@ ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
       if (ASTNodeIsIntConstant(node->right)) {
         int64_t size = node->left->type->next->size;
         int64_t value = ASTNodeConstantValue(node->right);
-        ASTNode* scale = NewIntConstantASTNode(value * size, node->right->type,
+        TypeRecord* scale_type = node->right->type;
+        if (scale_type == NULL || scale_type->size < compiler->pointer_size) {
+          scale_type =
+              (scale_type != NULL &&
+               (TypeIsUnsigned(scale_type) || TypeIsBool(scale_type)))
+                  ? NewSizeTypeRecord()
+                  : NewTypeRecordWithSize(
+                        compiler->pointer_size == 8 ? kTypeLong : kTypeInt,
+                        kQualPlain);
+        }
+        ASTNode* scale = NewIntConstantASTNode(value * size, scale_type,
                                                node->base.location);
         node->right = scale;
       } else {
@@ -1976,7 +1986,17 @@ ASTNode* AnalyzePlusOperator(BinaryASTNode* node) {
       if (ASTNodeIsIntConstant(node->left)) {
          int64_t size = node->right->type->next->size;
          int64_t value = ASTNodeConstantValue(node->left);
-         ASTNode* scale = NewIntConstantASTNode(value * size, node->left->type,
+         TypeRecord* scale_type = node->left->type;
+         if (scale_type == NULL || scale_type->size < compiler->pointer_size) {
+           scale_type =
+               (scale_type != NULL &&
+                (TypeIsUnsigned(scale_type) || TypeIsBool(scale_type)))
+                   ? NewSizeTypeRecord()
+                   : NewTypeRecordWithSize(
+                         compiler->pointer_size == 8 ? kTypeLong : kTypeInt,
+                         kQualPlain);
+         }
+         ASTNode* scale = NewIntConstantASTNode(value * size, scale_type,
                                                 node->base.location);
          node->left = scale;
        } else {
@@ -2016,7 +2036,17 @@ ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
       if (ASTNodeIsIntConstant(node->right)) {
         int64_t size = node->left->type->next->size;
         int64_t value = ASTNodeConstantValue(node->right);
-        ASTNode* scale = NewIntConstantASTNode(value * size, node->right->type,
+        TypeRecord* scale_type = node->right->type;
+        if (scale_type == NULL || scale_type->size < compiler->pointer_size) {
+          scale_type =
+              (scale_type != NULL &&
+               (TypeIsUnsigned(scale_type) || TypeIsBool(scale_type)))
+                  ? NewSizeTypeRecord()
+                  : NewTypeRecordWithSize(
+                        compiler->pointer_size == 8 ? kTypeLong : kTypeInt,
+                        kQualPlain);
+        }
+        ASTNode* scale = NewIntConstantASTNode(value * size, scale_type,
                                                node->base.location);
         node->right = scale;
       } else {
@@ -3107,6 +3137,18 @@ static bool AnalyzeConditionalExpressionPhaseMatchingGlvalueCategory(
         colon->left->value_category != kValueCategoryPrvalue &&
         TypeEqual(colon->left->type, colon->right->type))) {
     return false;
+  }
+  // Incomplete (or otherwise unsized) array glvalues must not stay as the
+  // conditional's type: there is no object to name, and later lowering would
+  // invent a stack slot of size 0. Fall through so the pointer/array phase
+  // can decay both arms to a prvalue pointer ([expr.cond]/7.3 / array-to-
+  // pointer conversion). Complete arrays still take this path so a reference
+  // can bind to `cond ? a : b`.
+  if (TypeIsArray(colon->left->type)) {
+    TypeRecordCalculateSize(colon->left->type);
+    if (colon->left->type->size <= 0) {
+      return false;
+    }
   }
   ASTNodeSetType((ASTNode*)colon, colon->left->type);
   ASTNodeSetType((ASTNode*)node, colon->base.type);

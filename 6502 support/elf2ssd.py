@@ -308,14 +308,19 @@ def build_ssd(files, boot_text):
         info_at = 0x100 + 8 + index * 8
         disc[name_at : name_at + 7] = catalogue_name(name)
         disc[name_at + 7] = ord("$")
-        load_low, load_high = pack_address(file_load, 4)
-        exec_low, exec_high = pack_address(file_exec, 0)
-        length_low, length_high = pack_address(len(payload), 2)
+        # Acorn DFS sector-1 byte 14 bit fields (BeebWiki):
+        #   0-1 start sector bits 8-9
+        #   2-3 load address bits 16-17
+        #   4-5 length bits 16-17
+        #   6-7 exec address bits 16-17
+        load_low, load_high = pack_address(file_load, 2)
+        exec_low, exec_high = pack_address(file_exec, 6)
+        length_low, length_high = pack_address(len(payload), 4)
         sector_high = (start >> 8) & 3
         disc[info_at : info_at + 2] = struct.pack("<H", load_low)
         disc[info_at + 2 : info_at + 4] = struct.pack("<H", exec_low)
         disc[info_at + 4 : info_at + 6] = struct.pack("<H", length_low)
-        disc[info_at + 6] = exec_high | length_high | load_high | (sector_high << 6)
+        disc[info_at + 6] = exec_high | length_high | load_high | sector_high
         disc[info_at + 7] = start & 0xFF
         disc[start * SECTOR : start * SECTOR + len(payload)] = payload
     return disc

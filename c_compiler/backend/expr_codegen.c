@@ -2695,6 +2695,57 @@ static IRNode* GenerateIncDec(Generator* gen, UnaryASTNode* node, bool is_post,
   return load;
 }
 
+static int IntegerTypeBitWidth(TypeRecord* type) {
+  if (type != NULL && TypeIsBitInt(type) && type->bit_width > 0) {
+    return type->bit_width;
+  }
+  return type != NULL ? (int)type->size * 8 : 0;
+}
+
+static TypeRecord* PointerOffsetTypeFor(TypeRecord* from) {
+  if (from != NULL && (TypeIsUnsigned(from) || TypeIsBool(from))) {
+    return NewSizeTypeRecord();
+  }
+  if (compiler->pointer_size == 8) {
+    return NewTypeRecordWithSize(kTypeLong, kQualPlain);
+  }
+  return NewTypeRecordWithSize(kTypeInt, kQualPlain);
+}
+
+static IRNode* WidenPointerIndex(Generator* gen, IRNode* index) {
+  if (index == NULL || index->type == NULL ||
+      TypeIsInt128(index->type) ||
+      index->type->size >= compiler->pointer_size) {
+    return index;
+  }
+  TypeRecord* to_type = PointerOffsetTypeFor(index->type);
+  int from_bits = IntegerTypeBitWidth(index->type);
+  int diff_bytes = (int)to_type->size - (int)index->type->size;
+  bool is_unsigned = TypeIsUnsigned(index->type) || TypeIsBool(index->type);
+  IRNode* widened;
+  if (IRIsConst(index)) {
+    IRConstant* c = (IRConstant*)index;
+    uint64_t value = (uint64_t)c->value.ivalue;
+    uint64_t mask =
+        from_bits >= 64 ? ~(uint64_t)0 : ((uint64_t)1 << from_bits) - 1;
+    value &= mask;
+    if (!is_unsigned && from_bits > 0 &&
+        (value & ((uint64_t)1 << (from_bits - 1))) != 0) {
+      value |= ~mask;
+    }
+    widened = GeneratorGetIntConstant(gen, to_type, (int64_t)value);
+  } else {
+    IROpcode ext_op = is_unsigned ? IR_OP(zeroextendi) : IR_OP(signextendi);
+    widened = IRSetType(
+        GeneratorEmit(gen,
+                      NewIR2(ext_op, index,
+                             GeneratorGetIntConstant(gen, to_type,
+                                                     diff_bytes * 8))),
+        to_type);
+  }
+  return widened;
+}
+
 // This is the scaling of an expression by the size of the type a pointer is
 // referring to.  The type is in ref_type and the expression is in expr.  The
 // scale can be multiply or divide.  The type's size can be a constant or can
@@ -2704,20 +2755,28 @@ static IRNode* GeneratePointerScale(Generator* gen, PtrScaleASTNode* node) {
   IRNode* size_expr;
   if (TypeIsVLA(node->ref_type)) {
     size_expr = node->ref_type->info.array.size.vla.codegen_info;
+    if (node->scale_op == AST_OP(mult)) {
+      expr = WidenPointerIndex(gen, expr);
+      size_expr = WidenPointerIndex(gen, size_expr);
+    }
   } else {
     int64_t size = node->ref_type->size;
     if (size == 1) {
       return expr;
     }
-    size_expr = GeneratorGetIntConstant(gen, NULL, size);
+    if (node->scale_op == AST_OP(mult)) {
+      expr = WidenPointerIndex(gen, expr);
+    }
+    size_expr = GeneratorGetIntConstant(gen, expr->type, size);
   }
-  
+
   // Scaled by multiplying or dividing.
   IROpcode scale_opcode = IR_OP(muli);
   if (node->scale_op == AST_OP(div)) {
     scale_opcode = IR_OP(divi);
   }
-  return GeneratorEmit(gen, NewIR2(scale_opcode, expr, size_expr));
+  return IRSetType(GeneratorEmit(gen, NewIR2(scale_opcode, expr, size_expr)),
+                   expr->type);
 }
 
 static IRNode* InitArrayWithString(Generator* gen, ASTNode* node, IRNode* destaddr,
@@ -3774,19 +3833,26 @@ static IRNode* GenerateIndexExpression(Generator* gen, BinaryASTNode* node) {
     element_type = node->base.type;
   }
   if (TypeIsVLA(element_type)) {
-    IRNode* size = element_type->info.array.size.vla.codegen_info;
+    index = WidenPointerIndex(gen, index);
+    IRNode* size =
+        WidenPointerIndex(gen, element_type->info.array.size.vla.codegen_info);
     scaled_index = GeneratorEmit(gen, NewIR2(IR_OP(muli), index, size));
   } else {
-    int size = element_type != NULL ? element_type->size : 1;
-    if (IRIsConst(index)) {
-      // Index is constant, do scale in compiler.
-      IRConstant* c = (IRConstant*)index;
-      scaled_index = GeneratorGetIntConstant(gen, node->right->type,
-                                             c->value.ivalue * size);
+    int64_t size = element_type != NULL ? element_type->size : 1;
+    if (size == 1) {
+      scaled_index = index;
     } else {
-      scaled_index = GeneratorEmit(
-        gen,
-        NewIR2(IR_OP(muli), index, GeneratorGetIntConstant(gen, NULL, size)));
+      index = WidenPointerIndex(gen, index);
+      if (IRIsConst(index)) {
+        // Index is constant, do scale in compiler.
+        IRConstant* c = (IRConstant*)index;
+        scaled_index = GeneratorGetIntConstant(gen, index->type,
+                                               c->value.ivalue * size);
+      } else {
+        scaled_index = GeneratorEmit(
+            gen, NewIR2(IR_OP(muli), index,
+                        GeneratorGetIntConstant(gen, index->type, size)));
+      }
     }
   }
   IRSetType(scaled_index, index->type);
@@ -7431,13 +7497,6 @@ static IRNode* GenerateZeroExtend(Generator* gen, ASTNode* node, IRNode* input) 
                         NewIR2(IR_OP(zeroextendi), input,
                                GeneratorGetIntConstant(gen, node->type, diff*8))), node->type);
 
-}
-
-static int IntegerTypeBitWidth(TypeRecord* type) {
-  if (type != NULL && TypeIsBitInt(type) && type->bit_width > 0) {
-    return type->bit_width;
-  }
-  return type != NULL ? (int)type->size * 8 : 0;
 }
 
 static IRNode* GenerateSignExtend(Generator* gen, IRNode* from, ASTNode* to) {

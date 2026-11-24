@@ -736,6 +736,509 @@ W..W..W.
 ........
 """
 
+# Galaxian convoy: flagship (yellow/white), red escort, blue troop.
+GX_FLAG = (
+    """
+    ......WWWW......
+    ....WWWWWWWW....
+    ...WW.WWWW.WW...
+    ..WWWWWWWWWWWW..
+    .WW.W.WWWW.W.WW.
+    WW..WWWWWWWW..WW
+    ....RR....RR....
+    ...R........R...
+    """,
+    """
+    ......WWWW......
+    ....WWWWWWWW....
+    ...WW.WWWW.WW...
+    ..WWWWWWWWWWWW..
+    .WW.W.WWWW.W.WW.
+    WW..WWWWWWWW..WW
+    ...RR......RR...
+    ..R..........R..
+    """,
+)
+
+GX_RED = (
+    """
+    ......RRRR......
+    ....RRRRRRRR....
+    ...RR.RRRR.RR...
+    ..RRRRRRRRRRRR..
+    .RR.R.RRRR.R.RR.
+    ....RR....RR....
+    ...R.R....R.R...
+    ..R..........R..
+    """,
+    """
+    ......RRRR......
+    ....RRRRRRRR....
+    ...RR.RRRR.RR...
+    ..RRRRRRRRRRRR..
+    .RR.R.RRRR.R.RR.
+    ...R.R....R.R...
+    ....RR....RR....
+    ...R........R...
+    """,
+)
+
+GX_BLUE = (
+    """
+    ......GGGG......
+    ....GGGGGGGG....
+    ...GG.GGGG.GG...
+    ..GGGGGGGGGGGG..
+    .GG.G.GGGG.G.GG.
+    ....GG....GG....
+    ...G..G..G..G...
+    ..G..........G..
+    """,
+    """
+    ......GGGG......
+    ....GGGGGGGG....
+    ...GG.GGGG.GG...
+    ..GGGGGGGGGGGG..
+    .GG.G.GGGG.G.GG.
+    ...G.G....G.G...
+    ....GG....GG....
+    ...G........G...
+    """,
+)
+
+GX_SHIP = """
+    ......WWWW......
+    ......WWWW......
+    ....WWWWWWWW....
+    ..WWWWWWWWWWWW..
+    .WWWWWWWWWWWWWW.
+    WWWW.WWWWWW.WWWW
+    WW....WWWW....WW
+    ......GGGG......
+    """
+
+# Pac-Man (Shadow Mode 2, 160x256, 8 steady colours):
+#   . = 0 black / transparent
+#   R = 1 red     (Blinky)
+#   G = 2 green   (Clyde)
+#   Y = 3 yellow  (Pac-Man, power pills)
+#   B = 4 blue    (maze walls, pupils, frightened ghost)
+#   M = 5 magenta (Pinky, ghost-house gate)
+#   C = 6 cyan    (Inky)
+#   W = 7 white   (pellets, eyes, frightened flash)
+# Each tile/sprite is 8 Mode-2 pixels (4 byte-cols) by 12 scanlines = 48 bytes.
+
+PM_PAC_CLOSED = """
+..YYYY..
+.YYYYYY.
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_R0 = """
+..YYYY..
+.YYYYYY.
+YYYYYYYY
+YYYYYY..
+YYYY....
+YYY.....
+YYY.....
+YYYY....
+YYYYYY..
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_R1 = """
+..YYYY..
+.YYYYYY.
+YYYYYY..
+YYYY....
+YYY.....
+YY......
+YY......
+YYY.....
+YYYY....
+YYYYYY..
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_L0 = """
+..YYYY..
+.YYYYYY.
+YYYYYYYY
+..YYYYYY
+....YYYY
+.....YYY
+.....YYY
+....YYYY
+..YYYYYY
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_L1 = """
+..YYYY..
+.YYYYYY.
+..YYYYYY
+....YYYY
+.....YYY
+......YY
+......YY
+.....YYY
+....YYYY
+..YYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_U0 = """
+..Y..Y..
+.YY..YY.
+YYY..YYY
+YYY..YYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_U1 = """
+.Y....Y.
+YY....YY
+YY....YY
+YYY..YYY
+YYY..YYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+"""
+
+PM_PAC_D0 = """
+..YYYY..
+.YYYYYY.
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYY..YYY
+YYY..YYY
+.YY..YY.
+..Y..Y..
+"""
+
+PM_PAC_D1 = """
+..YYYY..
+.YYYYYY.
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYYYYYYY
+YYY..YYY
+YYY..YYY
+YY....YY
+YY....YY
+.Y....Y.
+"""
+
+PM_DIE0 = """
+........
+........
+Y......Y
+YY....YY
+YYY..YYY
+YYYYYYYY
+YYYYYYYY
+.YYYYYY.
+..YYYY..
+........
+........
+........
+"""
+
+PM_DIE1 = """
+........
+Y......Y
+YY....YY
+.YY..YY.
+..YYYY..
+...YY...
+...YY...
+..YYYY..
+........
+........
+........
+........
+"""
+
+PM_DIE2 = """
+..Y..Y..
+........
+.Y....Y.
+...YY...
+Y......Y
+...YY...
+.Y....Y.
+........
+..Y..Y..
+........
+........
+........
+"""
+
+PM_GHOST_T0 = """
+..XXXX..
+.XXXXXX.
+XXXXXXXX
+XWWXXWWX
+XWBXXWBX
+XWWXXWWX
+XXXXXXXX
+XXXXXXXX
+XXXXXXXX
+XXXXXXXX
+XX.XX.XX
+X..XX..X
+"""
+
+PM_GHOST_T1 = """
+..XXXX..
+.XXXXXX.
+XXXXXXXX
+XWWXXWWX
+XBWXXBWX
+XWWXXWWX
+XXXXXXXX
+XXXXXXXX
+XXXXXXXX
+XXXXXXXX
+.XX..XX.
+.X....X.
+"""
+
+PM_GHOST_F0 = """
+..BBBB..
+.BBBBBB.
+BBBBBBBB
+BBBBBBBB
+BBYBBYBB
+BBYBBYBB
+BBBBBBBB
+BBBBBBBB
+B.YY.YYB
+BY..Y..B
+BB.BB.BB
+B..BB..B
+"""
+
+PM_GHOST_F1 = """
+..WWWW..
+.WWWWWW.
+WWWWWWWW
+WWWWWWWW
+WWRWWRWW
+WWRWWRWW
+WWWWWWWW
+WWWWWWWW
+W.RR.RRW
+WR..R..W
+.WW..WW.
+.W....W.
+"""
+
+PM_EYES = """
+........
+........
+........
+.WW..WW.
+WWB..WWB
+.WW..WW.
+........
+........
+........
+........
+........
+........
+"""
+
+PM_PELLET = """
+........
+........
+........
+........
+........
+...WW...
+...WW...
+........
+........
+........
+........
+........
+"""
+
+PM_POWER = """
+........
+........
+........
+..YYYY..
+.YYWWYY.
+.YWWWWY.
+.YWWWWY.
+.YYWWYY.
+..YYYY..
+........
+........
+........
+"""
+
+PM_GATE = """
+........
+........
+........
+........
+........
+MMMMMMMM
+MMMMMMMM
+........
+........
+........
+........
+........
+"""
+
+# Centipede: 8x8 cells on a character-cell grid (like Snake).
+CE_HEAD_L = """
+..GGGG..
+.GGWWGG.
+GGWWWWGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+G.G.....
+G.......
+"""
+
+CE_HEAD_R = """
+..GGGG..
+.GGWWGG.
+GGWWWWGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+.....G.G
+.......G
+"""
+
+CE_BODY = """
+..GGGG..
+.GGGGGG.
+GGWGGWGG
+GGGGGGGG
+.GGGGGG.
+..GGGG..
+........
+........
+"""
+
+CE_MUSH0 = """
+...RR...
+..RRRR..
+.RRWWRR.
+RRRWWRRR
+.RRRRRR.
+..RRRR..
+...RR...
+........
+"""
+
+CE_MUSH1 = """
+...RR...
+..RRRR..
+.RR..RR.
+RRR..RRR
+.RRRRRR.
+..RRRR..
+...RR...
+........
+"""
+
+CE_MUSH2 = """
+...RR...
+..R..R..
+.R....R.
+RR....RR
+.RR..RR.
+..RRRR..
+...RR...
+........
+"""
+
+CE_MUSH3 = """
+...RR...
+........
+.R....R.
+........
+.R....R.
+..R..R..
+...RR...
+........
+"""
+
+CE_SPIDER0 = """
+W......W
+.W....W.
+..WWWW..
+.WWWWWW.
+WW.WW.WW
+.WWWWWW.
+W.W..W.W
+........
+"""
+
+CE_SPIDER1 = """
+.W....W.
+W......W
+..WWWW..
+.WWWWWW.
+WW.WW.WW
+.WWWWWW.
+.W.WW.W.
+........
+"""
+
+CE_SHIP = """
+    ......GGGG......
+    ......GGGG......
+    ....GGGGGGGG....
+    ..GGGGGGGGGGGG..
+    .GGGGGGGGGGGGGG.
+    GGGG..GGGG..GGGG
+    GG......GG......
+    ......WWWW......
+    """
+
 # The Master's 8x8 digits, a row per byte (bit 7 left), so the HUD digits
 # drawn from here match the OS text beside them.
 DIGITS = (
@@ -752,6 +1255,16 @@ DIGITS = (
 )
 
 COLOUR = {".": 0, "G": 1, "R": 2, "W": 3}
+COLOUR2 = {
+    ".": 0,
+    "R": 1,
+    "G": 2,
+    "Y": 3,
+    "B": 4,
+    "M": 5,
+    "C": 6,
+    "W": 7,
+}
 
 
 def rows(art):
@@ -832,6 +1345,78 @@ def glyph(hex_rows, ink="W"):
     return cell(art)
 
 
+def encode2(pixels):
+    """BBC Mode 2: 2 pixels per byte (16 colours, using steady 0..7)."""
+    out = []
+    for i in range(0, len(pixels), 2):
+        value = 0
+        for p, ch in enumerate(pixels[i : i + 2]):
+            c = COLOUR2[ch]
+            value |= ((c >> 3) & 1) << (7 - p)
+            value |= ((c >> 2) & 1) << (5 - p)
+            value |= ((c >> 1) & 1) << (3 - p)
+            value |= (c & 1) << (1 - p)
+        out.append(value)
+    return out
+
+
+def cell2(art):
+    """Mode-2 column-major strips (e.g. 8x12 -> 4 strips of 12 scanlines = 48 bytes)."""
+    return column_major([encode2(r) for r in rows(art)])
+
+
+def glyph2(hex_rows, ink="W"):
+    """Mode-2 8x8 HUD digit (4 byte-cols x 8 scanlines = 32 bytes)."""
+    bits = [int(h, 16) for h in hex_rows.split()]
+    art = "\n".join(
+        "".join(ink if b & (0x80 >> p) else "." for p in range(8)) for b in bits
+    )
+    return cell2(art)
+
+
+def pm_wall_tile(mask):
+    """Neighbor-connected hollow blue Mode-2 wall tile (mask bits: 1=N, 2=E, 4=S, 8=W)."""
+    N = bool(mask & 1)
+    E = bool(mask & 2)
+    S = bool(mask & 4)
+    W = bool(mask & 8)
+
+    def in_r(x, y):
+        if y < 0:
+            return N and (1 <= x <= 6)
+        if y > 11:
+            return S and (1 <= x <= 6)
+        if x < 0:
+            return W and (2 <= y <= 9)
+        if x > 7:
+            return E and (2 <= y <= 9)
+        if 1 <= x <= 6 and 2 <= y <= 9:
+            return True
+        if N and 1 <= x <= 6 and y < 2:
+            return True
+        if S and 1 <= x <= 6 and y > 9:
+            return True
+        if W and 2 <= y <= 9 and x < 1:
+            return True
+        if E and 2 <= y <= 9 and x > 6:
+            return True
+        return False
+
+    lines = []
+    for y in range(12):
+        row = []
+        for x in range(8):
+            if not in_r(x, y):
+                row.append(".")
+            else:
+                interior = all(
+                    in_r(x + dx, y + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)
+                )
+                row.append("." if interior else "B")
+        lines.append("".join(row))
+    return cell2("\n".join(lines))
+
+
 def emit(name, data, per_line=8):
     # One section per bitmap so --gc-sections can drop Invaders/Snake art
     # from ASTERO (shared sprites.o was blowing the DFS HIMEM load budget).
@@ -894,6 +1479,51 @@ def main():
         emit("k_as_shot%d" % i, [encode(r)[0] for r in rows(art)], per_line=3)
     emit("k_as_boom0", cell(AS_BOOM0))
     emit("k_as_boom1", cell(AS_BOOM1))
+    # Galaxian convoy + player (6-col windows like Invaders aliens).
+    for frame, art in enumerate(GX_FLAG):
+        emit("k_gx_flag%d" % frame, window(art, 0))
+    for frame, art in enumerate(GX_RED):
+        emit("k_gx_red%d" % frame, window(art, 0))
+    for frame, art in enumerate(GX_BLUE):
+        emit("k_gx_blue%d" % frame, window(art, 0))
+    emit("k_gx_ship", pair(GX_SHIP))
+    emit("k_gx_ship_red", pair(GX_SHIP.replace("W", "R").replace("G", "R")))
+    # Centipede: 8x8 cells (head/body/mushroom/spider) + 16x8 player.
+    emit("k_ce_head_l", cell(CE_HEAD_L))
+    emit("k_ce_head_r", cell(CE_HEAD_R))
+    emit("k_ce_body", cell(CE_BODY))
+    emit("k_ce_mush0", cell(CE_MUSH0))
+    emit("k_ce_mush1", cell(CE_MUSH1))
+    emit("k_ce_mush2", cell(CE_MUSH2))
+    emit("k_ce_mush3", cell(CE_MUSH3))
+    emit("k_ce_spider0", cell(CE_SPIDER0))
+    emit("k_ce_spider1", cell(CE_SPIDER1))
+    emit("k_ce_ship", pair(CE_SHIP))
+    emit("k_ce_ship_red", pair(CE_SHIP.replace("G", "R")))
+    # Pac-Man (Mode 2): 8x12 sprites/tiles (48 bytes) + Mode-2 HUD digits.
+    emit("k_pm_digits", [b for d in DIGITS for b in glyph2(d)])
+    emit("k_pm_pac_closed", cell2(PM_PAC_CLOSED))
+    emit("k_pm_pac_r0", cell2(PM_PAC_R0))
+    emit("k_pm_pac_r1", cell2(PM_PAC_R1))
+    emit("k_pm_pac_l0", cell2(PM_PAC_L0))
+    emit("k_pm_pac_l1", cell2(PM_PAC_L1))
+    emit("k_pm_pac_u0", cell2(PM_PAC_U0))
+    emit("k_pm_pac_u1", cell2(PM_PAC_U1))
+    emit("k_pm_pac_d0", cell2(PM_PAC_D0))
+    emit("k_pm_pac_d1", cell2(PM_PAC_D1))
+    emit("k_pm_die0", cell2(PM_DIE0))
+    emit("k_pm_die1", cell2(PM_DIE1))
+    emit("k_pm_die2", cell2(PM_DIE2))
+    for role, ink in (("blinky", "R"), ("pinky", "M"), ("inky", "C"), ("clyde", "G")):
+        emit("k_pm_%s0" % role, cell2(PM_GHOST_T0.replace("X", ink)))
+        emit("k_pm_%s1" % role, cell2(PM_GHOST_T1.replace("X", ink)))
+    emit("k_pm_ghost_f0", cell2(PM_GHOST_F0))
+    emit("k_pm_ghost_f1", cell2(PM_GHOST_F1))
+    emit("k_pm_eyes", cell2(PM_EYES))
+    emit("k_pm_pellet", cell2(PM_PELLET))
+    emit("k_pm_power", cell2(PM_POWER))
+    emit("k_pm_gate", cell2(PM_GATE))
+    emit("k_pm_wall", [b for m in range(16) for b in pm_wall_tile(m)], per_line=12)
 
 
 if __name__ == "__main__":

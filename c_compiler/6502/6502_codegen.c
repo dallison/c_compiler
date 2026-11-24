@@ -1109,12 +1109,12 @@ static IRNode* PreLower(W65C02Generator* g, Generator* gen, IRNode* node, bool* 
       // second arg.
       IRNode* op1 = src->inputs.value.p[0];
       IRNode* op2 = src->inputs.value.p[1];
-      if (IRIsConst(op2)) {
+      if (node->inputs.length == 1 && IRIsConst(op2)) {
         int64_t value = IRIntConstValue(op2);
         int size = Sizeof(node->type);
         // Max index for Y is 255, but we need to allow for 'size' bytes
         // above the start index.
-        if (value < (256 - size)) {
+        if (value >= 0 && value < (256 - size)) {
           IRAddInput(node, op2, false);     // Add 2nd operand to store.
           IRReplaceInput(node, 0, op1);
           if (src->outputs.length == 0) {
@@ -3688,6 +3688,8 @@ static void LowerExpression(W65C02Generator* g, IRNode* node) {
     case IR_OP(muli):
     case IR_OP(divi):
     case IR_OP(modi):
+      ops[0] = WidenForArithmetic(g, ops[0], node->inputs.value.p[0], size);
+      ops[1] = WidenForArithmetic(g, ops[1], node->inputs.value.p[1], size);
       inst = CallArithmeticBinaryRuntime(
           g, node, dest, ops[0], ops[1],
           RuntimeFunction(g, op, is_unsigned, size));
@@ -8396,7 +8398,14 @@ static void AssignRegisterOrOffset(W65C02Generator* g, PoolEntry* entry,
       // size; Sizeof() treats them as addresses for load/store lowering.
       TypeRecord* type = entry->value.symbol->type;
       TypeRecordCalculateSize(type);
-      int32_t size = TypeIsReference(type) ? Sizeof(type) : type->size;
+      // Arrays keep type->size (full object). Everything else, including
+      // references and decayed pointer-sized values, uses Sizeof(). If an
+      // incomplete array still has size 0 here, Sizeof() yields the
+      // address width after array-to-pointer decay — never a zero slot.
+      int32_t size = TypeIsReference(type) || !TypeIsArray(type) ||
+                             type->size <= 0
+                         ? Sizeof(type)
+                         : type->size;
       assert(size > 0);
       *var_offset += size;
     }

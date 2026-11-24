@@ -1,11 +1,10 @@
 ---
 name: build-invaders
 description: >-
-  Build BBC Master Space Invaders with davecc, link at &E00, and pack
-  INVADER onto ~/bbc_micro/games.ssd for the emulator. Use when rebuilding
-  invaders, updating games.ssd, packing INVADER/SNAKE, or after editing
-  games/invaders.cc, games/invaders_fx.s, games/sprites.py, screen1.s, or
-  bbc_mode2_e00.ld.
+  Build BBC Master games (Invaders, Snake, Asteroids, Galaxians, Centipede,
+  Pac-Man) with davecc, link at &E00, and pack onto ~/bbc_micro/games.ssd.
+  Use when rebuilding those games, updating games.ssd, or after editing
+  games/*.cc, *_fx.s, games/sprites.py, screen1.s, or bbc_mode2_e00.ld.
 ---
 
 # Build Master Invaders → games.ssd
@@ -27,7 +26,8 @@ ROOT=/Users/dallison/c_compiler SSD=$HOME/bbc_micro/games.ssd \
   .cursor/skills/build-invaders/scripts/build_and_pack.sh
 ```
 
-Emulator: mount `~/bbc_micro/games.ssd`, then `*RUN INVADER` (or Shift-Break → `*CAT`).
+Emulator: mount `~/bbc_micro/games.ssd`, then `*RUN INVADER` / `SNAKE` /
+`ASTERO` / `GALAX` / `CENTI` / `PACMAN` (or Shift-Break → `*CAT`).
 
 ## Manual steps (same as the script)
 
@@ -92,13 +92,16 @@ The script does these checks; it fails if any of those symbols lands at or above
 - **Assembler**: in davecc `.s` files `.word` is **4 bytes**; use `.hword` for 16-bit pointers and values.
 - **Mode**: call `bbc::mode(129)` **once** in `main`. A second `mode()` re-parks the soft stack and returns to BASIC.
 
-## Snake and Asteroids (same SSD, same link)
+## Snake, Asteroids, Galaxians, Centipede, Pac-Man (same SSD, same link)
 
-Snake and Asteroids match Invaders: shadow mode 1, `screen1.s` blitter,
-sprites in `sprites.s`, play helpers in `snake_fx.s` / `asteroids_fx.s`,
-C++20 coroutines, linked at `&E00` with `bbc_mode2_e00.ld`. The pack
-script builds all three (`*RUN SNAKE`, `*RUN INVADER`, `*RUN ASTERO`).
+Snake, Asteroids, Galaxians, and Centipede match Invaders in shadow mode 1;
+Pac-Man uses 8-colour shadow mode 2 (`bbc::mode(130)`) with offscreen
+tile-window compositing (`patch_window` in `pacman_fx.s`) for flicker-free
+sprites. All share `screen1.s`, `sprites.s`, C++20 coroutines, and link at
+`&E00` with `bbc_mode2_e00.ld` (`*RUN SNAKE`, `*RUN INVADER`, `*RUN ASTERO`,
+`*RUN GALAX`, `*RUN CENTI`, `*RUN PACMAN`).
 
 ## After packing
 
-Tell the user to reload the disc / `*RUN INVADER`. Do not commit `games/build/` artifacts unless asked.
+Tell the user to reload the disc / `*RUN PACMAN` (or any game on `games.ssd`).
+Do not commit `games/build/` artifacts unless asked.
