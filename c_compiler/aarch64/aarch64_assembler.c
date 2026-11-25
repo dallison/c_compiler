@@ -11,6 +11,8 @@
 #include "map.h"
 #include <assert.h>
 #include <ctype.h>
+#include <stdlib.h>
+#include <string.h>
 
 
 // Shortcut macro avoid typing assembler->base. everywhere we want to access
@@ -562,12 +564,17 @@ static Register GetRegister(AARCH64Assembler* assembler) {
     AssemblerError(&ASM, "Expected register name");
     return reg;
   }
-  if (StringEqualCaseBlind(&ASM.lex.spelling, "sp")) {
+  // Special / ABI register names (before the letter+number parse so "sp"
+  // is not mistaken for an S-register).
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "sp") ||
+      StringEqualCaseBlind(&ASM.lex.spelling, "wsp")) {
+    bool is_wsp = toupper(ASM.lex.spelling.value[0]) == 'W';
     LexNextToken(&ASM.lex);
-    reg.kind = kX;
+    reg.kind = is_wsp ? kW : kX;
     // AArch64 encodes SP as register 31 in instruction words.
     reg.num = 31;
     reg.is_sp = true;
+    reg.size = is_wsp ? 2 : 3;
     return reg;
   }
   if (StringEqualCaseBlind(&ASM.lex.spelling, "xzr") ||
@@ -576,6 +583,34 @@ static Register GetRegister(AARCH64Assembler* assembler) {
     reg.num = 31;
     reg.size = reg.kind == kX ? 3 : 2;
     LexNextToken(&ASM.lex);
+    return reg;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "fp")) {
+    LexNextToken(&ASM.lex);
+    reg.kind = kX;
+    reg.num = 29;
+    reg.size = 3;
+    return reg;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "lr")) {
+    LexNextToken(&ASM.lex);
+    reg.kind = kX;
+    reg.num = 30;
+    reg.size = 3;
+    return reg;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "ip0")) {
+    LexNextToken(&ASM.lex);
+    reg.kind = kX;
+    reg.num = 16;
+    reg.size = 3;
+    return reg;
+  }
+  if (StringEqualCaseBlind(&ASM.lex.spelling, "ip1")) {
+    LexNextToken(&ASM.lex);
+    reg.kind = kX;
+    reg.num = 17;
+    reg.size = 3;
     return reg;
   }
   char prefix = toupper(ASM.lex.spelling.value[0]);
@@ -3038,31 +3073,106 @@ static void Assemble_clrex(AARCH64Assembler* assembler) {
   AssemblerEmitWord(&ASM, ASMO.current_section, 0xd5033f5fu);
 }
 
+// MRS template (Rt = 0): L=1, op0/op1/CRn/CRm/op2 as in the ARM ARM.
+#define A64_SYSREG_MRS(op0, op1, crn, crm, op2)                         \
+  (0xd5200000u | ((uint32_t)(op0) << 19) | ((uint32_t)(op1) << 16) |     \
+   ((uint32_t)(crn) << 12) | ((uint32_t)(crm) << 8) | ((uint32_t)(op2) << 5))
+
+// Parse the architectural S<op0>_<op1>_C<Cn>_C<Cm>_<op2> encoding name.
+static bool ParseS3SystemRegisterName(const char* name, uint32_t* encoding) {
+  if (name == NULL || (name[0] != 's' && name[0] != 'S')) {
+    return false;
+  }
+  const char* p = name + 1;
+  char* end = NULL;
+  long op0 = strtol(p, &end, 10);
+  if (end == p || *end != '_' || op0 < 0 || op0 > 3) {
+    return false;
+  }
+  p = end + 1;
+  long op1 = strtol(p, &end, 10);
+  if (end == p || *end != '_' || op1 < 0 || op1 > 7) {
+    return false;
+  }
+  p = end + 1;
+  if (*p != 'c' && *p != 'C') {
+    return false;
+  }
+  p++;
+  long crn = strtol(p, &end, 10);
+  if (end == p || *end != '_' || crn < 0 || crn > 15) {
+    return false;
+  }
+  p = end + 1;
+  if (*p != 'c' && *p != 'C') {
+    return false;
+  }
+  p++;
+  long crm = strtol(p, &end, 10);
+  if (end == p || *end != '_' || crm < 0 || crm > 15) {
+    return false;
+  }
+  p = end + 1;
+  long op2 = strtol(p, &end, 10);
+  if (end == p || *end != '\0' || op2 < 0 || op2 > 7) {
+    return false;
+  }
+  *encoding = A64_SYSREG_MRS(op0, op1, crn, crm, op2);
+  return true;
+}
+
 static bool SystemRegisterMrsEncoding(AARCH64Assembler* assembler,
                                       uint32_t* encoding) {
   if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
     AssemblerError(&ASM, "Expected system register name");
     return false;
   }
-  if (StringEqualCaseBlind(&ASM.lex.spelling, "tpidr_el0")) {
-    *encoding = 0xd53bd040u;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "cntvct_el0")) {
-    *encoding = 0xd53be040u;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "cntfrq_el0")) {
-    *encoding = 0xd53be000u;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "midr_el1")) {
-    *encoding = 0xd5380000u;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpsr")) {
-    *encoding = 0xd53b4420u;
-  } else if (StringEqualCaseBlind(&ASM.lex.spelling, "fpcr")) {
-    *encoding = 0xd53b4400u;
-  } else {
-    AssemblerError(&ASM, "Unsupported system register %s",
-                   ASM.lex.spelling.value);
-    return false;
+  // Named special / system registers (PSTATE, ID, timer, FP, TLS, …).
+  static const struct {
+    const char* name;
+    uint32_t mrs;
+  } kSysRegs[] = {
+      {"nzcv", A64_SYSREG_MRS(3, 3, 4, 2, 0)},
+      {"daif", A64_SYSREG_MRS(3, 3, 4, 2, 1)},
+      {"currentel", A64_SYSREG_MRS(3, 0, 4, 2, 2)},
+      {"spsel", A64_SYSREG_MRS(3, 0, 4, 2, 0)},
+      {"pan", A64_SYSREG_MRS(3, 0, 4, 2, 3)},
+      {"uao", A64_SYSREG_MRS(3, 0, 4, 2, 4)},
+      {"dit", A64_SYSREG_MRS(3, 3, 4, 2, 5)},
+      {"ssbs", A64_SYSREG_MRS(3, 3, 4, 2, 6)},
+      {"fpcr", A64_SYSREG_MRS(3, 3, 4, 4, 0)},
+      {"fpsr", A64_SYSREG_MRS(3, 3, 4, 4, 1)},
+      {"dspsr_el0", A64_SYSREG_MRS(3, 3, 4, 5, 0)},
+      {"dlr_el0", A64_SYSREG_MRS(3, 3, 4, 5, 1)},
+      {"sp_el0", A64_SYSREG_MRS(3, 0, 4, 1, 0)},
+      {"sp_el1", A64_SYSREG_MRS(3, 4, 4, 1, 0)},
+      {"sp_el2", A64_SYSREG_MRS(3, 6, 4, 1, 0)},
+      {"midr_el1", A64_SYSREG_MRS(3, 0, 0, 0, 0)},
+      {"ctr_el0", A64_SYSREG_MRS(3, 3, 0, 0, 1)},
+      {"dczid_el0", A64_SYSREG_MRS(3, 3, 0, 0, 7)},
+      {"rndr", A64_SYSREG_MRS(3, 3, 2, 4, 0)},
+      {"rndrrs", A64_SYSREG_MRS(3, 3, 2, 4, 1)},
+      {"tpidr_el0", A64_SYSREG_MRS(3, 3, 13, 0, 2)},
+      {"tpidrro_el0", A64_SYSREG_MRS(3, 3, 13, 0, 3)},
+      {"tpidr_el1", A64_SYSREG_MRS(3, 0, 13, 0, 4)},
+      {"cntfrq_el0", A64_SYSREG_MRS(3, 3, 14, 0, 0)},
+      {"cntvct_el0", A64_SYSREG_MRS(3, 3, 14, 0, 2)},
+      {"cntpct_el0", A64_SYSREG_MRS(3, 3, 14, 0, 1)},
+  };
+  for (size_t i = 0; i < sizeof(kSysRegs) / sizeof(kSysRegs[0]); i++) {
+    if (StringEqualCaseBlind(&ASM.lex.spelling, kSysRegs[i].name)) {
+      *encoding = kSysRegs[i].mrs;
+      LexNextToken(&ASM.lex);
+      return true;
+    }
   }
-  LexNextToken(&ASM.lex);
-  return true;
+  if (ParseS3SystemRegisterName(ASM.lex.spelling.value, encoding)) {
+    LexNextToken(&ASM.lex);
+    return true;
+  }
+  AssemblerError(&ASM, "Unsupported system register %s",
+                 ASM.lex.spelling.value);
+  return false;
 }
 
 static void Assemble_mrs(AARCH64Assembler* assembler) {

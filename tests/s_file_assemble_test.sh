@@ -31,6 +31,12 @@ NAME:
   ldp q8, q9, [x0, #(160 + 32)]
   mrs x2, fpsr
   msr fpcr, x2
+  mrs x3, nzcv
+  msr nzcv, x3
+  mrs x4, tpidr_el0
+  mrs x5, s3_3_c13_c0_2
+  mov fp, sp
+  mov lr, x30
   ret
 2:
   ret
@@ -38,4 +44,23 @@ SRC
 
 "$DAVECC" -nostdinc -c "$WORK/align.S" -o "$WORK/align.o"
 test -s "$WORK/align.o"
+
+cat >"$WORK/arm_special.S" <<'SRC'
+.text
+.global arm_special
+.p2align 2
+arm_special:
+  mrs r0, cpsr
+  mrs r1, apsr
+  mrs r2, spsr
+  msr cpsr_f, r0
+  msr apsr_nzcvq, r1
+  vmrs apsr_nzcv, fpscr
+  vmrs r3, fpscr
+  vmsr fpscr, r3
+  bx lr
+SRC
+
+"$DAVECC" -nostdinc -target arm -c "$WORK/arm_special.S" -o "$WORK/arm_special.o"
+test -s "$WORK/arm_special.o"
 echo ok

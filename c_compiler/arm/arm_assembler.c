@@ -1602,16 +1602,257 @@ static void Assemble_fcvtds(ARMAssembler* a) {
   EmitInst(a, 0xeeb70b40 | EncVfpSd(sd.num) | EncVfpDm(dm.num));
 }
 
+// Status / special register names for mrs/msr/vmrs/vmsr.
+typedef enum {
+  kARMSpecNone = 0,
+  kARMSpecCPSR,
+  kARMSpecSPSR,
+  kARMSpecAPSR,
+  kARMSpecAPSR_nzcv,
+  kARMSpecAPSR_nzcvq,
+  kARMSpecFPSCR,
+  kARMSpecFPSID,
+  kARMSpecMVFR0,
+  kARMSpecMVFR1,
+} ARMSpecialReg;
+
+static bool NameEqualsCaseBlind(const char* a, const char* b) {
+  while (*a != '\0' && *b != '\0') {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) {
+      return false;
+    }
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+// Parse CPSR/SPSR field masks: "", "_c", "_x", "_s", "_f", and combinations
+// like "_fc" / "_cxsf".  Bits: c=1, x=2, s=4, f=8.
+static bool ParseCPSRMaskSuffix(const char* name, const char* base, int* mask) {
+  size_t base_len = strlen(base);
+  size_t name_len = strlen(name);
+  if (name_len < base_len) {
+    return false;
+  }
+  for (size_t i = 0; i < base_len; i++) {
+    if (tolower((unsigned char)name[i]) != tolower((unsigned char)base[i])) {
+      return false;
+    }
+  }
+  if (name_len == base_len) {
+    // Bare CPSR/SPSR/APSR: mrs reads the whole register; msr needs fields.
+    *mask = 0x9;  // default fc (flags+control), matching GNU as for APSR writes
+    return true;
+  }
+  if (name[base_len] != '_') {
+    return false;
+  }
+  const char* p = name + base_len + 1;
+  int m = 0;
+  while (*p != '\0') {
+    char c = (char)tolower((unsigned char)*p++);
+    if (c == 'c') {
+      m |= 0x1;
+    } else if (c == 'x') {
+      m |= 0x2;
+    } else if (c == 's') {
+      m |= 0x4;
+    } else if (c == 'f') {
+      m |= 0x8;
+    } else {
+      return false;
+    }
+  }
+  if (m == 0) {
+    return false;
+  }
+  *mask = m;
+  return true;
+}
+
+static bool ParseSpecialRegisterName(const char* name, ARMSpecialReg* kind,
+                                     int* cpsr_mask) {
+  *cpsr_mask = 0;
+  if (NameEqualsCaseBlind(name, "fpscr")) {
+    *kind = kARMSpecFPSCR;
+    return true;
+  }
+  if (NameEqualsCaseBlind(name, "fpsid")) {
+    *kind = kARMSpecFPSID;
+    return true;
+  }
+  if (NameEqualsCaseBlind(name, "mvfr0")) {
+    *kind = kARMSpecMVFR0;
+    return true;
+  }
+  if (NameEqualsCaseBlind(name, "mvfr1")) {
+    *kind = kARMSpecMVFR1;
+    return true;
+  }
+  if (NameEqualsCaseBlind(name, "apsr_nzcv")) {
+    *kind = kARMSpecAPSR_nzcv;
+    return true;
+  }
+  if (NameEqualsCaseBlind(name, "apsr_nzcvq")) {
+    *kind = kARMSpecAPSR_nzcvq;
+    *cpsr_mask = 0x8;  // flags
+    return true;
+  }
+  if (ParseCPSRMaskSuffix(name, "apsr", cpsr_mask)) {
+    *kind = kARMSpecAPSR;
+    return true;
+  }
+  if (ParseCPSRMaskSuffix(name, "cpsr", cpsr_mask)) {
+    *kind = kARMSpecCPSR;
+    return true;
+  }
+  if (ParseCPSRMaskSuffix(name, "spsr", cpsr_mask)) {
+    *kind = kARMSpecSPSR;
+    return true;
+  }
+  return false;
+}
+
+static bool ParseSpecialRegister(ARMAssembler* assembler, ARMSpecialReg* kind,
+                                 int* cpsr_mask) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier)) ||
+      !ParseSpecialRegisterName(ASM.lex.spelling.value, kind, cpsr_mask)) {
+    AssemblerError(&ASM, "Special register expected");
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+  return true;
+}
+
+static void Assemble_mrs(ARMAssembler* assembler) {
+  ARMReg rd;
+  ARMSpecialReg spec;
+  int mask = 0;
+  if (!ParseRegister(assembler, &rd) || !ExpectComma(assembler) ||
+      !ParseSpecialRegister(assembler, &spec, &mask)) {
+    return;
+  }
+  if (rd.type != kARMRegTypeInt) {
+    AssemblerError(&ASM, "MRS destination must be a GP register");
+    return;
+  }
+  // MRS Rd, CPSR/APSR: 0xE10F0000 | (Rd<<12); SPSR uses bit 22.
+  uint32_t inst = ARM_AL | 0x010f0000u | ((uint32_t)rd.num << 12);
+  if (spec == kARMSpecSPSR) {
+    inst |= 1u << 22;
+  } else if (spec != kARMSpecCPSR && spec != kARMSpecAPSR &&
+             spec != kARMSpecAPSR_nzcv && spec != kARMSpecAPSR_nzcvq) {
+    AssemblerError(&ASM, "MRS source must be CPSR, SPSR, or APSR");
+    return;
+  }
+  EmitInst(assembler, inst);
+}
+
+static void Assemble_msr(ARMAssembler* assembler) {
+  ARMSpecialReg spec;
+  int mask = 0;
+  ARMReg rm;
+  if (!ParseSpecialRegister(assembler, &spec, &mask) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rm)) {
+    return;
+  }
+  if (rm.type != kARMRegTypeInt) {
+    AssemblerError(&ASM, "MSR source must be a GP register");
+    return;
+  }
+  if (spec == kARMSpecAPSR_nzcvq || spec == kARMSpecAPSR_nzcv) {
+    mask = 0x8;
+    spec = kARMSpecAPSR;
+  }
+  if (spec != kARMSpecCPSR && spec != kARMSpecSPSR && spec != kARMSpecAPSR) {
+    AssemblerError(&ASM, "MSR destination must be CPSR, SPSR, or APSR");
+    return;
+  }
+  if (mask == 0) {
+    AssemblerError(&ASM, "MSR requires a field mask (e.g. cpsr_f)");
+    return;
+  }
+  // MSR CPSR_<fields>, Rm: 0xE120F000 | (mask<<16) | Rm; SPSR sets bit 22.
+  uint32_t inst =
+      ARM_AL | 0x0120f000u | ((uint32_t)mask << 16) | (uint32_t)rm.num;
+  if (spec == kARMSpecSPSR) {
+    inst |= 1u << 22;
+  }
+  EmitInst(assembler, inst);
+}
+
 static void Assemble_vmrs(ARMAssembler* assembler) {
-  // vmrs APSR_nzcv, FPSCR -- consume the two fixed register operands.
-  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
+  // vmrs APSR_nzcv, FPSCR  or  vmrs Rt, FPSCR / FPSID / MVFRn
+  ARMSpecialReg dest_spec = kARMSpecNone;
+  int mask = 0;
+  ARMReg rt;
+  bool dest_is_apsr = false;
+  if (LexLookingAt(&ASM.lex, TOK(identifier)) &&
+      ParseSpecialRegisterName(ASM.lex.spelling.value, &dest_spec, &mask) &&
+      (dest_spec == kARMSpecAPSR_nzcv || dest_spec == kARMSpecAPSR ||
+       dest_spec == kARMSpecAPSR_nzcvq)) {
+    dest_is_apsr = true;
     LexNextToken(&ASM.lex);
+  } else if (!ParseRegister(assembler, &rt) || rt.type != kARMRegTypeInt) {
+    AssemblerError(&ASM, "VMRS destination must be a GP register or APSR_nzcv");
+    return;
   }
-  LexMatch(&ASM.lex, TOK(comma));
-  if (LexLookingAt(&ASM.lex, TOK(identifier))) {
-    LexNextToken(&ASM.lex);
+  if (!ExpectComma(assembler)) {
+    return;
   }
-  EmitInst(assembler, 0xeef1fa10);
+  ARMSpecialReg src;
+  if (!ParseSpecialRegister(assembler, &src, &mask)) {
+    return;
+  }
+  uint32_t reg_enc;
+  if (src == kARMSpecFPSCR) {
+    reg_enc = 1;
+  } else if (src == kARMSpecFPSID) {
+    reg_enc = 0;
+  } else if (src == kARMSpecMVFR0) {
+    reg_enc = 7;
+  } else if (src == kARMSpecMVFR1) {
+    reg_enc = 6;
+  } else {
+    AssemblerError(&ASM, "VMRS source must be FPSCR, FPSID, MVFR0, or MVFR1");
+    return;
+  }
+  if (dest_is_apsr) {
+    if (src != kARMSpecFPSCR) {
+      AssemblerError(&ASM, "VMRS APSR_nzcv requires FPSCR");
+      return;
+    }
+    EmitInst(assembler, 0xeef1fa10u);
+    return;
+  }
+  EmitInst(assembler,
+           0xeef00a10u | (reg_enc << 16) | ((uint32_t)rt.num << 12));
+}
+
+static void Assemble_vmsr(ARMAssembler* assembler) {
+  // vmsr FPSCR, Rt
+  ARMSpecialReg dest;
+  int mask = 0;
+  ARMReg rt;
+  if (!ParseSpecialRegister(assembler, &dest, &mask) || !ExpectComma(assembler) ||
+      !ParseRegister(assembler, &rt)) {
+    return;
+  }
+  if (rt.type != kARMRegTypeInt) {
+    AssemblerError(&ASM, "VMSR source must be a GP register");
+    return;
+  }
+  uint32_t reg_enc;
+  if (dest == kARMSpecFPSCR) {
+    reg_enc = 1;
+  } else if (dest == kARMSpecFPSID) {
+    reg_enc = 0;
+  } else {
+    AssemblerError(&ASM, "VMSR destination must be FPSCR or FPSID");
+    return;
+  }
+  EmitInst(assembler, 0xeee00a10u | (reg_enc << 16) | ((uint32_t)rt.num << 12));
 }
 
 // scvtf sd, rt  -- convert signed int in GP register rt to float in sd.
@@ -1737,6 +1978,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(dmb);
   INST(clrex);
   INST(mrc);
+  INST(mrs);
+  INST(msr);
   INST(tprel);
   INST(tlsgd);
   INST(b);
@@ -1846,6 +2089,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(fcvtsd);
   INST(fcvtds);
   INST(vmrs);
+  INST(vmsr);
   INST(scvtf);
   INST(ucvtf);
   INST(fcvtnu);
