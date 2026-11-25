@@ -163,6 +163,7 @@ ssize_t pread(int fd, void* buffer, size_t size, off_t offset) {
   return -1;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 pid_t fork(void) {
   errno = ENOSYS;
   return -1;
@@ -175,6 +176,7 @@ pid_t waitpid(pid_t pid, int* status, int options) {
   errno = ENOSYS;
   return -1;
 }
+#endif
 
 int isatty(int fd) {
   (void)fd;

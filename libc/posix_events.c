@@ -9,7 +9,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#if !defined(__DAVECC_NATIVE_LINUX__) && !defined(__DAVECC_NATIVE_DARWIN__)
+#if !defined(__DAVECC_NATIVE_LINUX__) && !defined(__DAVECC_NATIVE_DARWIN__) && \
+    !defined(__DAVECC_DAVEOS__)
 
 #include <netinet/in.h>
 #include <poll.h>

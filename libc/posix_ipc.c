@@ -349,6 +349,7 @@ ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags,
   return recv(sockfd, buf, len, flags);
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int kill(pid_t pid, int signal_number) {
   if (signal_number != 0) {
     errno = ENOSYS;
@@ -358,6 +359,7 @@ int kill(pid_t pid, int signal_number) {
   errno = ESRCH;
   return -1;
 }
+#endif
 
 int clone(int (*function)(void*), void* child_stack, int flags, void* argument,
           ...) {
@@ -454,6 +456,7 @@ ssize_t readlink(const char* path, char* buffer, size_t size) {
   return (ssize_t)FailLong(syscall(SYS_FS_READ_SYMLINK, path, buffer, size));
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
            struct timeval* timeout) {
   (void)nfds;
@@ -464,6 +467,7 @@ int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
   errno = ENOSYS;
   return -1;
 }
+#endif
 
 int flock(int fd, int operation) {
   (void)operation;
@@ -540,6 +544,7 @@ int execvp(const char* file, char** argv) {
   return -1;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int execv(const char* path, char** argv) {
   (void)path;
   (void)argv;
@@ -554,12 +559,14 @@ int execve(const char* path, char** argv, char** envp) {
   errno = ENOSYS;
   return -1;
 }
+#endif
 
 unsigned alarm(unsigned seconds) {
   (void)seconds;
   return 0;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int sigaction(int signal_number, const struct sigaction* action,
               struct sigaction* old_action) {
   (void)signal_number;
@@ -570,6 +577,7 @@ int sigaction(int signal_number, const struct sigaction* action,
   }
   return 0;
 }
+#endif
 
 int getrlimit(int resource, struct rlimit* limit) {
   (void)resource;

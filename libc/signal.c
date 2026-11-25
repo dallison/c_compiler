@@ -8,7 +8,7 @@
 #include <errno.h>
 #include <syscall.h>
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
 #define DAVECC_MAX_SIGNAL 64
 #else
 #define DAVECC_MAX_SIGNAL SIGTERM
@@ -93,6 +93,7 @@ int sigismember(const sigset_t* set, int signal_number) {
   return (*set & ((sigset_t)1 << (signal_number - 1))) != 0;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int pthread_sigmask(int how, const sigset_t* set, sigset_t* oldset) {
 #if defined(__DAVECC_NATIVE_LINUX__)
   long result =
@@ -107,3 +108,4 @@ int pthread_sigmask(int how, const sigset_t* set, sigset_t* oldset) {
   return 0;
 #endif
 }
+#endif

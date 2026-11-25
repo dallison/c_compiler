@@ -147,6 +147,13 @@
 #define SYS_DUP2 DAVE_SYS_DUP2
 #define SYS_UNAME DAVE_SYS_UNAME
 
+#if defined(__DAVECC_DAVEOS__)
+#include <davecc_daveos_syscalls.h>
+/* DaveOS poll lives at 212; guest SYS_POLL (63) is unused on this target. */
+#undef SYS_POLL
+#define SYS_POLL DAVEOS_SYS_POLL
+#endif
+
 #define SYS_TZDB_VERSION DAVE_SYS_TZDB_VERSION
 #define SYS_TZDB_GENERATION DAVE_SYS_TZDB_GENERATION
 #define SYS_TZDB_RELOAD DAVE_SYS_TZDB_RELOAD

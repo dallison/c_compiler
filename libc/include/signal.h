@@ -18,7 +18,7 @@ typedef int sig_atomic_t;
 #define SIG_IGN ((void (*)(int))1)
 #define SIG_ERR ((void (*)(int))-1)
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
 #define SIGHUP 1
 #define SIGINT 2
 #define SIGQUIT 3
@@ -64,7 +64,7 @@ typedef int sig_atomic_t;
 #define SIGSTKSZ 8192
 #define MINSIGSTKSZ 2048
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
 typedef unsigned long sigset_t;
 #else
 typedef unsigned sigset_t;
@@ -76,7 +76,14 @@ typedef struct {
   unsigned long ss_size;
 } stack_t;
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_DAVEOS__)
+/* Match DaveOS kernel sa_flags (not Linux values). */
+#define SA_RESTART 0x00000001
+#define SA_NODEFER 0x00000002
+#define SA_SIGINFO 0x00000004
+#define SA_ONSTACK 0x00000008
+#define SA_RESETHAND 0x00000010
+#elif defined(__DAVECC_NATIVE_LINUX__)
 #define SA_SIGINFO 0x00000004
 #define SA_ONSTACK 0x08000000
 #define SA_RESTART 0x10000000
@@ -104,7 +111,7 @@ struct sigaction {
   int sa_flags;
 };
 
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
 #define SIG_BLOCK 0
 #define SIG_UNBLOCK 1
 #define SIG_SETMASK 2
@@ -126,6 +133,7 @@ int sigaddset(sigset_t* set, int signal_number);
 int sigdelset(sigset_t* set, int signal_number);
 int sigismember(const sigset_t* set, int signal_number);
 int pthread_sigmask(int how, const sigset_t* set, sigset_t* oldset);
+int sigprocmask(int how, const sigset_t* set, sigset_t* oldset);
 int sigaction(int signal_number, const struct sigaction* action,
               struct sigaction* old_action);
 int sigaltstack(const stack_t* stack, stack_t* old_stack);
