@@ -191,6 +191,8 @@ int ConceptsCompareFunctionTemplateConstraints(struct Symbol* left,
                                                struct Symbol* right);
 void ConceptsReportFunctionTemplateConstraintFailure(struct Symbol* templ,
                                                      Vector* arguments);
+/* Drop TU-local requires-parameter type patterns before the type arena dies. */
+void ConceptsReleasePristineParameterPatterns(void);
 ConstraintExpr* ConceptsParseRequiresClause(struct Syntax* syntax);
 ConstraintExpr* ConceptsParseRequiresExpression(struct Syntax* syntax);
 

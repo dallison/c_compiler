@@ -958,13 +958,34 @@ static bool ClearRequirementExpressionAnalysis(ASTNode* node, void* data,
 // spins forever.  Capturing each parameter's original, template-parameter-bearing
 // pattern the first time it is seen (always the outermost, pre-mutation call) and
 // substituting from that pristine pattern keeps re-entrant checks correct.
+//
+// Entries are TU-local: Symbol* and TypeRecord* die with CompilerDestruct, so
+// ConceptsReleasePristineParameterPatterns must run before the type arena is
+// released.  Leaving them across Compile() caused intermittent UAF when a later
+// TU recycled a Symbol address and reused a poisoned TypeRecord pattern.
 typedef struct PristineParamPattern {
   Symbol* param;
-  TypeRecord* pattern;  // Owned; kept alive for the whole compilation.
+  TypeRecord* pattern;  // Owned; kept alive for this translation unit only.
 } PristineParamPattern;
 
 static Vector g_pristine_param_patterns;
 static bool g_pristine_param_patterns_init = false;
+
+void ConceptsReleasePristineParameterPatterns(void) {
+  if (!g_pristine_param_patterns_init) {
+    return;
+  }
+  for (size_t i = 0; i < g_pristine_param_patterns.length; i++) {
+    PristineParamPattern* entry = g_pristine_param_patterns.value.p[i];
+    if (entry == NULL) {
+      continue;
+    }
+    TypeRecordDelete(entry->pattern);
+    free(entry);
+  }
+  VectorDestruct(&g_pristine_param_patterns);
+  g_pristine_param_patterns_init = false;
+}
 
 static TypeRecord* PristineParameterPattern(Symbol* param) {
   if (!g_pristine_param_patterns_init) {

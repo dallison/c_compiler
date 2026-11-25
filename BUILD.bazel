@@ -708,6 +708,13 @@ sh_test(
     data = [":davecc"],
 )
 
+sh_test(
+    name = "concepts_pristine_param_cross_tu_test",
+    srcs = ["tests/concepts_pristine_param_cross_tu_test.sh"],
+    args = ["$(rootpath :davecc)"],
+    data = [":davecc"],
+)
+
 cc_library(
     name = "serialize",
     srcs = [

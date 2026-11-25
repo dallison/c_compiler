@@ -28,6 +28,7 @@
 #include <sys/sysctl.h>
 #endif
 #include "codegen.h"
+#include "concepts.h"
 #include "constexpr.h"
 #include "constexpr_pcode.h"
 #include "errors.h"
@@ -5693,6 +5694,7 @@ void CompilerDestruct(Compiler* compiler) {
   TypeReleaseConstructorCaches();
   TypeReleaseDependentDecltypeStack();
   ConstexprReleaseDurableBindings();
+  ConceptsReleasePristineParameterPatterns();
 
   ASTArenaRelease();
 
