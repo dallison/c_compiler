@@ -2564,13 +2564,19 @@ genrule(
     cmd = """
 set -euo pipefail
 
-out="$@"
-work="$(@D)/libcaarch64.build"
+# Resolve paths against the execroot first so this genrule works both as the
+# main repo and when DaveCC is consumed via local_path_override / bzlmod.
+exec_root="$$(pwd)"
+out="$$exec_root/$@"
+work="$$exec_root/$(@D)/libcaarch64.build"
+davecc="$$exec_root/$(execpath :davecc)"
+archivist="$$exec_root/$(execpath :archivist)"
+repo_root="$$(cd "$$(dirname "$(location libc/guest_heap.c)")/.." && pwd)"
+cd "$$repo_root"
+
 rm -rf "$$work"
 mkdir -p "$$work"
 
-davecc="$$(pwd)/$(execpath :davecc)"
-archivist="$$(pwd)/$(execpath :archivist)"
 cflags=(-target aarch64 -O0 -c -isystem libc/include -Ilibc -D__DAVECC_LIBC_BUILD__)
 
 runtime_srcs=(
