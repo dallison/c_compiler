@@ -99,6 +99,7 @@
 #define DAVE_SYS_DUP 89
 #define DAVE_SYS_DUP2 90
 #define DAVE_SYS_UNAME 91
+#define DAVE_SYS_SOCKETPAIR 92
 
 // Guest `struct utsname` field width.  The host copies each uname field into
 // a buffer of this size; the layout lives in sys/utsname.h.

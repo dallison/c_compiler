@@ -61,6 +61,10 @@ int socket(int domain, int type, int protocol) {
   return Fail(syscall(SYS_SOCKET, domain, type, protocol));
 }
 
+int socketpair(int domain, int type, int protocol, int sv[2]) {
+  return Fail(syscall(SYS_SOCKETPAIR, domain, type, protocol, sv));
+}
+
 int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
   return Fail(syscall(SYS_BIND, sockfd, addr, addrlen));
 }
@@ -337,16 +341,40 @@ const char* inet_ntop(int family, const void* source, char* destination,
 
 ssize_t sendto(int sockfd, const void* buf, size_t len, int flags,
                const struct sockaddr* dest, socklen_t destlen) {
-  (void)dest;
-  (void)destlen;
-  return send(sockfd, buf, len, flags);
+  if (dest == 0 || destlen == 0) {
+    return send(sockfd, buf, len, flags);
+  }
+  struct iovec iov;
+  iov.iov_base = (void*)buf;
+  iov.iov_len = len;
+  struct msghdr msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_name = (void*)dest;
+  msg.msg_namelen = destlen;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  return sendmsg(sockfd, &msg, flags);
 }
 
 ssize_t recvfrom(int sockfd, void* buf, size_t len, int flags,
                  struct sockaddr* src, socklen_t* srclen) {
-  (void)src;
-  (void)srclen;
-  return recv(sockfd, buf, len, flags);
+  if (src == 0 || srclen == 0) {
+    return recv(sockfd, buf, len, flags);
+  }
+  struct iovec iov;
+  iov.iov_base = buf;
+  iov.iov_len = len;
+  struct msghdr msg;
+  memset(&msg, 0, sizeof(msg));
+  msg.msg_name = src;
+  msg.msg_namelen = *srclen;
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  ssize_t n = recvmsg(sockfd, &msg, flags);
+  if (n >= 0) {
+    *srclen = msg.msg_namelen;
+  }
+  return n;
 }
 
 #if !defined(__DAVECC_DAVEOS__)

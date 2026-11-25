@@ -146,6 +146,7 @@
 #define SYS_DUP DAVE_SYS_DUP
 #define SYS_DUP2 DAVE_SYS_DUP2
 #define SYS_UNAME DAVE_SYS_UNAME
+#define SYS_SOCKETPAIR DAVE_SYS_SOCKETPAIR
 
 #if defined(__DAVECC_DAVEOS__)
 #include <davecc_daveos_syscalls.h>

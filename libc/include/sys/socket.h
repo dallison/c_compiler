@@ -22,9 +22,16 @@
 #define SO_REUSEPORT 15
 #define SO_BROADCAST 6
 #define SO_NOSIGPIPE 7
+#define SO_PEERCRED 17
 #define SOMAXCONN 128
 
 #define SCM_RIGHTS 1
+
+struct ucred {
+  uint32_t pid;
+  uint32_t uid;
+  uint32_t gid;
+};
 
 #define MSG_CTRUNC 8
 #define MSG_TRUNC 0x20
@@ -101,6 +108,7 @@ extern "C" {
 #endif
 
 int socket(int domain, int type, int protocol);
+int socketpair(int domain, int type, int protocol, int sv[2]);
 int bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 int listen(int sockfd, int backlog);
 int accept(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
