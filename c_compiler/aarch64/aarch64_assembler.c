@@ -707,31 +707,53 @@ static Register ZeroReg(RegisterWidth width) {
   return AARCH64AsmZeroRegister(width);
 }
 
+// After `#`, GNU as accepts a full absolute expression (`.equ` names, `~0`,
+// parenthesized forms, …), not only bare literals.
+static bool LookingAtHashImmediateExpr(AARCH64Assembler* assembler) {
+  return LexLookingAt(&ASM.lex, TOK(number)) ||
+         LexLookingAt(&ASM.lex, TOK(lparen)) ||
+         LexLookingAt(&ASM.lex, TOK(identifier)) ||
+         LexLookingAt(&ASM.lex, TOK(tilde)) ||
+         LexLookingAt(&ASM.lex, TOK(bang)) ||
+         LexLookingAt(&ASM.lex, TOK(plus)) ||
+         LexLookingAt(&ASM.lex, TOK(charconst));
+}
+
+// `#` is optional for immediates; a bare `.equ`/`.set` name is an immediate
+// rather than a register.
+static bool LookingAtBareConstantImmediate(AARCH64Assembler* assembler) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    return false;
+  }
+  AssemblerSymbol* sym = AssemblerFindSymbol(&ASM, ASM.lex.spelling.value);
+  return sym != NULL && sym->defined && (sym->is_constant || sym->is_eqv);
+}
+
 static Operand GetOperand(AARCH64Assembler* assembler) {
   Operand op = {.type = kUnknown};
   bool negative_immed = false;
-  // # is optional but encouraged.  GNU as also accepts #(expr).
+  // # is optional but encouraged.  GNU as also accepts #(expr) and #NAME.
   if (LexLookingAt(&ASM.lex, TOK(number)) ||
-      LexLookingAt(&ASM.lex, TOK(lparen))) {
+      LexLookingAt(&ASM.lex, TOK(lparen)) ||
+      LookingAtBareConstantImmediate(assembler)) {
     op.type = kIntImmediate;
   } else if (LexLookingAt(&ASM.lex, TOK(fnumber))) {
     op.type = kFloatImmediate;
   } else if (LexLookingAt(&ASM.lex, TOK(hash))) {
     LexNextToken(&ASM.lex);
-    
+
     if (LexMatch(&ASM.lex, TOK(minus))) {
       negative_immed = true;
     }
-    if (LexLookingAt(&ASM.lex, TOK(number)) ||
-        LexLookingAt(&ASM.lex, TOK(lparen))) {
+    if (LookingAtHashImmediateExpr(assembler)) {
       op.type = kIntImmediate;
     } else if (LexLookingAt(&ASM.lex, TOK(fnumber))) {
       op.type = kFloatImmediate;
-   } else {
-     AssemblerError(&ASM, "Expected immediate value after #");
-     op.type = kIntImmediate;
-     op.i = 0;
-     return op;
+    } else {
+      AssemblerError(&ASM, "Expected immediate value after #");
+      op.type = kIntImmediate;
+      op.i = 0;
+      return op;
     }
   } else {
     op.type = kRegister;
