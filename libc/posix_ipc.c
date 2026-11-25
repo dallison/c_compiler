@@ -456,6 +456,32 @@ ssize_t readlink(const char* path, char* buffer, size_t size) {
   return (ssize_t)FailLong(syscall(SYS_FS_READ_SYMLINK, path, buffer, size));
 }
 
+int symlink(const char* target, const char* linkpath) {
+  if (target == NULL || linkpath == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  long result = syscall(SYS_FS_CREATE_SYMLINK, target, linkpath);
+  if (result < 0) {
+    errno = (int)-result;
+    return -1;
+  }
+  return 0;
+}
+
+int link(const char* target, const char* linkpath) {
+  if (target == NULL || linkpath == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  long result = syscall(SYS_FS_CREATE_HARD_LINK, target, linkpath);
+  if (result < 0) {
+    errno = (int)-result;
+    return -1;
+  }
+  return 0;
+}
+
 #if !defined(__DAVECC_DAVEOS__)
 int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
            struct timeval* timeout) {
