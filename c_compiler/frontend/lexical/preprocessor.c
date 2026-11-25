@@ -759,6 +759,10 @@ void PreprocessorDefineArchitectureMacros(Preprocessor* p) {
   } else if (CompilerTargetTripleIsBBC(&compiler->target_triple)) {
     PreprocessorDefineMacro(p, "__DAVECC_BBC__", "1");
     PreprocessorDefineMacro(p, "__DAVECC_PAGED_LIBC__", "1");
+  } else if (CompilerTargetTripleIsDaveOS(&compiler->target_triple)) {
+    // Real aarch64 kernel ABI: Dave guest syscall numbers over svc #0.
+    DefineLinuxUserspaceMacros(p);
+    PreprocessorDefineMacro(p, "__DAVECC_DAVEOS__", "1");
   } else {
     PreprocessorDefineMacro(p, "__DAVECC_INTERPRETER_ABI__", "1");
     // ELF interpreter guests are a Linux userspace on the DaveCC syscall ABI.

@@ -347,6 +347,9 @@ static const TargetRuntime target_runtimes[] = {
      "riscv32_linux_start.o", "//:riscv32_linux_start", NULL, false, true},
     {"aarch64", kTargetOSDarwin, "libcaarch64_darwin.a",
      "//:libc_aarch64_darwin", NULL, NULL, NULL, true, true},
+    // DaveOS: same guest libc archive; svc is handled by the DaveOS kernel.
+    {"aarch64", kTargetOSDaveOS, "libcaarch64.a", "//:libc_aarch64", NULL,
+     NULL, NULL, true, true},
 };
 
 static const struct {

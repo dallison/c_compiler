@@ -475,6 +475,8 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
     triple->os = kTargetOSDarwin;
   } else if (StringEqual(&triple->os_name, "bbc")) {
     triple->os = kTargetOSBBC;
+  } else if (StringEqual(&triple->os_name, "daveos")) {
+    triple->os = kTargetOSDaveOS;
   } else if (StringEqual(&triple->os_name, "none")) {
     triple->os = kTargetOSNone;
   } else {
@@ -506,6 +508,12 @@ bool CompilerTargetTripleParse(CompilerTargetTriple* triple, const char* value,
         error, error_size,
         "BBC paged libc is only supported by 6502 and 65c02 in '%s'", value);
   }
+  if (triple->os == kTargetOSDaveOS &&
+      strcmp(definition->canonical_name, "aarch64") != 0) {
+    return SetTargetTripleError(error, error_size,
+                                "DaveOS is only supported by AArch64 in '%s'",
+                                value);
+  }
   StringClear(&triple->canonical);
   StringPrintf(&triple->canonical, "%s-%s-%s-%s",
                definition->canonical_name, triple->vendor.value,
@@ -523,6 +531,10 @@ bool CompilerTargetTripleIsDarwin(const CompilerTargetTriple* triple) {
 
 bool CompilerTargetTripleIsBBC(const CompilerTargetTriple* triple) {
   return triple != NULL && triple->os == kTargetOSBBC;
+}
+
+bool CompilerTargetTripleIsDaveOS(const CompilerTargetTriple* triple) {
+  return triple != NULL && triple->os == kTargetOSDaveOS;
 }
 
 static const char* MapHostMachineToArch(const char* machine) {
