@@ -1481,6 +1481,137 @@ MMMMMMMM
 ........
 """
 
+# Galaga (Shadow Mode 2, 160x256, 8 steady colours). 8 Mode-2 px wide x 8
+# scanlines, the same physical size as the 16-px Mode-1 Galaxian art. Padded
+# to a 6 byte-column window (".." + 8 px art + "..") so a 1-column convoy sway
+# self-wipes. Colours: boss yellow/green/cyan, butterfly red/magenta,
+# bee blue/cyan, fighter white/cyan.
+GA_BOSS = (
+    """
+    ..G..G..
+    Y.GGGG.Y
+    YGGCCGGY
+    YGCGGCGY
+    .GGGGGG.
+    .G.GG.G.
+    G.G..G.G
+    .G....G.
+    """,
+    """
+    G.G..G.G
+    .GGGGGG.
+    YGGCCGGY
+    YGCGGCGY
+    .GGGGGG.
+    ..G..G..
+    .GG..GG.
+    G..GG..G
+    """,
+)
+
+GA_FLY = (
+    """
+    M......M
+    MR....RM
+    .MRRRRM.
+    .RMRRMR.
+    RRRRRRRR
+    .R.RR.R.
+    M.R..R.M
+    .M....M.
+    """,
+    """
+    .M....M.
+    M.R..R.M
+    .MRRRRM.
+    .RMRRMR.
+    RRRRRRRR
+    MRRRRRRM
+    M.R..R.M
+    M......M
+    """,
+)
+
+GA_BEE = (
+    """
+    ..C..C..
+    C.CBBC.C
+    .CBBBBC.
+    CBBBBBBC
+    .BCBBCB.
+    .BBBBBB.
+    C.B..B.C
+    .C....C.
+    """,
+    """
+    C.C..C.C
+    .CBBBBC.
+    CBBBBBBC
+    .BCBBCB.
+    .BBBBBB.
+    ..BBBB..
+    .CB..BC.
+    C......C
+    """,
+)
+
+GA_SHIP = """
+    ...WW...
+    ...WW...
+    ..WWWW..
+    .WWCCWW.
+    WWWWWWWW
+    WWCWWCWW
+    .W.WW.W.
+    ........
+    """
+
+GA_BLAST = """
+    R..R..R.
+    .RYYYYR.
+    R.YWWY.R
+    .RYWWYR.
+    R.YWWY.R
+    .RYYYYR.
+    R..R..R.
+    ........
+    """
+
+GA_BOOM = """
+    Y..Y..Y.
+    .RYYYYR.
+    .YWWWWY.
+    RWWWWWWR
+    .YWWWWY.
+    .RYYYYR.
+    Y..Y..Y.
+    ........
+    """
+
+# Galaga bomb: 1 byte-column (2 Mode-2 px) vertical drip, two frames.
+GA_BOMB = (
+    """
+    YY
+    YY
+    RR
+    RR
+    YY
+    YY
+    RR
+    RR
+    """,
+    """
+    RR
+    RR
+    YY
+    YY
+    RR
+    RR
+    YY
+    YY
+    """,
+)
+
 # Centipede: 8x8 cells on a character-cell grid (like Snake).
 CE_HEAD_L = """
 ..GGGG..
@@ -1735,6 +1866,31 @@ def glyph2(hex_rows, ink="W"):
     return cell2(art)
 
 
+def win2(art, shift):
+    """Mode-2 6 byte-column window: ('..' + shift + 8 px art + rest) = 12 px,
+    so a 1-column (2 px) convoy sway self-wipes on the blank side columns.
+    48 bytes (6 cols x 8 scanlines)."""
+    out = []
+    for r in rows(art):
+        line = ".." + ("." * shift) + r + ("." * (2 - shift))
+        if len(line) != 12:
+            raise ValueError("win2 width %d" % len(line))
+        out.append(line)
+    return column_major([encode2(line) for line in out])
+
+
+def pair2win(art):
+    """Mode-2 window pair: shift 0 then shift 1 px (96 bytes) for sub-pixel
+    diver/cannon placement, like the Galaxian Mode-1 pairs."""
+    return win2(art, 0) + win2(art, 1)
+
+
+def strip2(art):
+    """Mode-2 1 byte-column vertical strip with two blank lead rows, like the
+    Galaxian bomb strip()."""
+    return [0, 0] + [encode2(r)[0] for r in rows(art)]
+
+
 def pm_wall_tile(mask):
     """Neighbor-connected hollow blue Mode-2 wall tile (mask bits: 1=N, 2=E, 4=S, 8=W)."""
     N = bool(mask & 1)
@@ -1849,6 +2005,21 @@ def main():
         emit("k_gx_blue%d" % frame, pair(art))
     emit("k_gx_ship", pair(GX_SHIP))
     emit("k_gx_ship_red", pair(GX_SHIP.replace("W", "R").replace("G", "R")))
+    # Galaga (Mode 2): colourful convoy (96B 1px-shift window pairs) + fighter,
+    # explosions, bomb strips, and Mode-2 HUD digits.
+    for frame, art in enumerate(GA_BOSS):
+        emit("k_ga_boss%d" % frame, pair2win(art))
+    for frame, art in enumerate(GA_FLY):
+        emit("k_ga_fly%d" % frame, pair2win(art))
+    for frame, art in enumerate(GA_BEE):
+        emit("k_ga_bee%d" % frame, pair2win(art))
+    emit("k_ga_ship", pair2win(GA_SHIP))
+    emit("k_ga_ship_red", pair2win(GA_SHIP.replace("W", "R").replace("C", "R")))
+    emit("k_ga_blast", pair2win(GA_BLAST))
+    emit("k_ga_boom", cell2(GA_BOOM))
+    for frame, art in enumerate(GA_BOMB):
+        emit("k_ga_bomb%d" % frame, strip2(art), per_line=10)
+    emit("k_ga_digits", [b for d in DIGITS for b in glyph2(d)])
     # Centipede: 8x8 cells (head/body/mushroom/spider) + 16x8 player.
     emit("k_ce_head_l", cell(CE_HEAD_L))
     emit("k_ce_head_r", cell(CE_HEAD_R))
