@@ -278,6 +278,10 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
+  if (inst == 0xd69f03e0u) {
+    DAsmFormat(out, "eret");
+    return true;
+  }
   if ((inst & 0xfffffc1fu) == 0xd61f0000u ||
       (inst & 0xfffffc1fu) == 0xd63f0000u) {
     DAsmFormat(out, "%s %s", (inst & 0x00200000u) ? "blr" : "br",

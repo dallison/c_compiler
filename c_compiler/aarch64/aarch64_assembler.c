@@ -228,6 +228,7 @@ DECLARE_INST_FUNC(udf);
 DECLARE_INST_FUNC(clrex);
 DECLARE_INST_FUNC(mrs);
 DECLARE_INST_FUNC(msr);
+DECLARE_INST_FUNC(eret);
 
 DECLARE_INST_FUNC(fldr);
 DECLARE_INST_FUNC(fstr);
@@ -486,6 +487,7 @@ static void InitializeInstructions(Map* instructions) {
   INST(clrex);
   INST(mrs);
   INST(msr);
+  INST(eret);
 
   INST(fldr);
   INST(fstr);
@@ -3259,8 +3261,14 @@ static bool SystemRegisterMrsEncoding(AARCH64Assembler* assembler,
       {"tpidrro_el0", A64_SYSREG_MRS(3, 3, 13, 0, 3)},
       {"tpidr_el1", A64_SYSREG_MRS(3, 0, 13, 0, 4)},
       {"cntfrq_el0", A64_SYSREG_MRS(3, 3, 14, 0, 0)},
-      {"cntvct_el0", A64_SYSREG_MRS(3, 3, 14, 0, 2)},
       {"cntpct_el0", A64_SYSREG_MRS(3, 3, 14, 0, 1)},
+      {"cntvct_el0", A64_SYSREG_MRS(3, 3, 14, 0, 2)},
+      {"cntp_tval_el0", A64_SYSREG_MRS(3, 3, 14, 2, 0)},
+      {"cntp_ctl_el0", A64_SYSREG_MRS(3, 3, 14, 2, 1)},
+      {"cntp_cval_el0", A64_SYSREG_MRS(3, 3, 14, 2, 2)},
+      {"cntv_tval_el0", A64_SYSREG_MRS(3, 3, 14, 3, 0)},
+      {"cntv_ctl_el0", A64_SYSREG_MRS(3, 3, 14, 3, 1)},
+      {"cntv_cval_el0", A64_SYSREG_MRS(3, 3, 14, 3, 2)},
   };
   for (size_t i = 0; i < sizeof(kSysRegs) / sizeof(kSysRegs[0]); i++) {
     if (StringEqualCaseBlind(&ASM.lex.spelling, kSysRegs[i].name)) {
@@ -3295,6 +3303,30 @@ static void Assemble_mrs(AARCH64Assembler* assembler) {
 }
 
 static void Assemble_msr(AARCH64Assembler* assembler) {
+  // PSTATE MSR immediates: msr DAIFSet/DAIFClr/SPSel, #imm
+  if (LexLookingAt(&ASM.lex, TOK(identifier)) &&
+      (StringEqualCaseBlind(&ASM.lex.spelling, "daifset") ||
+       StringEqualCaseBlind(&ASM.lex.spelling, "daifclr") ||
+       StringEqualCaseBlind(&ASM.lex.spelling, "spsel"))) {
+    bool is_clr = StringEqualCaseBlind(&ASM.lex.spelling, "daifclr");
+    bool is_spsel = StringEqualCaseBlind(&ASM.lex.spelling, "spsel");
+    LexNextToken(&ASM.lex);
+    if (!NeedComma(assembler)) {
+      return;
+    }
+    LexMatch(&ASM.lex, TOK(hash));
+    int64_t imm = AssemblerEvaluateExpression(&ASM);
+    int max = is_spsel ? 1 : 15;
+    if (imm < 0 || imm > max) {
+      AssemblerError(&ASM, "PSTATE MSR immediate out of range");
+      return;
+    }
+    uint32_t op2 = is_spsel ? 5u : (is_clr ? 7u : 6u);
+    AssemblerEmitWord(&ASM, ASMO.current_section,
+                      0xd503401fu | ((uint32_t)imm << 8) | (op2 << 5));
+    return;
+  }
+
   uint32_t encoding;
   if (!SystemRegisterMrsEncoding(assembler, &encoding)) {
     return;
@@ -3309,6 +3341,11 @@ static void Assemble_msr(AARCH64Assembler* assembler) {
   }
   AssemblerEmitWord(&ASM, ASMO.current_section,
                     (encoding & ~0x00200000u) | (uint32_t)rt.num);
+}
+
+static void Assemble_eret(AARCH64Assembler* assembler) {
+  (void)assembler;
+  AssemblerEmitWord(&ASM, ASMO.current_section, 0xd69f03e0u);
 }
 
 static void Assemble_ldp(AARCH64Assembler* assembler) {
