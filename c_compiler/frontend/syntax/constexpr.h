@@ -182,6 +182,8 @@ bool ConstexprEvaluateReferenceConstantForSymbol(Symbol* symbol,
 bool ConstexprIsConstantInitializedReference(Symbol* symbol);
 void ConstexprPersistObjectAddresses(ConstexprObject* object);
 void ConstexprSetSymbolObjectValueState(Symbol* symbol, ValueState state);
+/* Drop cross-TU durable bindings before the previous TU's symbols die. */
+void ConstexprReleaseDurableBindings(void);
 Symbol* ConstexprFunctionDefinition(Symbol* symbol);
 Symbol* ConstexprRawConstructorCallSymbol(ASTNode* node, ASTNode** receiver);
 Symbol* ConstexprConstructorForObjectType(TypeRecord* type,

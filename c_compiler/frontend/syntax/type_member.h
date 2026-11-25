@@ -34,4 +34,7 @@ void StructRebuildMemberLookupTables(Struct* str);
 void InjectCXXAnonymousMembers(TypeParser* parser, Struct* dest, Struct* src,
                                int base_offset);
 
+/* Drop cross-TU constructor initializer caches before the AST arena dies. */
+void TypeReleaseConstructorCaches(void);
+
 #endif /* type_member_h */

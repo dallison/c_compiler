@@ -3210,6 +3210,16 @@ TypeRecord* SubstituteCopiedTypeRecord(TypeParser* parser,
 static Vector g_dependent_decltype_stack;
 static bool g_dependent_decltype_stack_initialized;
 
+void TypeReleaseDependentDecltypeStack(void) {
+  if (!g_dependent_decltype_stack_initialized) {
+    return;
+  }
+  // Entries are borrowed AST nodes and argument vectors; only the stack
+  // itself is owned here.
+  VectorDestruct(&g_dependent_decltype_stack);
+  g_dependent_decltype_stack_initialized = false;
+}
+
 static bool DependentDecltypeStackContains(ASTNode* expr, Vector* args) {
   for (size_t i = 0; i + 1 < g_dependent_decltype_stack.length; i += 2) {
     if (g_dependent_decltype_stack.value.p[i] == expr &&

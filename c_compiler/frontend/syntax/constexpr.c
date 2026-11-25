@@ -3080,10 +3080,11 @@ static void ConstexprMoveObjectIdentity(ConstexprObject* source,
   VectorDestruct(&clones);
 }
 
-// One binding per function for the whole compilation.  It is not owned by an
-// evaluation context: PopConstexprBindings would otherwise free the address
+// One binding per function for the whole translation unit.  It is not owned by
+// an evaluation context: PopConstexprBindings would otherwise free the address
 // while a returned pointer still refers to it, and a later comparison must see
-// a single address for each function.
+// a single address for each function.  Cleared in ConstexprReleaseDurableBindings
+// between TUs so symbol/object pointers do not outlive the arena.
 static Vector durable_function_bindings;
 static bool durable_function_bindings_ready;
 
@@ -3435,6 +3436,38 @@ static ConstexprObject* ConstexprNewExternalObject(TypeRecord* type) {
 // formed before then must still name this storage.
 static Vector durable_external_bindings;
 static bool durable_external_bindings_ready;
+
+static void ConstexprFreeDurableBinding(ConstexprBinding* binding) {
+  if (binding == NULL) {
+    return;
+  }
+  if (binding->external && binding->object != NULL) {
+    ConstexprObject* object = binding->object;
+    for (size_t j = 0; j < object->slots.length; j++) {
+      free(object->slots.value.p[j]);
+    }
+    VectorDestruct(&object->slots);
+    free(object);
+  }
+  free(binding);
+}
+
+void ConstexprReleaseDurableBindings(void) {
+  if (durable_function_bindings_ready) {
+    for (size_t i = 0; i < durable_function_bindings.length; i++) {
+      ConstexprFreeDurableBinding(durable_function_bindings.value.p[i]);
+    }
+    VectorDestruct(&durable_function_bindings);
+    durable_function_bindings_ready = false;
+  }
+  if (durable_external_bindings_ready) {
+    for (size_t i = 0; i < durable_external_bindings.length; i++) {
+      ConstexprFreeDurableBinding(durable_external_bindings.value.p[i]);
+    }
+    VectorDestruct(&durable_external_bindings);
+    durable_external_bindings_ready = false;
+  }
+}
 
 static ConstexprBinding* ConstexprDurableExternalBinding(Symbol* symbol) {
   if (!ConstexprIsExternalStaticObject(symbol)) {

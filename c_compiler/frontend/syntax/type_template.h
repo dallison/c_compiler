@@ -70,6 +70,8 @@ void TypeInstantiateLateMemberBodies(struct Syntax* syntax, Vector* defined);
 void TypeReleaseLateMemberBodies(void);
 // Frees the remembered template argument completions and instances.
 void TypeReleaseTemplateMemos(void);
+// Drops the in-flight dependent-decltype recursion stack between TUs.
+void TypeReleaseDependentDecltypeStack(void);
 // Queues the definition of an odr-used static data member of a class template
 // specialization, instantiated from its template's definition.
 void TypeEnsureStaticDataMemberDefinition(struct Syntax* syntax,

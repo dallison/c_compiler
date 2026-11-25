@@ -46,6 +46,7 @@
 #include "reflection_semantics.h"
 #include "type_inheritance.h"
 #include "type_compare.h"
+#include "type_member.h"
 #include "type_template.h"
 
 #include "6502_target.h"
@@ -5685,6 +5686,14 @@ void CompilerDestruct(Compiler* compiler) {
     g_translation_unit_import_release = NULL;
   }
 
+  // Drop template caches before the AST/type arenas die — they hold pointers
+  // into the current TU and must not survive into the next Compile().
+  TypeReleaseLateMemberBodies();
+  TypeReleaseTemplateMemos();
+  TypeReleaseConstructorCaches();
+  TypeReleaseDependentDecltypeStack();
+  ConstexprReleaseDurableBindings();
+
   ASTArenaRelease();
 
   DeleteGlobalNamespace();
@@ -5733,8 +5742,6 @@ void CompilerDestruct(Compiler* compiler) {
   VectorDestructWithContents(&compiler->cxx_this_adjustor_thunks, NULL,
                              /*free_element=*/true);
   VectorDestruct(&compiler->cxx_lazy_static_variables);
-  TypeReleaseLateMemberBodies();
-  TypeReleaseTemplateMemos();
   MapDestructWithContents(&compiler->rtti_typeinfo_map, FreeRttiTypeInfoKey);
 
   for (size_t i = 0; i < compiler->literals.length; i++) {

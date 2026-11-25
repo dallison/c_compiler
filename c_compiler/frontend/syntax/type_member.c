@@ -176,6 +176,45 @@ static bool pending_inline_constructor_preambles_initialized = false;
 static Vector template_constructor_initializers;
 static bool template_constructor_initializers_initialized = false;
 
+void TypeReleaseConstructorCaches(void) {
+  if (pending_inline_constructor_preambles_initialized) {
+    for (size_t i = 0; i < pending_inline_constructor_preambles.length; i++) {
+      PendingInlineConstructorPreamble* pending =
+          pending_inline_constructor_preambles.value.p[i];
+      if (pending == NULL) {
+        continue;
+      }
+      if (pending->initializers != NULL) {
+        SyntaxCXXConstructorInitListDestruct(pending->initializers);
+        free(pending->initializers);
+      }
+      free(pending);
+    }
+    VectorDestruct(&pending_inline_constructor_preambles);
+    pending_inline_constructor_preambles_initialized = false;
+  }
+
+  if (template_constructor_initializers_initialized) {
+    for (size_t i = 0; i < template_constructor_initializers.length; i++) {
+      TemplateConstructorInitializers* stored =
+          template_constructor_initializers.value.p[i];
+      if (stored == NULL) {
+        continue;
+      }
+      if (stored->initializers != NULL) {
+        SyntaxCXXConstructorInitListDestruct(stored->initializers);
+        free(stored->initializers);
+      }
+      if (stored->enclosing_args != NULL) {
+        TemplateArgumentVectorDelete(stored->enclosing_args);
+      }
+      free(stored);
+    }
+    VectorDestruct(&template_constructor_initializers);
+    template_constructor_initializers_initialized = false;
+  }
+}
+
 static CXXMemberUsingDeclaration* NewCXXMemberUsingDeclaration(
     TypeRecord* base_type, const char* member_name, CXXAccess access,
     SourceLocation location, bool is_pack_expansion,

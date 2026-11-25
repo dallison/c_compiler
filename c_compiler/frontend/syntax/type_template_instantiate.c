@@ -11425,6 +11425,69 @@ void TypeReleaseTemplateMemos(void) {
   g_template_memos = NULL;
   g_template_memo_capacity = 0;
   g_template_memo_count = 0;
+
+  /* Cross-TU caches hold Symbol, Struct, TypeRecord, and TemplateArgument
+     pointers into the previous translation unit. Leaving them alive after
+     CompilerDestruct causes use-after-free when the next TU re-parses heavy
+     templates (e.g. <string>) and hits CloneCXXDefaultMemberInitializer on
+     a recycled ASTNode with null virtuals. */
+  if (cached_lambda_substitutions_ready) {
+    for (size_t i = 0; i < cached_lambda_substitutions.length; i++) {
+      CachedLambdaSubstitution* entry = cached_lambda_substitutions.value.p[i];
+      if (entry != NULL) {
+        TemplateArgumentVectorDelete(entry->args);
+        TypeRecordDecRef(entry->type);
+        free(entry);
+      }
+    }
+    VectorDestruct(&cached_lambda_substitutions);
+    cached_lambda_substitutions_ready = false;
+  }
+
+  if (g_variable_template_objects_ready) {
+    for (size_t i = 0; i < g_variable_template_objects.length; i++) {
+      VariableTemplateObject* obj = g_variable_template_objects.value.p[i];
+      if (obj != NULL) {
+        TemplateArgumentVectorDelete(obj->args);
+        /* instance is owned by the AST/symbol table teardown. */
+        free(obj);
+      }
+    }
+    VectorDestruct(&g_variable_template_objects);
+    g_variable_template_objects_ready = false;
+  }
+
+  if (g_detached_dependent_decltypes_ready) {
+    VectorDestruct(&g_detached_dependent_decltypes);
+    g_detached_dependent_decltypes_ready = false;
+  }
+
+  if (nested_substitution_stack_ready) {
+    for (size_t i = 0; i < nested_substitution_stack.length; i++) {
+      NestedSubstitutionInProgress* entry =
+          nested_substitution_stack.value.p[i];
+      if (entry != NULL) {
+        TemplateArgumentVectorDelete(entry->args);
+        free(entry);
+      }
+    }
+    VectorDestruct(&nested_substitution_stack);
+    nested_substitution_stack_ready = false;
+  }
+
+  if (g_deferred_nested_member_bodies_inited) {
+    for (size_t i = 0; i < g_deferred_nested_member_bodies.length; i++) {
+      DeferredNestedMemberBody* body =
+          g_deferred_nested_member_bodies.value.p[i];
+      if (body != NULL) {
+        TemplateArgumentVectorDelete(body->args);
+        free(body);
+      }
+    }
+    VectorDestruct(&g_deferred_nested_member_bodies);
+    g_deferred_nested_member_bodies_inited = false;
+    g_deferred_nested_member_body_scopes = 0;
+  }
 }
 
 // A result is not remembered when its computation reported an error that

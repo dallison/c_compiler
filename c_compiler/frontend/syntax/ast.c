@@ -876,6 +876,11 @@ ASTNode* ASTNodeClone(const ASTNode* node,
   if (node == NULL) {
     return NULL;
   }
+  if (node->virtuals == NULL) {
+    // Stale node from a previous TU (cross-TU cache not cleared), or
+    // incompletely constructed AST.  Cloning would fault on virtuals->cloner.
+    return NULL;
+  }
   ASTNode* clone;
   if (node->virtuals->cloner == NULL) {
     // Base class only.
