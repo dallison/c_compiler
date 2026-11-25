@@ -305,6 +305,58 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
     }
     return true;
   }
+  // SYS (L=0, op0=1): tlbi / ic aliases used by bare-metal bring-up.
+  if ((inst & 0xfff80000u) == 0xd5080000u) {
+    int op1 = (inst >> 16) & 7;
+    int crn = (inst >> 12) & 0xf;
+    int crm = (inst >> 8) & 0xf;
+    int op2 = (inst >> 5) & 7;
+    int rt = inst & 0x1f;
+    struct {
+      const char* mnemonic;
+      const char* op;
+      int op1;
+      int crn;
+      int crm;
+      int op2;
+      bool needs_xt;
+    } const kSys[] = {
+        {"tlbi", "vmalle1", 0, 8, 7, 0, false},
+        {"tlbi", "vae1", 0, 8, 7, 1, true},
+        {"tlbi", "aside1", 0, 8, 7, 2, true},
+        {"tlbi", "vaae1", 0, 8, 7, 3, true},
+        {"tlbi", "vale1", 0, 8, 7, 5, true},
+        {"tlbi", "vaale1", 0, 8, 7, 7, true},
+        {"tlbi", "vmalle1is", 0, 8, 3, 0, false},
+        {"tlbi", "vae1is", 0, 8, 3, 1, true},
+        {"tlbi", "aside1is", 0, 8, 3, 2, true},
+        {"tlbi", "vaae1is", 0, 8, 3, 3, true},
+        {"tlbi", "vale1is", 0, 8, 3, 5, true},
+        {"tlbi", "vaale1is", 0, 8, 3, 7, true},
+        {"tlbi", "alle1", 4, 8, 7, 4, false},
+        {"tlbi", "alle1is", 4, 8, 3, 4, false},
+        {"ic", "ialluis", 0, 7, 1, 0, false},
+        {"ic", "iallu", 0, 7, 5, 0, false},
+        {"ic", "ivau", 3, 7, 5, 1, true},
+    };
+    for (int i = 0; i < (int)(sizeof(kSys) / sizeof(kSys[0])); i++) {
+      if (kSys[i].op1 == op1 && kSys[i].crn == crn && kSys[i].crm == crm &&
+          kSys[i].op2 == op2) {
+        if (kSys[i].needs_xt) {
+          if (rt == 31) {
+            break;
+          }
+          DAsmFormat(out, "%s %s, %s", kSys[i].mnemonic, kSys[i].op,
+                     XReg(rt, true, false));
+        } else if (rt == 31) {
+          DAsmFormat(out, "%s %s", kSys[i].mnemonic, kSys[i].op);
+        } else {
+          break;
+        }
+        return true;
+      }
+    }
+  }
   if ((inst & 0xffe0001fu) == 0xd4200000u ||
       (inst & 0xffe0001fu) == 0xd4400000u) {
     DAsmFormat(out, "%s #0x%x", (inst & 0x00400000u) != 0 ? "hlt" : "brk",

@@ -210,6 +210,8 @@ DECLARE_INST_FUNC(stlrh);
 DECLARE_INST_FUNC(dmb);
 DECLARE_INST_FUNC(dsb);
 DECLARE_INST_FUNC(isb);
+DECLARE_INST_FUNC(tlbi);
+DECLARE_INST_FUNC(ic);
 DECLARE_INST_FUNC(nop);
 DECLARE_INST_FUNC(yield);
 DECLARE_INST_FUNC(wfe);
@@ -466,6 +468,8 @@ static void InitializeInstructions(Map* instructions) {
   INST(dmb);
   INST(dsb);
   INST(isb);
+  INST(tlbi);
+  INST(ic);
   INST(nop);
   INST(yield);
   INST(wfe);
@@ -2986,6 +2990,94 @@ static void Assemble_dsb(AARCH64Assembler* assembler) {
 
 static void Assemble_isb(AARCH64Assembler* assembler) {
   AssembleBarrier(assembler, 0xd50330dfu, false);
+}
+
+// SYS #<op1>, C<n>, C<m>, #<op2>{, Xt}  (L=0, op0 bits 20:19 = 0b01).
+// Rt=31 when the operation takes no register.
+#define A64_SYS(op1, crn, crm, op2, rt)                                 \
+  (0xd5080000u | ((uint32_t)(op1) << 16) | ((uint32_t)(crn) << 12) |     \
+   ((uint32_t)(crm) << 8) | ((uint32_t)(op2) << 5) | (uint32_t)(rt))
+
+typedef struct {
+  const char* name;
+  uint8_t op1;
+  uint8_t crn;
+  uint8_t crm;
+  uint8_t op2;
+  bool needs_xt;
+} A64SysOp;
+
+static bool AssembleSysOp(AARCH64Assembler* assembler, const char* kind,
+                          const A64SysOp* ops, size_t nops) {
+  if (!LexLookingAt(&ASM.lex, TOK(identifier))) {
+    AssemblerError(&ASM, "Expected %s operation name", kind);
+    return false;
+  }
+  const A64SysOp* op = NULL;
+  for (size_t i = 0; i < nops; i++) {
+    if (StringEqualCaseBlind(&ASM.lex.spelling, ops[i].name)) {
+      op = &ops[i];
+      break;
+    }
+  }
+  if (op == NULL) {
+    AssemblerError(&ASM, "Unsupported %s operation %s", kind,
+                   ASM.lex.spelling.value);
+    return false;
+  }
+  LexNextToken(&ASM.lex);
+
+  int rt = 31;
+  if (op->needs_xt) {
+    if (!NeedComma(assembler)) {
+      return false;
+    }
+    Register xt = GetRegister(assembler);
+    if (xt.kind != kX || xt.is_sp) {
+      AssemblerError(&ASM, "%s %s expects an X register operand", kind,
+                     op->name);
+      return false;
+    }
+    rt = xt.num;
+  } else if (LexLookingAt(&ASM.lex, TOK(comma))) {
+    AssemblerError(&ASM, "%s %s does not take a register operand", kind,
+                   op->name);
+    return false;
+  }
+
+  AssemblerEmitWord(&ASM, ASMO.current_section,
+                    A64_SYS(op->op1, op->crn, op->crm, op->op2, rt));
+  return true;
+}
+
+static void Assemble_tlbi(AARCH64Assembler* assembler) {
+  // CRn is always 8 for TLBI.  Names match GNU as.
+  static const A64SysOp kOps[] = {
+      {"vmalle1", 0, 8, 7, 0, false},
+      {"vae1", 0, 8, 7, 1, true},
+      {"aside1", 0, 8, 7, 2, true},
+      {"vaae1", 0, 8, 7, 3, true},
+      {"vale1", 0, 8, 7, 5, true},
+      {"vaale1", 0, 8, 7, 7, true},
+      {"vmalle1is", 0, 8, 3, 0, false},
+      {"vae1is", 0, 8, 3, 1, true},
+      {"aside1is", 0, 8, 3, 2, true},
+      {"vaae1is", 0, 8, 3, 3, true},
+      {"vale1is", 0, 8, 3, 5, true},
+      {"vaale1is", 0, 8, 3, 7, true},
+      {"alle1", 4, 8, 7, 4, false},
+      {"alle1is", 4, 8, 3, 4, false},
+  };
+  AssembleSysOp(assembler, "tlbi", kOps, sizeof(kOps) / sizeof(kOps[0]));
+}
+
+static void Assemble_ic(AARCH64Assembler* assembler) {
+  static const A64SysOp kOps[] = {
+      {"ialluis", 0, 7, 1, 0, false},
+      {"iallu", 0, 7, 5, 0, false},
+      {"ivau", 3, 7, 5, 1, true},
+  };
+  AssembleSysOp(assembler, "ic", kOps, sizeof(kOps) / sizeof(kOps[0]));
 }
 
 static void AssembleHint(AARCH64Assembler* assembler, int imm) {

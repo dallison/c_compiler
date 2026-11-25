@@ -448,6 +448,12 @@ a64_entry:
   dsb sy
   dsb oshst
   isb
+  tlbi vmalle1
+  tlbi vmalle1is
+  tlbi vae1, x0
+  ic iallu
+  ic ialluis
+  ic ivau, x1
   brk #0x3e8
   hlt #1
   udf #7
@@ -499,7 +505,9 @@ run_shared_case aarch64 full "$aarch64asm" "$aarch64dasm" "$work/aarch64.s" \
   'str s2, \[x1, x2\]' 'ldr q3, \[x1, #32\]' 'stur q4, \[x1, #-16\]' \
   'ldr x5, \[x1, #8\]!' 'str w6, \[x1\], #-4' ' nop$' ' yield$' ' wfe$' \
   'hint #9$' 'bti c$' 'paciasp$' 'autiasp$' 'dmb ish$' 'dsb sy$' \
-  'dsb oshst$' 'isb sy$' 'brk #0x3e8$' 'hlt #0x1$' 'udf #7$'
+  'dsb oshst$' 'isb sy$' 'tlbi vmalle1$' 'tlbi vmalle1is$' \
+  'tlbi vae1, x0$' 'ic iallu$' 'ic ialluis$' 'ic ivau, x1$' \
+  'brk #0x3e8$' 'hlt #0x1$' 'udf #7$'
 
 cat >"$work/x86_64.s" <<'EOF'
 .text
