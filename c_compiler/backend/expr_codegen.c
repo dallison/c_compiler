@@ -2752,6 +2752,12 @@ static IRNode* WidenPointerIndex(Generator* gen, IRNode* index) {
 // be derived from the declaration of a Varaible Length Array (VLA).
 static IRNode* GeneratePointerScale(Generator* gen, PtrScaleASTNode* node) {
   IRNode* expr = GenerateExpression(gen, node->expr);
+  // ptr_scale's AST type is the scaled result (pointer for *element, ptrdiff_t
+  // for /element).  Always publish that on the IR value — including the
+  // size==1 fast path — so a pointer difference is never left typed as the
+  // pointee array (`char[]` size 0) that `suba` inherited.
+  TypeRecord* result_type =
+      node->base.type != NULL ? node->base.type : expr->type;
   IRNode* size_expr;
   if (TypeIsVLA(node->ref_type)) {
     size_expr = node->ref_type->info.array.size.vla.codegen_info;
@@ -2762,7 +2768,7 @@ static IRNode* GeneratePointerScale(Generator* gen, PtrScaleASTNode* node) {
   } else {
     int64_t size = node->ref_type->size;
     if (size == 1) {
-      return expr;
+      return IRSetType(expr, result_type);
     }
     if (node->scale_op == AST_OP(mult)) {
       expr = WidenPointerIndex(gen, expr);
@@ -2776,7 +2782,7 @@ static IRNode* GeneratePointerScale(Generator* gen, PtrScaleASTNode* node) {
     scale_opcode = IR_OP(divi);
   }
   return IRSetType(GeneratorEmit(gen, NewIR2(scale_opcode, expr, size_expr)),
-                   expr->type);
+                   result_type);
 }
 
 static IRNode* InitArrayWithString(Generator* gen, ASTNode* node, IRNode* destaddr,

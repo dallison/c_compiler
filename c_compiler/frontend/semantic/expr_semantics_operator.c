@@ -2081,6 +2081,12 @@ ASTNode* AnalyzeMinusOperator(BinaryASTNode* node) {
         //            / \
         //           x   y
         //
+        // The minus itself is still pointer arithmetic: give it a decayed
+        // pointer type (not the array declarator `T[0]` / `T[]`, whose size
+        // is 0).  Otherwise IR `suba` inherits a zero-size type and later
+        // zero-extends emit illegal AArch64 UBFX widths.
+        ASTNodeSetType((ASTNode*)node,
+                       PointerArithmeticResultType(node->left->type));
 
         ASTNode* parent = node->base.parent;
         ASTNode* scale = NewPtrScaleASTNode(node->right->type->next,

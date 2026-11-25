@@ -4161,10 +4161,17 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
   // derive the mask from the operand types: a zero extension keeps the low
   // min(src,dest) bytes of value and clears the rest.  Using the constant
   // operand directly (e.g. 24 for a char->int extension) produces a wrong mask.
-  int src_size = src->type != NULL ? src->type->size : node->type->size;
-  int keep_bytes = src_size < node->type->size ? src_size : node->type->size;
-  if (keep_bytes >= 8) {
-    // No masking required; the value already occupies the full register.
+  int dest_size = node->type != NULL ? node->type->size : 0;
+  int src_size = src->type != NULL ? src->type->size : dest_size;
+  // A zero-size source (e.g. incomplete array type leaking onto IR) is not a
+  // real width — fall back to the destination so we never emit UBFX #0,#0,
+  // which encodes as the illegal W-form width 64.
+  if (src_size <= 0) {
+    src_size = dest_size;
+  }
+  int keep_bytes = src_size < dest_size ? src_size : dest_size;
+  if (keep_bytes <= 0 || keep_bytes >= 8) {
+    // Nothing to mask, or the value already occupies the full register.
     SetLoweredNode(node, value);
     return value;
   }
@@ -4176,15 +4183,20 @@ static TargetInstruction* LowerZeroExtend(AARCH64Generator* g, IRNode* node) {
     SetLoweredNode(node, value);
     return value;
   }
-  int size = node->type->size > 4 ? kSize64Bit : kSize32Bit;
+  int size = dest_size > 4 ? kSize64Bit : kSize32Bit;
+  int width_bits = keep_bytes * 8;
+  int max_width = size == kSize64Bit ? 64 : 32;
+  if (width_bits > max_width) {
+    width_bits = max_width;
+  }
   // UBFX with a zero lsb is the architectural zero-extension operation.  It
-  // replaces the previous mask-materialization plus AND sequence.
+  // replaces the previous mask-materialization plus AND sequence.  Width must
+  // be in 1..register-width or the encoding is UNDEFINED.
   value = Emit(g, SetInstructionSize(
                       NewInstruction3(
                           AARCH64_OP(ubfx), value,
                           GetIntConstant(g, NULL, kTargetType32Bit, 0),
-                          GetIntConstant(g, NULL, kTargetType32Bit,
-                                         keep_bytes * 8)),
+                          GetIntConstant(g, NULL, kTargetType32Bit, width_bits)),
                       size));
   if (dest != NULL) {
     value = SetDestOrMove(g, value, dest, AARCH64_OP(mov));

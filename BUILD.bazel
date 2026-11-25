@@ -4820,6 +4820,18 @@ sh_test(
 )
 
 sh_test(
+    name = "aarch64_pointer_diff_trunc_test",
+    srcs = ["tests/aarch64_pointer_diff_trunc_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
+        ":libc_headers",
+    ],
+)
+
+sh_test(
     name = "static_bss_link_test",
     srcs = ["tests/static_bss_link_test.sh"],
     args = [
