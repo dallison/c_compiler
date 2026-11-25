@@ -288,8 +288,63 @@ bool DAsmDisassembleAArch64(const void* bytes, size_t length, uint64_t address,
                XReg((inst >> 5) & 0x1f, true, false));
     return true;
   }
-  if ((inst & 0xffffffe0u) == 0xd53bd040u) {
-    DAsmFormat(out, "mrs %s, tpidr_el0", XReg(inst & 0x1f, true, false));
+  /* MRS (L=1) / MSR (L=0) system-register access. */
+  if ((inst & 0xfff00000u) == 0xd5300000u ||
+      (inst & 0xfff00000u) == 0xd5100000u) {
+    bool is_mrs = (inst & 0x00200000u) != 0;
+    int rt = inst & 0x1f;
+    int op0 = (inst >> 19) & 0x3;
+    int op1 = (inst >> 16) & 0x7;
+    int crn = (inst >> 12) & 0xf;
+    int crm = (inst >> 8) & 0xf;
+    int op2 = (inst >> 5) & 0x7;
+    struct {
+      const char* name;
+      int op0;
+      int op1;
+      int crn;
+      int crm;
+      int op2;
+    } const kSysRegs[] = {
+        {"nzcv", 3, 3, 4, 2, 0},
+        {"daif", 3, 3, 4, 2, 1},
+        {"fpcr", 3, 3, 4, 4, 0},
+        {"fpsr", 3, 3, 4, 4, 1},
+        {"tpidr_el0", 3, 3, 13, 0, 2},
+        {"tpidrro_el0", 3, 3, 13, 0, 3},
+        {"tpidr_el1", 3, 0, 13, 0, 4},
+        {"cntfrq_el0", 3, 3, 14, 0, 0},
+        {"cntpct_el0", 3, 3, 14, 0, 1},
+        {"cntvct_el0", 3, 3, 14, 0, 2},
+        {"sctlr_el1", 3, 0, 1, 0, 0},
+        {"ttbr0_el1", 3, 0, 2, 0, 0},
+        {"ttbr1_el1", 3, 0, 2, 0, 1},
+        {"tcr_el1", 3, 0, 2, 0, 2},
+        {"vbar_el1", 3, 0, 12, 0, 0},
+        {"esr_el1", 3, 0, 5, 2, 0},
+        {"far_el1", 3, 0, 6, 0, 0},
+        {"elr_el1", 3, 0, 4, 0, 1},
+        {"spsr_el1", 3, 0, 4, 0, 0},
+    };
+    const char* reg_name = NULL;
+    for (size_t i = 0; i < sizeof(kSysRegs) / sizeof(kSysRegs[0]); i++) {
+      if (kSysRegs[i].op0 == op0 && kSysRegs[i].op1 == op1 &&
+          kSysRegs[i].crn == crn && kSysRegs[i].crm == crm &&
+          kSysRegs[i].op2 == op2) {
+        reg_name = kSysRegs[i].name;
+        break;
+      }
+    }
+    char syn[32];
+    if (reg_name == NULL) {
+      snprintf(syn, sizeof(syn), "s%d_%d_c%d_c%d_%d", op0, op1, crn, crm, op2);
+      reg_name = syn;
+    }
+    if (is_mrs) {
+      DAsmFormat(out, "mrs %s, %s", XReg(rt, true, false), reg_name);
+    } else {
+      DAsmFormat(out, "msr %s, %s", reg_name, XReg(rt, true, false));
+    }
     return true;
   }
   if ((inst & 0xfffff09fu) == 0xd503309fu && ((inst >> 5) & 3) != 3) {

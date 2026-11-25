@@ -22,8 +22,7 @@ _start:
 	mov x8, #222
 	svc #0
 	mov x20, x0
-	// msr tpidr_el0, x0
-	.word 0xd51bd040
+	msr tpidr_el0, x0
 	mov x0, x20
 	mov x1, x19
 	bl __davecc_linux_tls_init

@@ -34,7 +34,9 @@ NAME:
   mrs x3, nzcv
   msr nzcv, x3
   mrs x4, tpidr_el0
+  msr tpidr_el0, x4
   mrs x5, s3_3_c13_c0_2
+  msr s3_3_c13_c0_2, x5
   mov fp, sp
   mov lr, x30
   ret
