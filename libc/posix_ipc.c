@@ -531,10 +531,16 @@ int chown(const char* path, uid_t owner, gid_t group) {
 }
 
 int rename(const char* from, const char* to) {
-  (void)from;
-  (void)to;
-  errno = ENOSYS;
-  return -1;
+  if (from == NULL || to == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  long result = syscall(SYS_FS_RENAME, from, to);
+  if (result < 0) {
+    errno = (int)-result;
+    return -1;
+  }
+  return 0;
 }
 
 int execvp(const char* file, char** argv) {
