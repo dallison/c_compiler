@@ -10,6 +10,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
 #include <sys/time.h>
@@ -235,6 +236,22 @@ void* sbrk(long increment) {
     return (void*)-1;
   }
   return (void*)(uintptr_t)cur;
+}
+
+/* Register ABI: x0..x5 = addr,len,prot,flags,fd,offset (matches DaveOS svc). */
+void* mmap(void* address, size_t length, int protection, int flags, int fd,
+           off_t offset) {
+  long result = syscall(SYS_MMAP, address, length, protection, flags, fd,
+                        (long)offset);
+  if (result < 0) {
+    errno = EIO;
+    return MAP_FAILED;
+  }
+  return (void*)(uintptr_t)result;
+}
+
+int munmap(void* address, size_t length) {
+  return Fail(syscall(SYS_MUNMAP, address, length));
 }
 
 #endif /* __DAVECC_DAVEOS__ */

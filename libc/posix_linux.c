@@ -109,7 +109,7 @@ long sysconf(int name) {
   return -1;
 }
 
-#else
+#elif !defined(__DAVECC_DAVEOS__)
 
 struct __davecc_mmap_request {
   uint64_t address;
