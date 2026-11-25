@@ -44,6 +44,16 @@
 #define DIVE_VX 1
 #define DIVE_VY 2
 
+// Tractor-beam capture by a diving boss, and the dual fighter earned by
+// rescuing the falling captive.
+#define BEAM_Y 112
+#define BEAM_TIME 70
+#define BEAM_WIDTH 8
+// Beam runs from BEAM_Y+8 down to PLAYER_Y: 208 - 120 = 88 scanlines.
+#define BEAM_LEN 88
+#define DUAL_GAP 10
+#define FALL_STEP 2
+
 #define GROUND_Y 232
 #define LINE_Y 24
 

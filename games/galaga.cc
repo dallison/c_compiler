@@ -110,6 +110,7 @@ void dive_launch();
 void divers_step();
 void divers_clear();
 void diver_kill();
+void fall_step();
 void shot_step();
 void bomb_drop();
 void bombs_step();
@@ -210,6 +211,19 @@ u8 dive_event;
 u8 dive_hit;
 u8 dive_kill_slot;
 u8 dive_kill_rank;
+
+// Tractor beam / capture / dual fighter.
+u8 dual;              // 1 while the player has two joined ships
+u8 capt_on;           // 1 while a boss is holding a captured ship
+u8 capt_idx;          // formation slot of that boss
+u8 dv_beam[DIVERS];   // per-diver: this dive tractor-beams
+u8 beam_t;            // beam dwell countdown (0 => no beam active)
+u8 capt_event;        // asm -> C++: the player was just captured
+u8 dual_hit;          // asm -> C++: a dual ship was just demoted
+u8 fall_on;           // 1 while a freed captive is falling
+u8 fall_x;
+u8 fall_y;
+u8 rescue_event;      // asm -> C++: the falling captive was caught
 
 extern const Note snd_shot = {Flush | 2, EnvShot, 180, 4};
 extern const Note snd_boom = {Flush | 0, EnvBoom, 5, 5};
@@ -445,6 +459,7 @@ void Fleet::reset() {
   fl_mover = 255;
   for (i = 0; i < DIVERS; i++) {
     dv_on[i] = 0;
+    dv_beam[i] = 0;
   }
 }
 
@@ -520,6 +535,7 @@ u8 Title::show() {
   bbc::cursor(0);
   bbc::cls();
   Text::centre(2, ColYellow, "DAVECC GALAGA");
+  Text::centre(5, ColCyan, "RESCUE = DUAL SHIP");
   table(look);
   for (i = 0; i < 3; i++) {
     bbc::colour(score_table[i].colour);
@@ -586,6 +602,13 @@ static void deploy() {
   phase = PhasePlay;
   Volley::reset();
   boom_t = 0;
+  // A new wave drops any beam/capture/fall in flight but keeps the dual ship.
+  capt_on = 0;
+  capt_event = 0;
+  rescue_event = 0;
+  dual_hit = 0;
+  beam_t = 0;
+  fall_on = 0;
   fl_row = static_cast<u8>(Metrics::FleetRow + drop);
   Fleet::reset();
   dive_t = Pace::FirstDive;
@@ -706,8 +729,27 @@ static void launch_dive() {
   if (wave > 2 && dive_t > Pace::DiveFast) {
     dive_t = static_cast<u8>(dive_t - Pace::DiveFast);
   }
+  // When nobody is held, sometimes send a boss (rank 0, slots 2..5) so it can
+  // open its tractor beam.
+  if (capt_on == 0 && (rng_next() & 3) == 0) {
+    for (i = 2; i <= 5; i++) {
+      if (fl_on[i] != 0) {
+        dive_pick = i;
+        dive_launch();
+        if (dive_event) {
+          sound_dive();
+          return;
+        }
+      }
+    }
+  }
   for (tries = 0; tries < 16; tries++) {
     i = static_cast<u8>((rng_next() >> 8) % FLEET_SIZE);
+    // Never dive the captor: the captive is only shown while it sits in
+    // formation under its boss.
+    if (capt_on != 0 && i == capt_idx) {
+      continue;
+    }
     if (fl_on[i] != 0) {
       dive_pick = i;
       dive_launch();
@@ -739,9 +781,14 @@ void beat_laser() {
     return;
   }
   for (shot_i = 0; shot_i < SHOTS; shot_i++) {
+    u8 was_capt = capt_on;
     shot_step();
     if (shot_event == ShotFleet) {
       fleet_hit();
+      // Shooting the captor frees the captive (asm clears capt_on).
+      if (was_capt && capt_on == 0) {
+        add_score(500);
+      }
     } else if (shot_event == ShotDiver) {
       note_alive_after_diver_kill();
       diver_hit();
@@ -753,7 +800,20 @@ void beat_hazards() {
   if (phase != PhasePlay) {
     return;
   }
+  // Advance a freed captive; if it reaches the cannon the asm sets dual=1.
+  fall_step();
+  if (rescue_event) {
+    rescue_event = 0;
+    add_score(1000);
+    sound_dive();
+  }
   divers_step();
+  // A completed beam capture costs a life but leaves the captor holding us.
+  if (capt_event) {
+    capt_event = 0;
+    kill_player();
+    return;
+  }
   if (dive_hit) {
     kill_player();
     return;
@@ -762,6 +822,11 @@ void beat_hazards() {
   if (bomb_hit) {
     kill_player();
     return;
+  }
+  // A hit while dual only demotes back to a single ship.
+  if (dual_hit) {
+    dual_hit = 0;
+    sound_boom();
   }
   if (boom_t == 1) {
     clear_boom();
@@ -850,6 +915,13 @@ static void session() {
   lives = 3;
   wave = 1;
   frames_played = 0;
+  dual = 0;
+  capt_on = 0;
+  fall_on = 0;
+  beam_t = 0;
+  capt_event = 0;
+  rescue_event = 0;
+  dual_hit = 0;
   cannon_x = Metrics::PlayerX;
   bbc::osbyte(bbc::osbyte_command::ack_escape, 0, 0);
   deploy();

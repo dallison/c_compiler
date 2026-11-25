@@ -1,6 +1,7 @@
 // Galaga play for galaga.cc: each frame's keys, cannon, convoy sway, divers,
-// dual lasers, bombs, and their collisions. Lives in .text.blitter so it
-// stays below &3000 next to screen1.s. Units and layout are in galaga.h.
+// dual lasers, bombs, the tractor beam, the falling captive, and all their
+// collisions. Lives in .text.blitter so it stays below &3000 next to
+// screen1.s. Units and layout are in galaga.h.
 //
 // Shadow Mode 2 (160x256, 8 colours, 2 px/byte). Both modes have 80 byte
 // columns, so the fleet byte-column layout matches Galaxians; the horizontal
@@ -37,6 +38,9 @@ shot_buf:
 dv_col_buf:
 .space 12
 
+beam_buf:
+.space BEAM_LEN
+
 cur_col:
 .byte 0
 cur_y:
@@ -44,6 +48,8 @@ cur_y:
 cur_slot:
 .byte 0
 fill_byte:
+.byte 0
+beam_col:
 .byte 0
 
 shot_masks:
@@ -287,23 +293,25 @@ cs_rev_right:
   STA fl_dir
   RTS
 
-// X = alien. Draw at the current origin; the 6-column window's blank pads
-// clear the trailing edge on a 1-column sway.
+// Draw formation alien X at the current origin, plus the captive fighter if
+// this boss is holding one. The 6-column window's blank pads clear the
+// trailing edge on a 1-column sway.
 alien_redraw:
-  LDA idx_rank, X
-  STA E_RANK
-  ASL A
-  CLC
-  ADC fl_row
-  STA fx_row
+  STX E_IDX
+alien_at_now:
+  LDX E_IDX
   LDA idx_col5, X
-  STA E_C4
   CLC
   ADC fl_col
   SEC
   SBC #1
   STA fx_col
-  LDA E_RANK
+  LDA idx_rank, X
+  ASL A
+  CLC
+  ADC fl_row
+  STA fx_row
+  LDA idx_rank, X
   ASL A
   ORA fl_frame
   ASL A
@@ -314,7 +322,33 @@ alien_redraw:
   STA fx_src+1
   LDA #48
   STA fx_len
-  JMP fx_cell
+  JSR fx_cell
+  // Captive fighter held by this boss?
+  LDA capt_on
+  BEQ ar_done
+  LDA E_IDX
+  CMP capt_idx
+  BNE ar_done
+  LDX capt_idx
+  LDA idx_col5, X
+  CLC
+  ADC fl_col
+  SEC
+  SBC #1
+  STA fx_col
+  LDA fl_row
+  CLC
+  ADC #1
+  STA fx_row
+  LDA #%lo(k_ga_ship)
+  STA fx_src
+  LDA #%hi(k_ga_ship)
+  STA fx_src+1
+  LDA #48
+  STA fx_len
+  JSR fx_cell
+ar_done:
+  RTS
 
 // After a kill, refresh outermost live columns.
 .global fleet_bounds
@@ -404,6 +438,20 @@ dl_go:
   TAY
   LDA #1
   STA dv_on, X
+  // This dive tractor-beams only if it is a boss, nobody is held, we are not
+  // already dual, and no other beam is active.
+  LDA #0
+  STA dv_beam, X
+  LDA capt_on
+  ORA dual
+  BNE dl_nobeam
+  LDA beam_t
+  BNE dl_nobeam
+  LDA idx_rank, Y
+  BNE dl_nobeam
+  LDA #1
+  STA dv_beam, X
+dl_nobeam:
   // dv_x = (idx_col5[Y] + fl_col) * 2 (Mode-2 pixel, 8-bit).
   LDA idx_col5, Y
   CLC
@@ -481,11 +529,25 @@ dm_hi:
   STA dv_vx, X
 dm_fall:
   LDA dv_phase, X
-  BNE dm_return
+  BEQ dm_down
+  CMP #2
+  BEQ dm_beam
+  JMP dm_return
+dm_down:
   CLC
   LDA dv_y, X
   ADC dv_vy, X
   STA dv_y, X
+  // A beaming boss stops to hover at BEAM_Y.
+  LDA dv_beam, X
+  BEQ dm_down_norm
+  LDA dv_y, X
+  CMP #BEAM_Y
+  BCC dm_draw
+  JSR beam_enter
+  JMP dm_draw
+dm_down_norm:
+  LDA dv_y, X
   CMP #PLAYER_Y
   BCC dm_draw
   // Reached the player band: hit test, then turn for home.
@@ -520,6 +582,112 @@ dm_home:
 dm_draw:
   JMP diver_paint
 
+// Phase 2: hold position, pulse the tractor beam, and test for a capture.
+dm_beam:
+  JSR beam_paint
+  LDX E_SLOT
+  SEC
+  LDA dv_x, X
+  SBC cannon_x
+  BCS db_pos
+  EOR #0xff
+  CLC
+  ADC #1
+db_pos:
+  CMP #BEAM_WIDTH
+  BCS db_nocatch
+  LDA #1
+  STA capt_event
+  STA capt_on
+  LDX E_SLOT
+  LDA dv_idx, X
+  STA capt_idx
+  JSR beam_wipe
+  JMP db_return
+db_nocatch:
+  DEC beam_t
+  BNE dm_draw
+  JSR beam_wipe
+db_return:
+  LDA #0
+  STA beam_t
+  LDX E_SLOT
+  LDA #1
+  STA dv_phase, X
+  LDA #256-DIVE_VY
+  STA dv_vy, X
+  JMP dm_draw
+
+// Enter the hovering beam phase (X = slot).
+beam_enter:
+  LDA #2
+  STA dv_phase, X
+  LDA #BEAM_TIME
+  STA beam_t
+  LDA #0
+  STA dv_vx, X
+  STA dv_vy, X
+  LDA #BEAM_Y
+  STA dv_y, X
+  LDA dv_x, X
+  LSR A
+  STA beam_col
+  RTS
+
+// Animate a 4-column cyan tractor beam from under the boss to the player band.
+beam_paint:
+  LDX #0
+bp_fill:
+  TXA
+  CLC
+  ADC beam_t
+  AND #3
+  CMP #2
+  BCS bp_dark
+  LDA #0x3c
+  JMP bp_store
+bp_dark:
+  LDA #0
+bp_store:
+  STA beam_buf, X
+  INX
+  CPX #BEAM_LEN
+  BCC bp_fill
+  LDA #%lo(beam_buf)
+  STA fx_src
+  LDA #%hi(beam_buf)
+  STA fx_src+1
+  LDA beam_col
+  STA fx_col
+  LDA #BEAM_Y+8
+  STA fx_y
+  LDA #4
+  STA E_LEFT
+bp_col:
+  LDA #BEAM_LEN
+  STA fx_len
+  JSR fx_strip
+  INC fx_col
+  DEC E_LEFT
+  BNE bp_col
+  RTS
+
+beam_wipe:
+  LDA beam_col
+  STA fx_col
+  LDA #BEAM_Y+8
+  STA fx_y
+  LDA #4
+  STA E_LEFT
+bw_col:
+  LDA #BEAM_LEN
+  STA fx_len
+  JSR fx_blank
+  INC fx_col
+  DEC E_LEFT
+  BNE bw_col
+  RTS
+
 diver_wipe:
   LDX E_SLOT
   LDA dv_x, X
@@ -553,21 +721,26 @@ diver_paint:
   LDX E_SLOT
   LDA dv_x, X
   STA E_X
-  AND #1
-  BEQ dp_even
-  CLC
-  LDA E_T0
-  ADC #48
-  STA E_T0
-  BCC dp_even
-  INC E_T1
-dp_even:
-  JSR window_col
-  LDX E_SLOT
   LDA dv_y, X
   SEC
   SBC #2
   STA fx_y
+  JMP paint_strip
+
+// Draw a 6-col x 12-row self-wiping strip from the pair2win sprite whose
+// shift-0 base is E_T0/E_T1, at pixel column E_X with the top row at fx_y.
+paint_strip:
+  LDA E_X
+  AND #1
+  BEQ pst_even
+  CLC
+  LDA E_T0
+  ADC #48
+  STA E_T0
+  BCC pst_even
+  INC E_T1
+pst_even:
+  JSR window_col
   LDA #12
   STA fx_len
   LDA #%lo(dv_col_buf)
@@ -577,21 +750,21 @@ dp_even:
   LDY #0
   LDA #6
   STA E_LEFT
-dp_col:
+pst_col:
   LDX #0
-dp_row:
+pst_row:
   LDA (E_T0), Y
   STA dv_col_buf+2, X
   INY
   INX
   CPX #8
-  BCC dp_row
+  BCC pst_row
   STY E_C4
   JSR fx_strip
   LDY E_C4
   INC fx_col
   DEC E_LEFT
-  BNE dp_col
+  BNE pst_col
   RTS
 
 diver_vs_cannon:
@@ -613,6 +786,8 @@ diver_vs_cannon:
 dvc_pos:
   CMP #8
   BCS dvc_out
+  JSR player_clipped
+  BCS dvc_out
   LDA #1
   STA dive_hit
 dvc_out:
@@ -629,32 +804,6 @@ diver_rejoin:
   STY E_IDX
   JSR alien_at_now
   RTS
-
-alien_at_now:
-  LDX E_IDX
-  LDA idx_col5, X
-  CLC
-  ADC fl_col
-  SEC
-  SBC #1
-  STA fx_col
-  LDA idx_rank, X
-  ASL A
-  CLC
-  ADC fl_row
-  STA fx_row
-  LDA idx_rank, X
-  ASL A
-  ORA fl_frame
-  ASL A
-  TAY
-  LDA alien_spr, Y
-  STA fx_src
-  LDA alien_spr+1, Y
-  STA fx_src+1
-  LDA #48
-  STA fx_len
-  JMP fx_cell
 
 // Wipe every diver and put them back in formation (player death / wave).
 .global divers_clear
@@ -696,12 +845,111 @@ diver_kill:
 dk_out:
   RTS
 
+// ---------------------------------------------------------------- captive
+
+// Free the captive held by capt_idx (destroyed in formation): start it
+// falling from the boss's position.
+free_captive_fleet:
+  LDA #0
+  STA capt_on
+  LDA #1
+  STA fall_on
+  LDX capt_idx
+  LDA idx_col5, X
+  CLC
+  ADC fl_col
+  ASL A
+  STA fall_x
+  LDA fl_row
+  CLC
+  ADC #1
+  ASL A
+  ASL A
+  ASL A
+  STA fall_y
+  RTS
+
+// Advance the freed captive fighter; rescue if it reaches the cannon, else
+// clear it when it passes the ground.
+.global fall_step
+fall_step:
+  LDA fall_on
+  BNE fls_go
+  RTS
+fls_go:
+  LDA fall_y
+  CLC
+  ADC #FALL_STEP
+  STA fall_y
+  CMP #GROUND_Y
+  BCC fls_live
+  JSR fall_wipe
+  LDA #0
+  STA fall_on
+  RTS
+fls_live:
+  LDA fall_y
+  CLC
+  ADC #8
+  CMP #PLAYER_Y
+  BCC fall_paint
+  SEC
+  LDA fall_x
+  SBC cannon_x
+  BCS fls_xpos
+  EOR #0xff
+  CLC
+  ADC #1
+fls_xpos:
+  CMP #8
+  BCS fall_paint
+  // Caught: go dual.
+  JSR fall_wipe
+  LDA #0
+  STA fall_on
+  LDA #1
+  STA dual
+  STA rescue_event
+  JMP cannon_draw
+
+fall_paint:
+  LDA #%lo(k_ga_ship)
+  STA E_T0
+  LDA #%hi(k_ga_ship)
+  STA E_T1
+  LDA fall_x
+  STA E_X
+  LDA fall_y
+  SEC
+  SBC #2
+  STA fx_y
+  JMP paint_strip
+
+fall_wipe:
+  LDA fall_x
+  STA E_X
+  LDA fall_y
+  STA fx_y
+  JSR window_col
+  LDA #8
+  STA fx_len
+  LDA #6
+  STA E_LEFT
+flw_col:
+  JSR fx_blank
+  INC fx_col
+  DEC E_LEFT
+  BNE flw_col
+  RTS
+
 // ---------------------------------------------------------------- laser
 
-// Fire the bolt in slot E_SHOT from the cannon's centre.
+// Fire the bolt in slot E_SHOT; shot_fire uses cannon_x, shot_fire_at a
+// given ship's left pixel in A.
 shot_fire:
-  CLC
   LDA cannon_x
+shot_fire_at:
+  CLC
   ADC #4
   STA E_T0
   AND #1
@@ -721,7 +969,8 @@ shot_fire:
   JSR shot_blit
   LDX #%lo(snd_shot)
   LDY #%hi(snd_shot)
-  JMP sound_play
+  JSR sound_play
+  RTS
 
 // Build shot_buf (SHOT_LEN lit rows then a dark wipe tail) and strip it at
 // the current slot's position.
@@ -845,7 +1094,9 @@ hit_fleet:
   LDA cur_col
   SEC
   SBC fl_col
-  BCC hf_miss
+  BCS hf_in
+  RTS
+hf_in:
   STA E_C4
   LDX #0
 hf_div:
@@ -880,6 +1131,13 @@ hf_col:
   LDA #0
   STA fl_on, Y
   DEC alive
+  // Shooting the captor frees its captive.
+  LDA capt_on
+  BEQ hf_nocap
+  CPY capt_idx
+  BNE hf_nocap
+  JSR free_captive_fleet
+hf_nocap:
   LDA #1
   STA shot_event
   LDA E_C
@@ -1013,8 +1271,12 @@ bm_cannon:
 bc_pos:
   CMP #8
   BCS bm_draw
+  JSR player_clipped
+  LDX E_IDX
+  BCS bm_to_spent
   LDA #1
   STA bomb_hit
+bm_to_spent:
   JMP bomb_spent
 bm_draw:
   LDA bomb_col, X
@@ -1097,6 +1359,28 @@ cannon_at:
   STA fx_row
   RTS
 
+// A lethal touch: when dual, demote (erase the second ship) and return with
+// carry set (survived). When single, return carry clear (killed).
+player_clipped:
+  LDA dual
+  BEQ pc_kill
+  LDA #0
+  STA dual
+  LDA #1
+  STA dual_hit
+  LDA cannon_x
+  CLC
+  ADC #DUAL_GAP
+  STA E_X
+  LDA #PLAYER_ROW
+  STA fx_row
+  JSR window_wipe
+  SEC
+  RTS
+pc_kill:
+  CLC
+  RTS
+
 .global player_step
 player_step:
   LDA key_bits
@@ -1119,8 +1403,15 @@ ps_left:
   JMP ps_moved
 ps_right:
   LDA cannon_x
+  LDX dual
+  BNE pr_dual
   CMP #CANNON_MAX
   BCS ps_fire
+  BCC pr_do
+pr_dual:
+  CMP #CANNON_MAX-DUAL_GAP
+  BCS ps_fire
+pr_do:
   CLC
   ADC #CANNON_STEP
   STA cannon_x
@@ -1129,6 +1420,8 @@ ps_moved:
 ps_fire:
   LDA fire_want
   BEQ ps_out
+  LDA dual
+  BNE pf_dual
   LDX #SHOTS-1
 pf_slot:
   LDA shot_on, X
@@ -1141,6 +1434,22 @@ pf_free:
   STA fire_want
   STX E_SHOT
   JMP shot_fire
+pf_dual:
+  LDA shot_on
+  ORA shot_on+1
+  BNE ps_out
+  LDA #0
+  STA fire_want
+  LDA #0
+  STA E_SHOT
+  LDA cannon_x
+  JSR shot_fire_at
+  LDA #1
+  STA E_SHOT
+  LDA cannon_x
+  CLC
+  ADC #DUAL_GAP
+  JSR shot_fire_at
 ps_out:
   RTS
 
@@ -1153,12 +1462,38 @@ cannon_draw:
 .global cannon_image
 cannon_image:
   JSR cannon_at
-  JMP window_draw
+  JSR window_draw
+  LDA dual
+  BEQ ci_out
+  LDA #%lo(k_ga_ship)
+  STA fx_src
+  LDA #%hi(k_ga_ship)
+  STA fx_src+1
+  LDA cannon_x
+  CLC
+  ADC #DUAL_GAP
+  STA E_X
+  LDA #PLAYER_ROW
+  STA fx_row
+  JSR window_draw
+ci_out:
+  RTS
 
 .global cannon_erase
 cannon_erase:
   JSR cannon_at
-  JMP window_wipe
+  JSR window_wipe
+  LDA dual
+  BEQ ce_out
+  LDA cannon_x
+  CLC
+  ADC #DUAL_GAP
+  STA E_X
+  LDA #PLAYER_ROW
+  STA fx_row
+  JSR window_wipe
+ce_out:
+  RTS
 
 // ---------------------------------------------------------------- sound
 
