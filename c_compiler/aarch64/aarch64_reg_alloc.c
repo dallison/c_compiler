@@ -362,15 +362,59 @@ static uint64_t HoistLiveAtInsert(TargetBasicBlock* pred,
   return live;
 }
 
+/*
+ * Shrink-wrapping (and the fast/slow path split) retargets branches without
+ * always refreshing in_edges/out_edges.  Edge-based loop discovery can then
+ * treat a fast-path preheader as an entry to a slow-path loop.  Confirm the
+ * predecessor's terminator actually transfers to |header| before hoisting
+ * into it.
+ */
+static bool HoistPredEntersHeader(TargetGenerator* gen, TargetBasicBlock* pred,
+                                  TargetBasicBlock* header) {
+  if (gen == NULL || pred == NULL || header == NULL || pred->end_code == NULL) {
+    return false;
+  }
+  TargetInstruction* end = pred->end_code;
+  if (HoistIsBranch(end) && gen->virtuals != NULL) {
+    if (gen->virtuals->is_conditional_branch != NULL &&
+        gen->virtuals->is_conditional_branch(end)) {
+      TargetInstruction* taken =
+          gen->virtuals->get_branch_target != NULL
+              ? gen->virtuals->get_branch_target(end)
+              : NULL;
+      TargetInstruction* fallthrough = TargetNext(end);
+      if (taken != NULL && taken->block == header) {
+        return true;
+      }
+      if (fallthrough != NULL && fallthrough->block == header) {
+        return true;
+      }
+      return false;
+    }
+    if (gen->virtuals->get_branch_target != NULL) {
+      TargetInstruction* target = gen->virtuals->get_branch_target(end);
+      return target != NULL && target->block == header;
+    }
+    return false;
+  }
+  /* Fallthrough into the header. */
+  TargetInstruction* next = TargetNext(end);
+  return next != NULL && next->block == header;
+}
+
 static bool HoistEntriesReady(TargetGenerator* gen, HoistLoop* loop,
                               bool need_frame, BitSet* framed) {
   if (loop->entries.length == 0) {
     return false;
   }
+  TargetBasicBlock* header = gen->basic_blocks.value.p[loop->header];
   for (size_t i = 0; i < loop->entries.length; i++) {
     size_t pred_id = (size_t)loop->entries.value.w[i];
     TargetBasicBlock* pred = gen->basic_blocks.value.p[pred_id];
     if (pred == NULL || pred->code == NULL || pred->end_code == NULL) {
+      return false;
+    }
+    if (!HoistPredEntersHeader(gen, pred, header)) {
       return false;
     }
     for (size_t e = 0; e < pred->out_edges.length; e++) {
@@ -694,6 +738,24 @@ static void HoistGroupsInLoop(AARCH64RegisterAllocator* allocator,
     TargetBasicBlock* pred =
         gen->basic_blocks.value.p[loop->entries.value.w[e]];
     blocked |= HoistLiveAtInsert(pred, live_out, extra_live);
+    /*
+     * The hoist inserts into |pred|.  Any register already read or written
+     * there (e.g. a pointer used as `add xN, xP, #off` just above the
+     * insertion point) must stay blocked even when stale CFG edges make
+     * liveness miss it.
+     */
+    if (pred != NULL && pred->code != NULL) {
+      for (TargetInstruction* inst = pred->code; inst != NULL;
+           inst = HoistNextInBlock(pred, inst)) {
+        uint64_t uses = 0;
+        uint64_t defs = 0;
+        HoistInstEffects(inst, &uses, &defs, false);
+        blocked |= uses | defs;
+        if (inst == pred->end_code) {
+          break;
+        }
+      }
+    }
   }
   // Heaviest groups first so a scarce register covers the hottest reload.
   for (int a = 0; a < ngroups; a++) {
@@ -850,9 +912,11 @@ static void HoistLoopInvariantValues(AARCH64RegisterAllocator* allocator) {
       size_t pred = header->in_edges.value.w[i];
       if (BitSetContains(&loop->blocks, pred)) {
         VectorAppend(&loop->latches, (void*)(intptr_t)pred);
-      } else {
+      } else if (HoistPredEntersHeader(
+                     gen, gen->basic_blocks.value.p[pred], header)) {
         VectorAppend(&loop->entries, (void*)(intptr_t)pred);
       }
+      /* Else: stale CFG edge after shrink-wrap / path split — ignore. */
     }
     VectorAppend(&loops, loop);
   }
