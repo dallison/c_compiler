@@ -4,9 +4,12 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -193,23 +196,142 @@ int select(int nfds, fd_set* readfds, fd_set* writefds, fd_set* exceptfds,
   return (int)result;
 }
 
-int daveos_exec(const char* name) {
-  if (name == NULL) {
+int execve(const char* path, char** argv, char** envp) {
+  if (path == NULL) {
     errno = EINVAL;
     return -1;
   }
-  return Fail(syscall(DAVEOS_SYS_EXEC, name));
+  return Fail(syscall(DAVEOS_SYS_EXEC, path, argv, envp));
 }
 
 int execv(const char* path, char** argv) {
-  (void)argv;
-  return daveos_exec(path);
+  return execve(path, argv, environ);
 }
 
-int execve(const char* path, char** argv, char** envp) {
-  (void)argv;
-  (void)envp;
-  return daveos_exec(path);
+int daveos_exec(const char* path) {
+  char* argv[2];
+  if (path == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  argv[0] = (char*)path;
+  argv[1] = NULL;
+  return execve(path, argv, environ);
+}
+
+int execl(const char* path, ...) {
+  char* argv[64];
+  va_list ap;
+  size_t n = 0;
+  if (path == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  va_start(ap, path);
+  while (n < 63) {
+    char* a = va_arg(ap, char*);
+    argv[n++] = a;
+    if (a == NULL) {
+      break;
+    }
+  }
+  va_end(ap);
+  if (n == 63 && argv[62] != NULL) {
+    errno = E2BIG;
+    return -1;
+  }
+  return execve(path, argv, environ);
+}
+
+int execle(const char* path, ...) {
+  char* argv[64];
+  char** envp;
+  va_list ap;
+  size_t n = 0;
+  if (path == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  va_start(ap, path);
+  while (n < 63) {
+    char* a = va_arg(ap, char*);
+    argv[n++] = a;
+    if (a == NULL) {
+      break;
+    }
+  }
+  envp = va_arg(ap, char**);
+  va_end(ap);
+  if (n == 63 && argv[62] != NULL) {
+    errno = E2BIG;
+    return -1;
+  }
+  return execve(path, argv, envp);
+}
+
+int execvp(const char* file, char** argv) {
+  char scratch[512];
+  const char* path;
+  if (file == NULL || argv == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (strchr(file, '/') != NULL) {
+    return execve(file, argv, environ);
+  }
+  path = getenv("PATH");
+  if (path == NULL || path[0] == '\0') {
+    path = "/";
+  }
+  while (*path) {
+    const char* colon = strchr(path, ':');
+    size_t len = colon ? (size_t)(colon - path) : strlen(path);
+    size_t flen = strlen(file);
+    if (len + 1 + flen + 1 > sizeof(scratch)) {
+      errno = ENAMETOOLONG;
+      return -1;
+    }
+    if (len == 0) {
+      /* empty PATH component => cwd */
+      memcpy(scratch, file, flen + 1);
+    } else {
+      memcpy(scratch, path, len);
+      scratch[len] = '/';
+      memcpy(scratch + len + 1, file, flen + 1);
+    }
+    execve(scratch, argv, environ);
+    /* DaveOS maps most failures to EIO; keep searching PATH. */
+    if (colon == NULL) {
+      break;
+    }
+    path = colon + 1;
+  }
+  errno = ENOENT;
+  return -1;
+}
+
+int execlp(const char* file, ...) {
+  char* argv[64];
+  va_list ap;
+  size_t n = 0;
+  if (file == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  va_start(ap, file);
+  while (n < 63) {
+    char* a = va_arg(ap, char*);
+    argv[n++] = a;
+    if (a == NULL) {
+      break;
+    }
+  }
+  va_end(ap);
+  if (n == 63 && argv[62] != NULL) {
+    errno = E2BIG;
+    return -1;
+  }
+  return execvp(file, argv);
 }
 
 int sendfd(int pipe_fd, int fd) {

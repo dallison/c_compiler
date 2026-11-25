@@ -14,11 +14,12 @@
 // environ is a pointer to an array of pointers to env vars.  Each env
 // var is VAR=VALUE or VAR.  The end is a NULL pointer.
 #if defined(__DAVECC_NATIVE_LINUX__) || defined(__6502__) || \
-    defined(__wasm32__)
+    defined(__wasm32__) || defined(__DAVECC_DAVEOS__)
 char** environ;
 #endif
 
-#if defined(__DAVECC_NATIVE_LINUX__) || defined(__wasm32__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__wasm32__) || \
+    defined(__DAVECC_DAVEOS__)
 void __davecc_environ_init(char** environment) {
   environ = environment;
 }
@@ -29,7 +30,7 @@ char* getenv(const char* var) {
     return NULL;
   }
 #if defined(__DAVECC_NATIVE_LINUX__) || defined(__6502__) || \
-    defined(__wasm32__)
+    defined(__wasm32__) || defined(__DAVECC_DAVEOS__)
   size_t requested_length = strlen(var);
   char** p = environ;
   while (p != NULL && *p != NULL) {

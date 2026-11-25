@@ -45,8 +45,8 @@ struct daveos_sigaction {
 extern "C" {
 #endif
 
-/* Catalog exec: |name| is an embedded UserImages key (e.g. "bye"). */
-int daveos_exec(const char* name);
+/* Exec ELF at VFS |path|; argv becomes {path, NULL}, env is environ. */
+int daveos_exec(const char* path);
 
 /* Pass / receive an open file over a pipe (SCM_RIGHTS-style). */
 int sendfd(int pipe_fd, int fd);

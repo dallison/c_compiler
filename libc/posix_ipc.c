@@ -597,12 +597,32 @@ int rename(const char* from, const char* to) {
   return 0;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int execvp(const char* file, char** argv) {
   (void)file;
   (void)argv;
   errno = ENOSYS;
   return -1;
 }
+
+int execl(const char* path, ...) {
+  (void)path;
+  errno = ENOSYS;
+  return -1;
+}
+
+int execle(const char* path, ...) {
+  (void)path;
+  errno = ENOSYS;
+  return -1;
+}
+
+int execlp(const char* file, ...) {
+  (void)file;
+  errno = ENOSYS;
+  return -1;
+}
+#endif
 
 #if !defined(__DAVECC_DAVEOS__)
 int execv(const char* path, char** argv) {
