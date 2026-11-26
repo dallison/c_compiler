@@ -342,6 +342,32 @@ int recvfd(int pipe_fd) {
   return Fail(syscall(DAVEOS_SYS_RECVFD, pipe_fd));
 }
 
+int daveos_getprocs(struct daveos_proc_info* buf, int max) {
+  if (buf == NULL || max <= 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_GETPROCS, buf, max));
+}
+
+int mount(const char* source, const char* target, const char* filesystemtype,
+          unsigned long mountflags, const void* data) {
+  if (source == NULL || target == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_MOUNT, source, target, filesystemtype,
+                      mountflags, data));
+}
+
+int umount2(const char* target, int flags) {
+  if (target == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_UMOUNT, target, flags));
+}
+
 void* sbrk(long increment) {
   long cur = syscall(DAVEOS_SYS_BRK, 0);
   if (cur < 0) {

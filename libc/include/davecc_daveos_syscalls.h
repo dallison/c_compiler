@@ -26,9 +26,19 @@
 #define DAVEOS_SYS_EPOLL_WAIT 216
 #define DAVEOS_SYS_SENDFD 217
 #define DAVEOS_SYS_RECVFD 218
+#define DAVEOS_SYS_GETPROCS 219
+#define DAVEOS_SYS_MOUNT 220
+#define DAVEOS_SYS_UMOUNT 221
 
 /* Kernel select bitmap — fds 0..63. */
 #define DAVEOS_FD_SETSIZE 64
+
+struct daveos_proc_info {
+  unsigned pid;
+  unsigned ppid;
+  unsigned state; /* 0=live, 1=zombie, 2=stopped */
+  char name[16];
+};
 
 struct daveos_fd_set {
   unsigned long long mask;
@@ -51,6 +61,14 @@ int daveos_exec(const char* path);
 /* Pass / receive an open file over a pipe (SCM_RIGHTS-style). */
 int sendfd(int pipe_fd, int fd);
 int recvfd(int pipe_fd);
+
+/* Copy up to |max| process rows; returns count or -1. */
+int daveos_getprocs(struct daveos_proc_info* buf, int max);
+
+/* Linux-like mount(2) / umount2(2); flags and data ignored by DaveOS. */
+int mount(const char* source, const char* target, const char* filesystemtype,
+          unsigned long mountflags, const void* data);
+int umount2(const char* target, int flags);
 
 void* sbrk(long increment);
 
