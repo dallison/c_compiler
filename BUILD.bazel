@@ -452,6 +452,7 @@ LIBC_SRCS = [
     "libc/memstream.c",
     "libc/posix_events.c",
     "libc/posix_daveos.c",
+    "libc/posix_spawn.c",
     "libc/regex.c",
     "libc/pow.c",
     "libc/printf.c",
@@ -2894,6 +2895,7 @@ libc_srcs=(
   "libc/memstream.c"
   "libc/posix_events.c"
   "libc/posix_daveos.c"
+  "libc/posix_spawn.c"
   "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
