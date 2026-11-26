@@ -596,9 +596,102 @@ int unsetenv(const char* name) {
   return 0;
 }
 
+#if defined(__DAVECC_DAVEOS__)
+uid_t getuid(void) {
+  return (uid_t)FailLong(syscall(DAVEOS_SYS_GETUID));
+}
+
+uid_t geteuid(void) {
+  return (uid_t)FailLong(syscall(DAVEOS_SYS_GETEUID));
+}
+
+gid_t getgid(void) {
+  return (gid_t)FailLong(syscall(DAVEOS_SYS_GETGID));
+}
+
+gid_t getegid(void) {
+  return (gid_t)FailLong(syscall(DAVEOS_SYS_GETEGID));
+}
+
+int getgroups(int size, gid_t* list) {
+  long n = syscall(DAVEOS_SYS_GETGROUPS, (long)size, list);
+  return Fail((int)n);
+}
+
+int setuid(uid_t uid) {
+  return Fail(syscall(DAVEOS_SYS_SETUID, (long)uid));
+}
+
+int seteuid(uid_t uid) {
+  return Fail(syscall(DAVEOS_SYS_SETEUID, (long)uid));
+}
+
+int setgid(gid_t gid) {
+  return Fail(syscall(DAVEOS_SYS_SETGID, (long)gid));
+}
+
+int setegid(gid_t gid) {
+  return Fail(syscall(DAVEOS_SYS_SETEGID, (long)gid));
+}
+
+int setgroups(int size, const gid_t* list) {
+  return Fail(syscall(DAVEOS_SYS_SETGROUPS, (long)size, list));
+}
+#else
 uid_t getuid(void) { return 0; }
 
+uid_t geteuid(void) { return 0; }
+
 gid_t getgid(void) { return 0; }
+
+gid_t getegid(void) { return 0; }
+
+int getgroups(int size, gid_t* list) {
+  if (size < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (size > 0) {
+    if (list == NULL) {
+      errno = EFAULT;
+      return -1;
+    }
+    list[0] = 0;
+  }
+  return 1;
+}
+
+int setuid(uid_t uid) {
+  (void)uid;
+  errno = ENOSYS;
+  return -1;
+}
+
+int seteuid(uid_t uid) {
+  (void)uid;
+  errno = ENOSYS;
+  return -1;
+}
+
+int setgid(gid_t gid) {
+  (void)gid;
+  errno = ENOSYS;
+  return -1;
+}
+
+int setegid(gid_t gid) {
+  (void)gid;
+  errno = ENOSYS;
+  return -1;
+}
+
+int setgroups(int size, const gid_t* list) {
+  (void)size;
+  (void)list;
+  errno = ENOSYS;
+  return -1;
+}
+#endif
 
 int chown(const char* path, uid_t owner, gid_t group) {
   (void)path;

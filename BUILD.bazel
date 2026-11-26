@@ -447,6 +447,7 @@ LIBC_SRCS = [
     "libc/posix_read.c",
     "libc/posix_poll.c",
     "libc/posix_ipc.c",
+    "libc/posix_pwd.c",
     "libc/uname.c",
     "libc/memstream.c",
     "libc/posix_events.c",
@@ -2888,6 +2889,7 @@ libc_srcs=(
   "libc/posix_read.c"
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
+  "libc/posix_pwd.c"
   "libc/uname.c"
   "libc/memstream.c"
   "libc/posix_events.c"
