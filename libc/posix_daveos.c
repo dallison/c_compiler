@@ -450,6 +450,11 @@ int setrlimit(int resource, const struct rlimit* limit) {
   return prlimit(0, resource, limit, NULL);
 }
 
+int daveos_syslimit(int which, unsigned long long* new_limit,
+                    unsigned long long* old_limit) {
+  return Fail(syscall(DAVEOS_SYS_SYSLIMIT, which, new_limit, old_limit));
+}
+
 static long sysconf_rlimit_soft(int resource, long fallback) {
   struct rlimit lim;
   if (getrlimit(resource, &lim) != 0) {
@@ -483,7 +488,7 @@ long sysconf(int name) {
     case _SC_ARG_MAX:
       return 131072; /* 128 KiB; matches exec string budget in practice */
     case _SC_CHILD_MAX:
-      return sysconf_rlimit_soft(RLIMIT_NPROC, 16);
+      return sysconf_rlimit_soft(RLIMIT_NPROC, DAVEOS_PID_MAX_DEFAULT);
     case _SC_CLK_TCK:
       return 100; /* 10 ms scheduler tick */
     case _SC_NGROUPS_MAX:
@@ -505,9 +510,10 @@ long sysconf(int name) {
     case _SC_MEMLOCK_RANGE:
     case _SC_MESSAGE_PASSING:
     case _SC_SEMAPHORES:
-    case _SC_THREADS:
     case _SC_SPAWN:
       return -1; /* not supported; errno unchanged */
+    case _SC_THREADS:
+      return 1;
     case _SC_PRIORITY_SCHEDULING:
     case _SC_TIMERS:
     case _SC_MAPPED_FILES:
@@ -568,7 +574,7 @@ long sysconf(int name) {
     case _SC_HOST_NAME_MAX:
       return 64;
     case _SC_THREAD_THREADS_MAX:
-      return 1; /* one kernel thread per process today */
+      return 4096; /* DAVEOS_THREADS_CAP */
     case _SC_XOPEN_VERSION:
       return 700;
     case _SC_XOPEN_UNIX:

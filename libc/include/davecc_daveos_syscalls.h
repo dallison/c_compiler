@@ -32,9 +32,17 @@
 #define DAVEOS_SYS_GETMOUNTS 222
 #define DAVEOS_SYS_PRLIMIT64 223
 #define DAVEOS_SYS_GETMEMINFO 224
+#define DAVEOS_SYS_SYSLIMIT 225
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096
+
+#define DAVEOS_LIMIT_PID_MAX 1
+#define DAVEOS_LIMIT_THREADS_MAX 2
+#define DAVEOS_PID_CAP 4096
+#define DAVEOS_THREADS_CAP 4096
+#define DAVEOS_PID_MAX_DEFAULT 256
+#define DAVEOS_THREADS_MAX_DEFAULT 256
 
 /* RLIMIT_* ids — keep in sync with <sys/resource.h>. */
 #define DAVEOS_RLIMIT_CPU 0
@@ -113,6 +121,14 @@ int mount(const char* source, const char* target, const char* filesystemtype,
 int umount2(const char* target, int flags);
 
 void* sbrk(long increment);
+
+/*
+ * Query/set system-wide pid_max / threads_max.
+ * which: DAVEOS_LIMIT_PID_MAX or DAVEOS_LIMIT_THREADS_MAX.
+ * new_limit may be NULL (query only); old_limit may be NULL.
+ */
+int daveos_syslimit(int which, unsigned long long* new_limit,
+                    unsigned long long* old_limit);
 
 #ifdef __cplusplus
 }

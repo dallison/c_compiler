@@ -1135,6 +1135,147 @@ int sched_yield(void) {
   return 0;
 }
 
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+typedef struct PthreadStart {
+  void* (*fn)(void*);
+  void* arg;
+} PthreadStart;
+
+typedef struct PthreadResult {
+  thrd_t tid;
+  void* value;
+  struct PthreadResult* next;
+} PthreadResult;
+
+static PthreadResult* pthread_results;
+static unsigned int pthread_results_lock;
+
+static void PthreadResultsLock(void) {
+  unsigned int expected = 0;
+  while (!__atomic_compare_exchange_n(&pthread_results_lock, &expected, 1, 0, 2,
+                                      0)) {
+    expected = 0;
+    thrd_yield();
+  }
+}
+
+static void PthreadResultsUnlock(void) {
+  __atomic_store_n(&pthread_results_lock, 0, 3);
+}
+
+static void PthreadResultStore(thrd_t tid, void* value) {
+  PthreadResult* entry = (PthreadResult*)malloc(sizeof(PthreadResult));
+  if (entry == NULL) {
+    return;
+  }
+  entry->tid = tid;
+  entry->value = value;
+  PthreadResultsLock();
+  entry->next = pthread_results;
+  pthread_results = entry;
+  PthreadResultsUnlock();
+}
+
+static void* PthreadResultTake(thrd_t tid) {
+  PthreadResultsLock();
+  PthreadResult** link = &pthread_results;
+  void* value = NULL;
+  while (*link != NULL) {
+    if ((*link)->tid == tid) {
+      PthreadResult* entry = *link;
+      *link = entry->next;
+      value = entry->value;
+      free(entry);
+      break;
+    }
+    link = &(*link)->next;
+  }
+  PthreadResultsUnlock();
+  return value;
+}
+
+static int PthreadStartThunk(void* value) {
+  PthreadStart* wrap = (PthreadStart*)value;
+  void* (*fn)(void*) = wrap->fn;
+  void* arg = wrap->arg;
+  free(wrap);
+  void* result = fn(arg);
+  PthreadResultStore(thrd_current(), result);
+  return (int)(intptr_t)result;
+}
+#endif
+
+int pthread_create(pthread_t* thread, const pthread_attr_t* attr,
+                   void* (*start)(void*), void* arg) {
+  (void)attr;
+  if (thread == NULL || start == NULL) {
+    return EINVAL;
+  }
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  PthreadStart* wrap = (PthreadStart*)malloc(sizeof(PthreadStart));
+  if (wrap == NULL) {
+    return EAGAIN;
+  }
+  wrap->fn = start;
+  wrap->arg = arg;
+  thrd_t tid = 0;
+  int rc = thrd_create(&tid, PthreadStartThunk, wrap);
+  if (rc != thrd_success) {
+    free(wrap);
+    return rc == thrd_nomem ? EAGAIN : EAGAIN;
+  }
+  *thread = (pthread_t)tid;
+  return 0;
+#else
+  (void)arg;
+  return ENOTSUP;
+#endif
+}
+
+int pthread_join(pthread_t thread, void** value_ptr) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  if (thread == 0) {
+    return EINVAL;
+  }
+  int code = 0;
+  if (thrd_join((thrd_t)thread, &code) != thrd_success) {
+    return ESRCH;
+  }
+  if (value_ptr != NULL) {
+    void* stored = PthreadResultTake((thrd_t)thread);
+    *value_ptr = stored != NULL ? stored : (void*)(intptr_t)code;
+  } else {
+    (void)PthreadResultTake((thrd_t)thread);
+  }
+  return 0;
+#else
+  (void)thread;
+  (void)value_ptr;
+  return ENOTSUP;
+#endif
+}
+
+int pthread_detach(pthread_t thread) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  if (thread == 0) {
+    return EINVAL;
+  }
+  return thrd_detach((thrd_t)thread) == thrd_success ? 0 : ESRCH;
+#else
+  (void)thread;
+  return ENOTSUP;
+#endif
+}
+
+void pthread_exit(void* value) {
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  PthreadResultStore(thrd_current(), value);
+  thrd_exit((int)(intptr_t)value);
+#else
+  exit((int)(intptr_t)value);
+#endif
+}
+
 int pthread_mutex_init(pthread_mutex_t* mutex, const pthread_mutexattr_t* attr) {
   (void)attr;
   if (mutex == NULL) return EINVAL;
@@ -1155,15 +1296,28 @@ int pthread_mutex_lock(pthread_mutex_t* mutex) {
   for (;;) {
     unsigned int expected = 0;
     if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0, 2, 0)) {
+      mutex->owner = (pthread_t)thrd_current();
       return 0;
     }
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+    unsigned int locked = 1;
+    if (__davecc_addr_wait(&mutex->state, &locked, sizeof(locked), -1) ==
+        thrd_error) {
+      return EINVAL;
+    }
+#else
     thrd_yield();
+#endif
   }
 }
 
 int pthread_mutex_unlock(pthread_mutex_t* mutex) {
   if (mutex == NULL) return EINVAL;
+  mutex->owner = 0;
   __atomic_store_n(&mutex->state, 0, 3);
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  (void)__davecc_addr_wake(&mutex->state, 0);
+#endif
   return 0;
 }
 
@@ -1171,6 +1325,7 @@ int pthread_mutex_trylock(pthread_mutex_t* mutex) {
   if (mutex == NULL) return EINVAL;
   unsigned int expected = 0;
   if (__atomic_compare_exchange_n(&mutex->state, &expected, 1, 0, 2, 0)) {
+    mutex->owner = (pthread_t)thrd_current();
     return 0;
   }
   return EBUSY;
@@ -1190,19 +1345,31 @@ int pthread_cond_destroy(pthread_cond_t* cond) {
 
 int pthread_cond_signal(pthread_cond_t* cond) {
   if (cond == NULL) return EINVAL;
-  __atomic_fetch_add(&cond->generation, 1, 0);
+  __atomic_fetch_add(&cond->generation, 1, 3);
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  (void)__davecc_addr_wake(&cond->generation, 0);
+#endif
   return 0;
 }
 
 int pthread_cond_broadcast(pthread_cond_t* cond) {
-  return pthread_cond_signal(cond);
+  if (cond == NULL) return EINVAL;
+  __atomic_fetch_add(&cond->generation, 1, 3);
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  (void)__davecc_addr_wake(&cond->generation, 1);
+#endif
+  return 0;
 }
 
 int pthread_cond_wait(pthread_cond_t* cond, pthread_mutex_t* mutex) {
   if (cond == NULL || mutex == NULL) return EINVAL;
-  unsigned int seen = cond->generation;
+  unsigned int seen = __atomic_load_n(&cond->generation, 2);
   pthread_mutex_unlock(mutex);
+#if defined(__DAVECC_HAS_GUEST_THREADS__)
+  (void)__davecc_addr_wait(&cond->generation, &seen, sizeof(seen), -1);
+#else
   while (__atomic_load_n(&cond->generation, 0) == seen) thrd_yield();
+#endif
   return pthread_mutex_lock(mutex);
 }
 
