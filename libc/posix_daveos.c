@@ -67,14 +67,34 @@ pid_t fork(void) {
   return (pid_t)FailLong(syscall(DAVEOS_SYS_FORK));
 }
 
+long daveos_clone(unsigned long flags, void* child_stack, int* parent_tid,
+                  void* tls, int* child_tid) {
+  return FailLong(syscall(DAVEOS_SYS_CLONE, (long)flags, child_stack,
+                          parent_tid, tls, child_tid));
+}
+
+int pidfd_open(int pid, unsigned int flags) {
+  return Fail(syscall(DAVEOS_SYS_PIDFD_OPEN, (long)pid, (long)flags));
+}
+
+int pidfd_send_signal(int pidfd, int sig, void* info, unsigned int flags) {
+  return Fail(syscall(DAVEOS_SYS_PIDFD_SEND_SIGNAL, (long)pidfd, (long)sig,
+                      info, (long)flags));
+}
+
 pid_t setsid(void) {
   return (pid_t)FailLong(syscall(DAVEOS_SYS_SETSID));
 }
 
 pid_t waitpid(pid_t pid, int* status, int options) {
-  (void)options; /* WNOHANG / WUNTRACED not implemented yet */
-  long result = syscall(DAVEOS_SYS_WAITPID, (long)pid, status);
+  long result = syscall(DAVEOS_SYS_WAITPID, (long)pid, status, (long)options);
+  /* WNOHANG may return 0; treat as success. */
   return (pid_t)FailLong(result);
+}
+
+int waitid(idtype_t idtype, id_t id, siginfo_t* infop, int options) {
+  return Fail(syscall(DAVEOS_SYS_WAITID, (long)idtype, (long)id, infop,
+                      (long)options));
 }
 
 int kill(pid_t pid, int signal_number) {

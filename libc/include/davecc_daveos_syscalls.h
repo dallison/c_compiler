@@ -54,9 +54,17 @@
 #define DAVEOS_SYS_DELETE_MODULE 244
 #define DAVEOS_SYS_NETIF 245
 #define DAVEOS_SYS_PING 246
+#define DAVEOS_SYS_CLONE 247
+#define DAVEOS_SYS_PIDFD_OPEN 248
+#define DAVEOS_SYS_PIDFD_SEND_SIGNAL 249
+#define DAVEOS_SYS_WAITID 250
 
 #define DAVEOS_NETIF_GET 0
 #define DAVEOS_NETIF_SET 1
+
+/* Linux-compatible clone / pidfd bits (DaveOS subset). */
+#define CLONE_PIDFD 0x1000
+#define PIDFD_NONBLOCK 0x800
 
 struct daveos_netif {
   char name[16];
@@ -73,6 +81,15 @@ int init_module(const char* path);
 int delete_module(const char* name);
 int daveos_netif(int op, struct daveos_netif* nif);
 int daveos_ping(unsigned addr, unsigned timeout_ms);
+/*
+ * Linux clone(2) syscall ABI (aarch64 argument order). With CLONE_PIDFD,
+ * *parent_tid receives the new pidfd. Returns child pid to the parent, 0
+ * in the child.
+ */
+long daveos_clone(unsigned long flags, void* child_stack, int* parent_tid,
+                  void* tls, int* child_tid);
+int pidfd_open(int pid, unsigned int flags);
+int pidfd_send_signal(int pidfd, int sig, void* info, unsigned int flags);
 #ifdef __cplusplus
 }
 #endif

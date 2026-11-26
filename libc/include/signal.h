@@ -100,7 +100,18 @@ typedef struct {
   int si_signo;
   int si_errno;
   int si_code;
+#if defined(__DAVECC_DAVEOS__)
+  /* waitid(2) fields (DaveOS subset; matches kernel DaveosSiginfo). */
+  int si_pid;
+  int si_uid;
+  int si_status;
+#endif
 } siginfo_t;
+
+#if defined(__DAVECC_DAVEOS__)
+#define CLD_EXITED 1
+#define CLD_KILLED 2
+#endif
 
 struct sigaction {
   union {
