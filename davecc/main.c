@@ -1535,8 +1535,23 @@ static int ParseArg(int i, int argc, char** argv,
     // Option.
     String* option = NewString(argv[i]);
     if (StringStartsWith(option, "-Wl,")) {
-      // Arg passed through to linker.
-      VectorAppend(linker_args, argv[i]+4);
+      /* GCC-compatible: -Wl,-rpath,/lib → linker args "-rpath" "/lib". */
+      const char* p = argv[i] + 4;
+      while (*p != '\0') {
+        const char* start = p;
+        while (*p != '\0' && *p != ',') {
+          p++;
+        }
+        size_t n = (size_t)(p - start);
+        String* piece = NewString("");
+        for (size_t k = 0; k < n; k++) {
+          StringAppendChar(piece, start[k]);
+        }
+        VectorAppend(linker_args, piece->value);
+        if (*p == ',') {
+          p++;
+        }
+      }
     } else if (StringEqual(option, "-c") || StringEqual(option, "-S") ||
                StringEqual(option, "-fsyntax-only")) {
       // Compile only flag.
