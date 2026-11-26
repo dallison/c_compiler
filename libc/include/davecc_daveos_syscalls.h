@@ -50,6 +50,17 @@
 #define DAVEOS_SYS_SETGID 240
 #define DAVEOS_SYS_SETEGID 241
 #define DAVEOS_SYS_SETGROUPS 242
+#define DAVEOS_SYS_INIT_MODULE 243
+#define DAVEOS_SYS_DELETE_MODULE 244
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+int init_module(const char* path);
+int delete_module(const char* name);
+#ifdef __cplusplus
+}
+#endif
 
 /* TTY ioctls (Linux aarch64 values). */
 #define DAVEOS_TIOCSCTTY 0x540E

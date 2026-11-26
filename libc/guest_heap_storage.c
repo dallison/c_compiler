@@ -10,7 +10,17 @@
 
 #include <syscall.h>
 
-#if defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
+#if defined(__DAVECC_DAVEOS__)
+
+/*
+ * DaveOS userland grows the heap via sbrk (see malloc.c). Keep weak zero-size
+ * symbols so the kernel's strong 16 MiB arena in heap.cc still overrides when
+ * the same malloc.o is linked into the kernel image.
+ */
+__attribute__((weak)) unsigned long long __davecc_guest_heap_storage[1];
+__attribute__((weak)) const unsigned long __davecc_guest_heap_storage_size = 0;
+
+#elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
 
 // Weak so the DaveOS kernel can provide a larger arena (heap.cc).  Lives in
 // the same DSO/image as malloc so PIC GOT slots stay RELATIVE to a mapped

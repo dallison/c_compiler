@@ -349,6 +349,22 @@ int execlp(const char* file, ...) {
   return execvp(file, argv);
 }
 
+int init_module(const char* path) {
+  if (path == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_INIT_MODULE, path));
+}
+
+int delete_module(const char* name) {
+  if (name == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_DELETE_MODULE, name));
+}
+
 int sendfd(int pipe_fd, int fd) {
   return Fail(syscall(DAVEOS_SYS_SENDFD, pipe_fd, fd));
 }

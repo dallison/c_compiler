@@ -121,7 +121,8 @@ void* Malloc(size_t size) {
 
 #include <davecc/malloc_internal.h>
 
-#if !defined(__DAVECC__) && !defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_DAVEOS__) || \
+    (!defined(__DAVECC__) && !defined(__DAVECC_NATIVE_LINUX__))
 #include <errno.h>
 #include <sys/mman.h>
 #endif
@@ -485,10 +486,15 @@ static size_t RegionSizeForRequest(size_t minimum_block_size) {
   if (configured < minimum) {
     configured = minimum;
   }
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
+  /* Page-align and add slack so TLSF search roundup still finds the block. */
   if (!AlignUpChecked(configured, DAVE_HEAP_PAGE_SIZE, &configured)) {
     return 0;
   }
+  if (configured > (size_t)-1 - DAVE_HEAP_PAGE_SIZE) {
+    return 0;
+  }
+  configured += DAVE_HEAP_PAGE_SIZE;
 #else
   if (!AlignUpChecked(configured, DAVE_HEAP_ALIGNMENT, &configured)) {
     return 0;
@@ -513,6 +519,25 @@ static int ExpandHeap(size_t minimum_block_size) {
     return 0;
   }
   return 1;
+#elif defined(__DAVECC_DAVEOS__)
+  /*
+   * Userland: contiguous growth via brk/sbrk. Kernel links a fixed BSS arena
+   * (__davecc_guest_heap_storage_size != 0) and must not call sbrk here.
+   */
+  extern const unsigned long __davecc_guest_heap_storage_size;
+  if (__davecc_guest_heap_storage_size != 0) {
+    (void)minimum_block_size;
+    return 0;
+  }
+  size_t size = RegionSizeForRequest(minimum_block_size);
+  if (size == 0) {
+    return 0;
+  }
+  void* mapping = sbrk((long)size);
+  if (mapping == (void*)(intptr_t)-1) {
+    return 0;
+  }
+  return RegisterRegion(mapping, size);
 #elif !defined(__DAVECC__)
   size_t size = RegionSizeForRequest(minimum_block_size);
   if (size == 0) {
@@ -540,8 +565,17 @@ static int InitializeHeap(void) {
   return ExpandHeap(DAVE_MIN_BLOCK_SIZE);
 #elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
   extern const unsigned long __davecc_guest_heap_storage_size;
-  return RegisterRegion(__davecc_guest_heap_storage,
-                        (size_t)__davecc_guest_heap_storage_size);
+  extern unsigned long long __davecc_guest_heap_storage[];
+  /* Kernel supplies a fixed BSS arena; DaveOS userland uses size 0 + sbrk. */
+  if (__davecc_guest_heap_storage_size != 0) {
+    return RegisterRegion(__davecc_guest_heap_storage,
+                          (size_t)__davecc_guest_heap_storage_size);
+  }
+#if defined(__DAVECC_DAVEOS__)
+  return ExpandHeap(DAVE_MIN_BLOCK_SIZE);
+#else
+  return 0;
+#endif
 #elif defined(__wasm32__)
   // Linear memory says nothing about its own shape, so the linker marks out
   // what is left above the shadow stack and the heap is exactly that.
@@ -607,17 +641,26 @@ static DaveBlock* AllocateFromFreeBlock(DaveBlock* block, size_t size,
 }
 
 static DaveBlock* DirectMapBlock(size_t block_size) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
   size_t mapping_size;
   if (!AlignUpChecked(block_size, DAVE_HEAP_PAGE_SIZE, &mapping_size)) {
     return NULL;
   }
+#if defined(__DAVECC_NATIVE_LINUX__)
   long mapping =
       syscall(DAVE_HEAP_MMAP, 0, mapping_size, 3, 0x22, -1, 0);
   if (mapping == -1) {
     return NULL;
   }
   DaveBlock* block = (DaveBlock*)(uintptr_t)mapping;
+#else
+  void* mapping = mmap(NULL, mapping_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (mapping == MAP_FAILED) {
+    return NULL;
+  }
+  DaveBlock* block = (DaveBlock*)mapping;
+#endif
   SetBlock(block, mapping_size, DAVE_BLOCK_DIRECT);
   block->previous_size = 0;
   InitializeUserMarker(block);
@@ -644,6 +687,16 @@ static void* AllocateGeneral(size_t request) {
   if (request >= DAVE_HEAP_LARGE_THRESHOLD) {
     DaveBlock* direct = DirectMapBlock(block_size);
     return direct == NULL ? NULL : BlockUserPointer(direct);
+  }
+#elif defined(__DAVECC_DAVEOS__)
+  /* Kernel keeps a fixed BSS arena; only userland may direct-map via mmap. */
+  {
+    extern const unsigned long __davecc_guest_heap_storage_size;
+    if (__davecc_guest_heap_storage_size == 0 &&
+        request >= DAVE_HEAP_LARGE_THRESHOLD) {
+      DaveBlock* direct = DirectMapBlock(block_size);
+      return direct == NULL ? NULL : BlockUserPointer(direct);
+    }
   }
 #endif
 
@@ -701,12 +754,16 @@ void Free(void* pointer) {
   size_t size = BlockSize(block);
 
   if (BlockIsDirect(block)) {
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_NATIVE_LINUX__) || defined(__DAVECC_DAVEOS__)
     heap.stats.allocated_bytes -= size;
     heap.stats.mapped_bytes -= size;
     heap.stats.direct_mapped_bytes -= size;
     heap.stats.free_count++;
+#if defined(__DAVECC_NATIVE_LINUX__)
     syscall(SYS_munmap, block, size, 0, 0, 0, 0);
+#else
+    munmap(block, size);
+#endif
 #endif
     return;
   }
