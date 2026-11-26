@@ -30,6 +30,12 @@
 #define DAVEOS_SYS_MOUNT 220
 #define DAVEOS_SYS_UMOUNT 221
 
+/* mount(2) flags (Linux values). */
+#define DAVEOS_MS_BIND 4096
+#ifndef MS_BIND
+#define MS_BIND DAVEOS_MS_BIND
+#endif
+
 /* Kernel select bitmap — fds 0..63. */
 #define DAVEOS_FD_SETSIZE 64
 
