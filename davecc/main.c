@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1199,11 +1200,29 @@ static bool AppendJoinedLinkerArg(Vector* native_args, Vector* owned,
   return true;
 }
 
+// Prefer TMPDIR (Bazel sandbox, CI) so temps die with the action; else /tmp.
+static bool MakeTempPathTemplate(char* out, size_t out_size, const char* prefix) {
+  const char* tmpdir = getenv("TMPDIR");
+  if (tmpdir == NULL || tmpdir[0] == '\0') {
+    tmpdir = "/tmp";
+  }
+  size_t len = strlen(tmpdir);
+  while (len > 1 && tmpdir[len - 1] == '/') {
+    len--;
+  }
+  int n = snprintf(out, out_size, "%.*s/%sXXXXXX", (int)len, tmpdir, prefix);
+  return n > 0 && (size_t)n < out_size;
+}
+
 // GNU ld does not invent daveld's __eh_frame_{start,end} sentinels. A
 // supplementary script defines them from the output .eh_frame so libc's
 // unwinder can find CIE/FDE records after -fuse-ld / Linux -fnative.
 static bool WriteLinuxHostBoundsScript(char* path, size_t path_size) {
-  char template[] = "/tmp/davecc-host-bounds-XXXXXX";
+  char template[PATH_MAX];
+  if (!MakeTempPathTemplate(template, sizeof(template), "davecc-host-bounds-")) {
+    fprintf(stderr, "Cannot form host linker script path\n");
+    return false;
+  }
   int fd = mkstemp(template);
   if (fd < 0) {
     perror("Cannot create host linker script");
@@ -1235,37 +1254,59 @@ static bool WriteLinuxHostBoundsScript(char* path, size_t path_size) {
 
 // Objects compiled only to be linked go to private temporary files.  Writing
 // them beside the source would let two concurrent builds of the same file
-// (say -O0 and -O2) link each other's code.  Each object is "<name>.o" next to
-// the reserved mkstemp file "<name>"; both are removed at exit.
+// (say -O0 and -O2) link each other's code.  mkstemp reserves a unique path
+// used as the .o itself; removed at exit / on SIGINT/SIGTERM.
 static Vector g_temp_object_files;
+static bool g_temp_object_cleanup_installed = false;
 
 static void RemoveTempObjectFiles(void) {
   for (size_t i = 0; i < g_temp_object_files.length; i++) {
     String* path = g_temp_object_files.value.p[i];
-    unlink(path->value);
-    StringAppend(path, ".o");
     unlink(path->value);
     StringDelete(path);
   }
   VectorDestruct(&g_temp_object_files);
 }
 
+static void TempObjectSignalHandler(int sig) {
+  /* unlink only — keep the handler async-signal-safe enough to re-raise. */
+  for (size_t i = 0; i < g_temp_object_files.length; i++) {
+    String* path = g_temp_object_files.value.p[i];
+    if (path != NULL && path->value != NULL) {
+      unlink(path->value);
+    }
+  }
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
+
+static void InstallTempObjectCleanup(void) {
+  if (g_temp_object_cleanup_installed) {
+    return;
+  }
+  g_temp_object_cleanup_installed = true;
+  VectorInit(&g_temp_object_files);
+  atexit(RemoveTempObjectFiles);
+  signal(SIGINT, TempObjectSignalHandler);
+  signal(SIGTERM, TempObjectSignalHandler);
+  signal(SIGHUP, TempObjectSignalHandler);
+}
+
 static String* NewTempObjectPath(void) {
-  char template[] = "/tmp/davecc-obj-XXXXXX";
+  char template[PATH_MAX];
+  if (!MakeTempPathTemplate(template, sizeof(template), "davecc-obj-")) {
+    fprintf(stderr, "Cannot form temporary object path\n");
+    return NULL;
+  }
   int fd = mkstemp(template);
   if (fd < 0) {
     perror("Cannot create temporary object file");
     return NULL;
   }
   close(fd);
-  if (g_temp_object_files.length == 0) {
-    VectorInit(&g_temp_object_files);
-    atexit(RemoveTempObjectFiles);
-  }
+  InstallTempObjectCleanup();
   VectorAppend(&g_temp_object_files, NewString(template));
-  String* object = NewString(template);
-  StringAppend(object, ".o");
-  return object;
+  return NewString(template);
 }
 
 static String* NativeLink(const char* spec, int argc, char** argv,
