@@ -2612,24 +2612,25 @@ static void InsertSegments(Linker* linker, ELFWriterFile* elf) {
 }
 
 static bool SetEntryAddress(Linker* linker, ELFWriterFile* elf) {
+  /* Prefer -e / ENTRY() even for DSOs (e.g. ld.so / PT_INTERP images). */
+  LinkerSymbol* entry = LinkerFindSymbol(&linker->global_symbol_table,
+                                        linker->entry_symbol.value);
+  if (entry != NULL) {
+    elf->header.entry = entry->address;
+    return true;
+  }
   if (linker->building_dso) {
-    // Set entry to address of .text section.
+    /* No named entry: use the start of .text (historical DSO default). */
     ELFWriterSection* text = ELFWriterFindSection(elf, ".text");
     if (text == NULL) {
       return false;
     }
     elf->header.entry = text->address;
-  } else {
-    // Find the entry point for the program.
-    LinkerSymbol* entry = LinkerFindSymbol(&linker->global_symbol_table,
-                                          linker->entry_symbol.value);
-    if (entry == NULL) {
-      LinkerError(NULL, "Cannot find entry symbol '%s'", linker->entry_symbol.value);
-      return false;
-    }
-    elf->header.entry = entry->address;
+    return true;
   }
-  return true;
+  LinkerError(NULL, "Cannot find entry symbol '%s'",
+              linker->entry_symbol.value);
+  return false;
 }
 
 static void BuildRelocatableOutputSection(Linker* linker, ELFWriterFile* elf,

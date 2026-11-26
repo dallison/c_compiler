@@ -572,10 +572,36 @@ int sigaltstack(const stack_t* stack, stack_t* old_stack) {
 
 int sched_getcpu(void) { return 0; }
 
+#if defined(__DAVECC_DAVEOS__)
+unsigned long getauxval(unsigned long type) {
+  /* Auxv follows the environ NULL terminator on the initial stack. */
+  extern char** environ;
+  if (environ == NULL) {
+    return 0;
+  }
+  char** e = environ;
+  while (*e != NULL) {
+    e++;
+  }
+  e++;
+  for (;;) {
+    unsigned long key = (unsigned long)(uintptr_t)e[0];
+    unsigned long val = (unsigned long)(uintptr_t)e[1];
+    if (key == 0) { /* AT_NULL */
+      return 0;
+    }
+    if (key == type) {
+      return val;
+    }
+    e += 2;
+  }
+}
+#else
 unsigned long getauxval(unsigned long type) {
   (void)type;
   return 0;
 }
+#endif
 
 int getpagesize(void) { return 4096; }
 

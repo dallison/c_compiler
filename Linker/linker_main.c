@@ -120,6 +120,17 @@ String* Link(int argc, char** argv) {
         StringSet(&linker.entry_symbol, argv[i]);
         command_line_entry = argv[i];
         option_ok = true;
+      } else if (strcmp(argv[i], "--dynamic-linker") == 0) {
+        i++;
+        if (i >= argc) {
+          fprintf(stderr, "--dynamic-linker needs a path\n");
+          break;
+        }
+        StringSet(&linker.interpreter, argv[i]);
+        option_ok = true;
+      } else if (strncmp(argv[i], "--dynamic-linker=", 17) == 0) {
+        StringSet(&linker.interpreter, argv[i] + 17);
+        option_ok = true;
       } else if (strcmp(argv[i], "-T") == 0 ||
                  strcmp(argv[i], "--script") == 0) {
         i++;

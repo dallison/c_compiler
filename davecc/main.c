@@ -825,11 +825,32 @@ static String* NativeDarwinLink(int argc, char** argv) {
   return result;
 }
 
+static bool LinkerArgsHaveInterpreter(Vector* linker_args) {
+  for (size_t i = 0; i < linker_args->length; i++) {
+    const char* arg = linker_args->value.p[i];
+    if (StartsWithCString(arg, "-I") && arg[2] != '\0') {
+      return true;
+    }
+    if (strcmp(arg, "--dynamic-linker") == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/* DaveOS dynamic executables use a userland PT_INTERP (Linux-style). */
+static void EnsureDaveOsInterpreter(Vector* linker_args) {
+  if (LinkerArgsHaveInterpreter(linker_args) ||
+      VectorContainsCString(linker_args, "-static")) {
+    return;
+  }
+  VectorAppend(linker_args, (void*)"-I/lib/ld-daveos.so");
+}
+
 static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
                               Vector* compiler_options,
                               DriverResources* resources) {
-  if (OptionBoolValue(kOptionNoStandardLibraries, compiler_options, false) ||
-      VectorContainsCString(linker_args, "-shared") ||
+  if (VectorContainsCString(linker_args, "-shared") ||
       VectorContainsCString(linker_args, "-r") ||
       VectorContainsCString(linker_args, "--relocatable")) {
     return;
@@ -837,6 +858,15 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
 
   const TargetRuntime* runtime = FindDriverRuntime(compiler_options);
   if (runtime == NULL) {
+    return;
+  }
+
+  /* PT_INTERP even with -nostdlib (e.g. static libc + DT_NEEDED .so). */
+  if (runtime->os == kTargetOSDaveOS) {
+    EnsureDaveOsInterpreter(linker_args);
+  }
+
+  if (OptionBoolValue(kOptionNoStandardLibraries, compiler_options, false)) {
     return;
   }
 
