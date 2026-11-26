@@ -1248,6 +1248,10 @@ static ASTNode* BuildCXXArrayNew(
                    NewAssign(NewIdentifierASTNode(array_count, location),
                              array_size, array_count->type, location),
                    location));
+  /* Cookie write + element init run only when allocation succeeded.
+   * nothrow (and a throwing new that returns null) must not store through
+   * a null cookie pointer. */
+  Vector* allocated_statements = statements;
   if (standard_placement) {
     VectorAppend(statements,
                  NewExpressionStatement(
@@ -1257,12 +1261,17 @@ static ASTNode* BuildCXXArrayNew(
     TypeRecordDelete(size_ptr_type);
   } else {
     VectorAppend(statements,
+                 NewVariableDeclarationASTNode(header, NULL, location));
+    VectorAppend(statements,
+                 NewVariableDeclarationASTNode(object_ptr, NULL, location));
+    VectorAppend(statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(header, location),
                                NewTypedCast(size_ptr_type, result, location),
                                header->type, location),
                      location));
-    VectorAppend(statements,
+    allocated_statements = NewVector();
+    VectorAppend(allocated_statements,
                  NewExpressionStatement(
                      NewAssign(NewUnaryASTNode(AST_OP(contents), size_type,
                                               location,
@@ -1271,7 +1280,7 @@ static ASTNode* BuildCXXArrayNew(
                                NewIdentifierASTNode(array_count, location),
                                size_type, location),
                      location));
-    VectorAppend(statements,
+    VectorAppend(allocated_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(object_ptr, location),
                                NewTypedCast(
@@ -1295,7 +1304,7 @@ static ASTNode* BuildCXXArrayNew(
     base_ptr =
         SyntaxNewTemporary(syntax, NewPointerTo(kQualPlain, base_type));
     base_count = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
-    VectorAppend(statements,
+    VectorAppend(allocated_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(base_ptr, location),
                                NewTypedCast(base_ptr->type,
@@ -1304,7 +1313,7 @@ static ASTNode* BuildCXXArrayNew(
                                             location),
                                base_ptr->type, location),
                      location));
-    VectorAppend(statements,
+    VectorAppend(allocated_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(base_count, location),
                                NewBinaryASTNode(
@@ -1337,14 +1346,14 @@ static ASTNode* BuildCXXArrayNew(
                            FindCXXDestructorForType(base_type) != NULL);
   bool free_on_throw = deallocate_on_throw && init_may_throw;
   Symbol* constructed = NULL;
-  Vector* init_statements = statements;
+  Vector* init_statements = allocated_statements;
   if (destroy_on_throw || free_on_throw) {
     init_statements = NewVector();
     VectorAppend(init_statements, NULL);  // The cleanup, built below.
   }
   if (destroy_on_throw) {
     constructed = SyntaxNewTemporary(syntax, NewSizeTypeRecord());
-    VectorAppend(statements,
+    VectorAppend(allocated_statements,
                  NewExpressionStatement(
                      NewAssign(NewIdentifierASTNode(constructed, location),
                                NewIntLiteral(0, location),
@@ -1389,7 +1398,7 @@ static ASTNode* BuildCXXArrayNew(
                      syntax, base_type, base_ptr, base_count,
                      first_unlisted, constructed, location));
   }
-  if (init_statements != statements) {
+  if (init_statements != allocated_statements) {
     Vector* cleanup_statements = NewVector();
     if (destroy_on_throw) {
       VectorAppend(cleanup_statements,
@@ -1413,8 +1422,29 @@ static ASTNode* BuildCXXArrayNew(
         NewCompoundStatementASTNode(cleanup_statements, location);
     cleanup->flags |= kASTEHCleanupOnly;
     init_statements->value.p[0] = cleanup;
-    VectorAppend(statements,
+    VectorAppend(allocated_statements,
                  NewCompoundStatementASTNode(init_statements, location));
+  }
+  if (allocated_statements != statements) {
+    ASTNode* nonnull = NewBinaryASTNode(
+        AST_OP(noteq), NULL, location,
+        NewIdentifierASTNode(header, location), NewIntLiteral(0, location));
+    Vector* else_statements = NewVector();
+    VectorAppend(else_statements,
+                 NewExpressionStatement(
+                     NewAssign(NewIdentifierASTNode(object_ptr, location),
+                               NewTypedCast(result_type,
+                                            NewIntLiteral(0, location),
+                                            location),
+                               object_ptr->type, location),
+                     location));
+    VectorAppend(statements,
+                 NewIfStatementASTNode(
+                     nonnull,
+                     NewCompoundStatementASTNode(allocated_statements,
+                                                 location),
+                     NewCompoundStatementASTNode(else_statements, location),
+                     false, location));
   }
   VectorAppend(statements,
                NewExpressionStatement(NewIdentifierASTNode(object_ptr,
@@ -1494,6 +1524,7 @@ static ASTNode* BuildCXXObjectNew(
       ctor_actuals != NULL || aggregate_initializer != NULL ||
       allocated_type_dependent || TypeIsStructOrUnion(allocated_type) ||
       (scalar_initializer != NULL && scalar_initializer->op != AST_OP(number));
+  Vector* init_body = NewVector();
   if (deallocate_on_throw && init_may_throw) {
     // Free the storage if the initialization throws.
     Vector* init_statements = NewVector();
@@ -1501,11 +1532,20 @@ static ASTNode* BuildCXXObjectNew(
                  NewCXXNewDeallocationCleanup(temp, allocated_type,
                                               global_scope, location));
     VectorAppend(init_statements, NewExpressionStatement(init, location));
-    VectorAppend(statements,
+    VectorAppend(init_body,
                  NewCompoundStatementASTNode(init_statements, location));
   } else {
-    VectorAppend(statements, NewExpressionStatement(init, location));
+    VectorAppend(init_body, NewExpressionStatement(init, location));
   }
+  /* nothrow (and a throwing new that returns null) must not initialize
+   * through a null allocation pointer. */
+  ASTNode* nonnull = NewBinaryASTNode(
+      AST_OP(noteq), NULL, location, NewIdentifierASTNode(temp, location),
+      NewIntLiteral(0, location));
+  VectorAppend(statements,
+               NewIfStatementASTNode(
+                   nonnull, NewCompoundStatementASTNode(init_body, location),
+                   NULL, false, location));
   VectorAppend(statements,
                NewExpressionStatement(NewIdentifierASTNode(temp, location),
                                       location));

@@ -20,12 +20,14 @@ __attribute__((weak)) void operator delete[](void* ptr, size_t) noexcept {
 
 __attribute__((weak)) void* operator new(size_t size,
                                          const std::nothrow_t&) noexcept {
-  return ::operator new(size);
+  // Must not call the throwing operator new: that may run a new_handler or
+  // throw.  Nothrow forms return null on failure.
+  return malloc(size == 0 ? 1 : size);
 }
 
 __attribute__((weak)) void* operator new[](size_t size,
                                            const std::nothrow_t&) noexcept {
-  return ::operator new[](size);
+  return malloc(size == 0 ? 1 : size);
 }
 
 __attribute__((weak)) void operator delete(void* ptr,

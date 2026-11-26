@@ -285,18 +285,13 @@ void EmitStaticVariable(InitializedStaticVariable* var, FILE* fp) {
 
 void EmitBSSVariable(UninitializedStaticVariable* var, FILE* fp) {
   char buf[256];
+  // Always use .comm (including weak).  Emitting weak uninit objects into
+  // .data with .space used to materialize megabytes of zeros in the object
+  // file and blocked COMMON size-merge with a larger strong definition
+  // (DaveOS kernel heap overriding malloc.c's weak arena).
   fprintf(fp, "\t.type   %s,@object\n", VarName2(var, buf, sizeof(buf)));
   EmitBinding(fp, VarName2(var, buf, sizeof(buf)), var->is_global,
               var->is_weak);
-  if (var->is_weak) {
-    fprintf(fp, "\t.size   %s,%zd\n", VarName2(var, buf, sizeof(buf)),
-            var->size);
-    EmitP2Align((int)var->alignment, fp);
-    fprintf(fp, "%s:\n", VarName2(var, buf, sizeof(buf)));
-    fprintf(fp, "\t.space  %zd\n", var->size);
-    fprintf(fp, "\n");
-    return;
-  }
   fprintf(fp, "\t.comm   %s,%zd,%zd\n", VarName2(var, buf, sizeof(buf)), var->size,
           var->alignment);
   fprintf(fp, "\n");
@@ -732,19 +727,12 @@ void EmitBSSVariableToModule(UninitializedStaticVariable* var,
                              AsmModule* module) {
   char buf[256];
   const char* name = VarName2(var, buf, sizeof(buf));
-  if (!var->is_weak) {
-    AsmModuleSymbol(module, name, SYM_TYPE(common),
-                    var->is_global ? SYM_BIND(global) : SYM_BIND(local),
-                    (int32_t)var->size,
-                    (int32_t)var->alignment, true, true, true);
-    return;
-  }
-  AsmModuleSymbol(module, name, SYM_TYPE(object), SYM_BIND(weak),
-                  (int32_t)var->size, (int32_t)var->alignment, false, true,
-                  false);
-  AsmModuleAlign(module, (int)var->alignment);
-  AsmModuleLabel(module, name);
-  AsmModuleFill(module, (int64_t)var->size, 0);
+  // Weak and strong uninit objects both go through COMMON so a larger
+  // strong definition can merge size without leaving a .data zero image.
+  AsmModuleSymbol(module, name, SYM_TYPE(common),
+                  ModuleBinding(var->is_global, var->is_weak),
+                  (int32_t)var->size, (int32_t)var->alignment, true, true,
+                  true);
 }
 
 void EmitLiteralToModule(Literal* literal, AsmModule* module) {

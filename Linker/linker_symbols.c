@@ -254,9 +254,14 @@ static void RedefineSymbol(LinkerSymbol* sym,
       if (sym->header->shndx == SHN_COM && elf_sym->shndx == SHN_COM) {
         // Both old and new are common symbols.  This is fine.
         // Common symbols are combined but the size is the biggest of
-        // all versions of it.
+        // all versions of it.  Prefer a strong binding when one side
+        // is weak so a larger kernel/override arena stays global.
         if (elf_sym->size > sym->size) {
           sym->size = elf_sym->size;
+        }
+        if (LinkerSymbolIsWeak(sym) && !new_is_weak) {
+          sym->header = elf_sym;
+          sym->file = file;
         }
         return;
       }

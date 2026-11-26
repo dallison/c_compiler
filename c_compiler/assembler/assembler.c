@@ -986,7 +986,10 @@ static void HandleDirective_comm(Assembler* assembler) {
       sym->defined_pass = assembler->object.pass;
       sym->section = SHN_COM;
       sym->value = 0;
-      sym->binding = SYM_BIND(global);
+      // Preserve a preceding `.weak`; do not promote weak commons to global.
+      if (sym->binding != SYM_BIND(weak)) {
+        sym->binding = SYM_BIND(global);
+      }
     } else {
       // No symbol, add it as a global in the COM section..
       sym = NewAssemblerSymbol(name.value, SHN_COM,

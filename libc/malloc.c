@@ -191,7 +191,8 @@ typedef struct DaveHeap {
 } DaveHeap;
 
 static DaveHeap heap;
-int __initial_heap_size;
+/* 0 ⇒ DAVE_HEAP_DEFAULT_SIZE. Strong defs (e.g. DaveOS kernel) override. */
+__attribute__((weak)) int __initial_heap_size;
 
 #if defined(__XTENSA__)
 // ESP32 DRAM is 320KB.  The storage itself is defined in
@@ -201,12 +202,11 @@ extern unsigned long long
     __davecc_guest_heap_storage[((256 * 1024) + 15) /
                                 sizeof(unsigned long long)];
 #elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
-// Lives in the same image as malloc so PIC GOT slots stay RELATIVE to a
-// mapped .bss range.  CRT used to define this instead; a DSO cannot resolve
-// that EXE symbol (no GLOB_DAT), and the loader only heap-reserves the EXE.
-unsigned long long
-    __davecc_guest_heap_storage[((1024 * 1024) + 15) /
-                                sizeof(unsigned long long)];
+// Defined weakly in guest_heap_storage.c (separate TU) so a strong override
+// of the size/arena (DaveOS kernel/heap.cc) wins for InitializeHeap.  A
+// same-TU weak def would bind locally and ignore the override.
+extern unsigned long long __davecc_guest_heap_storage[];
+extern const unsigned long __davecc_guest_heap_storage_size;
 #endif
 
 void Free(void* pointer);
@@ -539,8 +539,9 @@ static int InitializeHeap(void) {
 #if defined(__DAVECC_NATIVE_LINUX__)
   return ExpandHeap(DAVE_MIN_BLOCK_SIZE);
 #elif defined(__DAVECC_HAS_HEAP_LOCK__) || defined(__p_code__)
+  extern const unsigned long __davecc_guest_heap_storage_size;
   return RegisterRegion(__davecc_guest_heap_storage,
-                        sizeof(__davecc_guest_heap_storage));
+                        (size_t)__davecc_guest_heap_storage_size);
 #elif defined(__wasm32__)
   // Linear memory says nothing about its own shape, so the linker marks out
   // what is left above the shadow stack and the heap is exactly that.

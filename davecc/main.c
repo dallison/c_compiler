@@ -347,10 +347,10 @@ static const TargetRuntime target_runtimes[] = {
      "riscv32_linux_start.o", "//:riscv32_linux_start", NULL, false, true},
     {"aarch64", kTargetOSDarwin, "libcaarch64_darwin.a",
      "//:libc_aarch64_darwin", NULL, NULL, NULL, true, true},
-    // DaveOS: guest libc archive; svc is handled by the DaveOS kernel.
-    // Not static_only: allow DT_NEEDED against shared libs (kernel is ld.so).
+    // DaveOS: guest libc; svc is handled by the DaveOS kernel.
+    // Not static_only: allow DT_NEEDED / -dynamic (kernel is ld.so).
     {"aarch64", kTargetOSDaveOS, "libcdaveos.a", "//:libc_daveos", NULL, NULL,
-     NULL, true, false},
+     "//:libc_daveos_shared", true, false},
 };
 
 static const struct {
@@ -871,7 +871,7 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
       fprintf(stderr, "-dynamic and -static cannot be used together\n");
       exit(1);
     }
-    if (runtime->os == kTargetOSNone) {
+    if (runtime->os == kTargetOSNone || runtime->os == kTargetOSDaveOS) {
       if (runtime->shared_bazel_target == NULL || runtime->static_only) {
         fprintf(stderr, "-dynamic is not supported on this target\n");
         exit(1);
@@ -892,15 +892,16 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
         exit(1);
       }
       if (!VectorContainsCString(linker_args, "-e")) {
-        // Interpreter-profile images enter at main.  RISC-V's static CRT
-        // _start wrapper is not part of the dynamic CRT, and a second
-        // _start from a leftover DSO object would fail the link.
+        // Interpreter images enter at main; DaveOS user programs use _start
+        // (crt0). RISC-V's static CRT _start is not part of the dynamic CRT.
         VectorAppend(linker_args, "-e");
-        VectorAppend(linker_args, "main");
+        VectorAppend(linker_args,
+                     runtime->os == kTargetOSDaveOS ? "_start" : "main");
       }
       if (!VectorContainsCString(linker_args, "-rpath")) {
         VectorAppend(linker_args, "-rpath");
-        VectorAppend(linker_args, "$ORIGIN");
+        VectorAppend(linker_args,
+                     runtime->os == kTargetOSDaveOS ? "/lib" : "$ORIGIN");
       }
       VectorAppend(linker_args, "-whole-archive");
       AddRuntimeFileFromDirectory(linker_args, owned_paths,

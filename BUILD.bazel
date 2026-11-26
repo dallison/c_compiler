@@ -426,6 +426,7 @@ LIBC_SRCS = [
     "libc/wchar.c",
     "libc/wctype.c",
     "libc/malloc.c",
+    "libc/guest_heap_storage.c",
     "libc/memccpy.c",
     "libc/memchr.c",
     "libc/memcmp.c",
@@ -2043,6 +2044,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -2248,6 +2250,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -2451,6 +2454,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -2656,6 +2660,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -2863,6 +2868,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -3065,6 +3071,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -3617,6 +3624,7 @@ libc_srcs=(
   "libc/gets.c"
   "libc/ldexp.c"
   "libc/malloc.c"
+  "libc/guest_heap_storage.c"
   "libc/memccpy.c"
   "libc/memchr.c"
   "libc/memcmp.c"
@@ -4003,6 +4011,45 @@ guest_libc_shared(
     crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
 )
 
+# DaveOS shared libc: TLS/errno/heap stay in libcdaveos_crt.a (local-exec);
+# the DSO is PIC and resolved by the DaveOS kernel DynLoad.
+# Keep the DSO lean: davefs free-block bitmap is one 512-byte block
+# (~2 MiB of file data), so omit C++ and bulky optional libc pieces.
+DAVEOS_LIBC_SHARED_EXCLUDE = INTERPRETER_LIBC_SHARED_EXCLUDE_CFI + [
+    "libc/complex_*.c",
+    "libc/regex.c",
+    "libc/scanf.c",
+    "libc/stacktrace.c",
+    "libc/long_double.c",
+    "libc/math_extra.c",
+    "libc/wchar.c",
+    "libc/wctype.c",
+    "libc/uchar.c",
+    "libc/locale_c.c",
+    "libc/inttypes.c",
+    "libc/memstream.c",
+    "libc/tmpfile.c",
+]
+
+guest_libc_shared(
+    name = "libc_daveos_shared",
+    target = "aarch64-unknown-daveos-davecc",
+    output = "libc/libcdaveos.so",
+    cflags = ["-O2"],
+    runtime_srcs = [
+        "aarch64 support/cxx_guard.s",
+        "aarch64 support/eh_transfer.s",
+        "aarch64 support/longjmp.s",
+        "aarch64 support/setjmp.s",
+        "aarch64 support/syscall.s",
+    ],
+    libc_srcs = LIBC_SRCS,
+    libc_cxx_srcs = LIBC_CXX_SRCS,
+    exclude = DAVEOS_LIBC_SHARED_EXCLUDE,
+    crt_srcs = INTERPRETER_DYNAMIC_CRT_SRCS,
+    no_cxx = True,
+)
+
 filegroup(
     name = "libc_shared",
     srcs = [
@@ -4010,6 +4057,8 @@ filegroup(
         ":libc_aarch64_shared_crt",
         ":libc_arm_shared",
         ":libc_arm_shared_crt",
+        ":libc_daveos_shared",
+        ":libc_daveos_shared_crt",
         ":libc_pcode_shared",
         ":libc_pcode_shared_crt",
         ":libc_riscv_shared",
@@ -5092,6 +5141,27 @@ sh_test(
         ":libc_riscv",
         ":libc_x86_64",
         ":riscv",
+        ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "weak_bss_common_test",
+    srcs = ["tests/weak_bss_common_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+        "x86_64",
+        "$(rootpath :libc_x86_64)",
+        "$(rootpath :x86_64)",
+        "aarch64",
+        "$(rootpath :libc_aarch64)",
+        "$(rootpath :aarch64)",
+    ],
+    data = [
+        ":aarch64",
+        ":davecc",
+        ":libc_aarch64",
+        ":libc_x86_64",
         ":x86_64",
     ],
 )

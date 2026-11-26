@@ -53,6 +53,7 @@ set(DAVECC_GUEST_LIBC_COMMON_C
   libc/gets.c
   libc/ldexp.c
   libc/malloc.c
+  libc/guest_heap_storage.c
   libc/memccpy.c
   libc/memchr.c
   libc/memcmp.c

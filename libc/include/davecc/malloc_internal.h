@@ -3,6 +3,10 @@
 
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct DaveHeapStats {
   size_t mapped_bytes;
   size_t direct_mapped_bytes;
@@ -19,5 +23,9 @@ typedef struct DaveHeapStats {
 void __davecc_heap_get_stats(DaveHeapStats* stats);
 int __davecc_heap_check(void);
 size_t __davecc_malloc_cache_class(void* pointer);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
