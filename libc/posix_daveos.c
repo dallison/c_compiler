@@ -14,6 +14,7 @@
 #include <string.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/select.h>
@@ -64,6 +65,10 @@ static sigset_t DaveToSigset(unsigned mask) {
 
 pid_t fork(void) {
   return (pid_t)FailLong(syscall(DAVEOS_SYS_FORK));
+}
+
+pid_t setsid(void) {
+  return (pid_t)FailLong(syscall(DAVEOS_SYS_SETSID));
 }
 
 pid_t waitpid(pid_t pid, int* status, int options) {

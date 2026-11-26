@@ -1254,14 +1254,17 @@ static bool WriteLinuxHostBoundsScript(char* path, size_t path_size) {
 
 // Objects compiled only to be linked go to private temporary files.  Writing
 // them beside the source would let two concurrent builds of the same file
-// (say -O0 and -O2) link each other's code.  mkstemp reserves a unique path
-// used as the .o itself; removed at exit / on SIGINT/SIGTERM.
+// (say -O0 and -O2) link each other's code.  mkstemp reserves "<name>"; the
+// object is "<name>.o" (daveld keys off the .o suffix). Both are removed at
+// exit / on SIGINT/SIGTERM/SIGHUP.
 static Vector g_temp_object_files;
 static bool g_temp_object_cleanup_installed = false;
 
 static void RemoveTempObjectFiles(void) {
   for (size_t i = 0; i < g_temp_object_files.length; i++) {
     String* path = g_temp_object_files.value.p[i];
+    unlink(path->value);
+    StringAppend(path, ".o");
     unlink(path->value);
     StringDelete(path);
   }
@@ -1274,6 +1277,10 @@ static void TempObjectSignalHandler(int sig) {
     String* path = g_temp_object_files.value.p[i];
     if (path != NULL && path->value != NULL) {
       unlink(path->value);
+      char obj[PATH_MAX];
+      if (snprintf(obj, sizeof(obj), "%s.o", path->value) < (int)sizeof(obj)) {
+        unlink(obj);
+      }
     }
   }
   signal(sig, SIG_DFL);
@@ -1304,9 +1311,13 @@ static String* NewTempObjectPath(void) {
     return NULL;
   }
   close(fd);
+  /* Drop the empty reservation; unique base name still claims the .o. */
+  unlink(template);
   InstallTempObjectCleanup();
   VectorAppend(&g_temp_object_files, NewString(template));
-  return NewString(template);
+  String* object = NewString(template);
+  StringAppend(object, ".o");
+  return object;
 }
 
 static String* NativeLink(const char* spec, int argc, char** argv,

@@ -689,6 +689,7 @@ extern int    execve(const char *path, char **argv, char **envp);
 extern int    execvp(const char *file, char **argv);
 extern int    execvpw(const char *file, char **argv);
 extern pid_t    fork(void);
+extern pid_t    setsid(void);
 extern char *    getcwd(char *buf, size_t size);
 extern gid_t    getegid(void);
 extern uid_t    geteuid(void);

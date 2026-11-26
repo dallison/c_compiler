@@ -8,6 +8,7 @@ struct winsize {
   unsigned short ws_ypixel;
 };
 
+#define TIOCSCTTY 0x540E
 #define TIOCGWINSZ 0x5413
 
 #ifdef __cplusplus

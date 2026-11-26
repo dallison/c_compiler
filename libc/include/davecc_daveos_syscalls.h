@@ -38,6 +38,12 @@
 #define DAVEOS_SYS_DLCLOSE 228
 #define DAVEOS_SYS_CLOCK_GETTIME 229
 #define DAVEOS_SYS_GETTIMEOFDAY 230
+#define DAVEOS_SYS_SETSID 231
+#define DAVEOS_SYS_IOCTL 232
+
+/* TTY ioctls (Linux aarch64 values). */
+#define DAVEOS_TIOCSCTTY 0x540E
+#define DAVEOS_TIOCGWINSZ 0x5413
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096

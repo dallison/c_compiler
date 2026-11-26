@@ -26,6 +26,9 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <syscall.h>
+#if defined(__DAVECC_DAVEOS__)
+#include <davecc_daveos_syscalls.h>
+#endif
 
 static int Fail(long result) {
   if (result >= 0) return (int)result;
@@ -244,7 +247,6 @@ char* if_indextoname(unsigned int index, char* name) {
 }
 
 int ioctl(int fd, unsigned long request, ...) {
-  (void)fd;
   if (request == TIOCGWINSZ) {
     va_list ap;
     va_start(ap, request);
@@ -254,12 +256,32 @@ int ioctl(int fd, unsigned long request, ...) {
       errno = EFAULT;
       return -1;
     }
+#if defined(__DAVECC_DAVEOS__)
+    if (syscall(DAVEOS_SYS_IOCTL, fd, (long)TIOCGWINSZ, 0) < 0) {
+      errno = ENOTTY;
+      return -1;
+    }
+#else
+    (void)fd;
+#endif
     window->ws_row = 24;
     window->ws_col = 80;
     window->ws_xpixel = 0;
     window->ws_ypixel = 0;
     return 0;
   }
+#if defined(__DAVECC_DAVEOS__)
+  if (request == TIOCSCTTY) {
+    long rc = syscall(DAVEOS_SYS_IOCTL, fd, (long)TIOCSCTTY, 0);
+    if (rc < 0) {
+      errno = EPERM;
+      return -1;
+    }
+    return 0;
+  }
+#else
+  (void)fd;
+#endif
   errno = ENOTTY;
   return -1;
 }
