@@ -42,6 +42,11 @@ extern "C" {
 
 int getrlimit(int resource, struct rlimit* limit);
 int setrlimit(int resource, const struct rlimit* limit);
+#if defined(__DAVECC_DAVEOS__)
+#include <sys/types.h>
+int prlimit(pid_t pid, int resource, const struct rlimit* new_limit,
+            struct rlimit* old_limit);
+#endif
 
 #ifdef __cplusplus
 }

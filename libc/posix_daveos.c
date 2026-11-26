@@ -14,6 +14,7 @@
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/select.h>
 #include <sys/timerfd.h>
 #include <sys/time.h>
@@ -408,6 +409,174 @@ void* mmap(void* address, size_t length, int protection, int flags, int fd,
 
 int munmap(void* address, size_t length) {
   return Fail(syscall(SYS_MUNMAP, address, length));
+}
+
+int prlimit(pid_t pid, int resource, const struct rlimit* new_limit,
+            struct rlimit* old_limit) {
+  struct daveos_rlimit neu;
+  struct daveos_rlimit old;
+  if (new_limit != NULL) {
+    neu.soft = (unsigned long long)new_limit->rlim_cur;
+    neu.hard = (unsigned long long)new_limit->rlim_max;
+  }
+  long result =
+      syscall(DAVEOS_SYS_PRLIMIT64, (long)pid, resource,
+              new_limit != NULL ? &neu : (void*)0,
+              old_limit != NULL ? &old : (void*)0);
+  if (result < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (old_limit != NULL) {
+    old_limit->rlim_cur = (rlim_t)old.soft;
+    old_limit->rlim_max = (rlim_t)old.hard;
+  }
+  return 0;
+}
+
+int getrlimit(int resource, struct rlimit* limit) {
+  if (limit == NULL) {
+    errno = EFAULT;
+    return -1;
+  }
+  return prlimit(0, resource, NULL, limit);
+}
+
+int setrlimit(int resource, const struct rlimit* limit) {
+  if (limit == NULL) {
+    errno = EFAULT;
+    return -1;
+  }
+  return prlimit(0, resource, limit, NULL);
+}
+
+static long sysconf_rlimit_soft(int resource, long fallback) {
+  struct rlimit lim;
+  if (getrlimit(resource, &lim) != 0) {
+    return fallback;
+  }
+  if (lim.rlim_cur == RLIM_INFINITY) {
+    return fallback;
+  }
+  return (long)lim.rlim_cur;
+}
+
+static long sysconf_meminfo(int which) {
+  struct daveos_meminfo info;
+  if (syscall(DAVEOS_SYS_GETMEMINFO, &info) < 0) {
+    errno = EIO;
+    return -1;
+  }
+  if (which == 0) {
+    return (long)info.total_pages;
+  }
+  return (long)info.free_pages;
+}
+
+/*
+ * DaveOS sysconf. Option names return 1 when supported, -1 with errno
+ * unchanged when not. Invalid names return -1 with errno=EINVAL.
+ * PAGE_SIZE / CLK_TCK / OPEN_MAX / CHILD_MAX / PHYS_PAGES match the kernel.
+ */
+long sysconf(int name) {
+  switch (name) {
+    case _SC_ARG_MAX:
+      return 131072; /* 128 KiB; matches exec string budget in practice */
+    case _SC_CHILD_MAX:
+      return sysconf_rlimit_soft(RLIMIT_NPROC, 16);
+    case _SC_CLK_TCK:
+      return 100; /* 10 ms scheduler tick */
+    case _SC_NGROUPS_MAX:
+      return 0;
+    case _SC_OPEN_MAX:
+      return sysconf_rlimit_soft(RLIMIT_NOFILE, 64);
+    case _SC_STREAM_MAX:
+      return sysconf_rlimit_soft(RLIMIT_NOFILE, 64);
+    case _SC_TZNAME_MAX:
+      return 6;
+    case _SC_JOB_CONTROL:
+    case _SC_SAVED_IDS:
+    case _SC_REALTIME_SIGNALS:
+    case _SC_ASYNCHRONOUS_IO:
+    case _SC_PRIORITIZED_IO:
+    case _SC_SYNCHRONIZED_IO:
+    case _SC_FSYNC:
+    case _SC_MEMLOCK:
+    case _SC_MEMLOCK_RANGE:
+    case _SC_MESSAGE_PASSING:
+    case _SC_SEMAPHORES:
+    case _SC_THREADS:
+    case _SC_SPAWN:
+      return -1; /* not supported; errno unchanged */
+    case _SC_PRIORITY_SCHEDULING:
+    case _SC_TIMERS:
+    case _SC_MAPPED_FILES:
+    case _SC_MEMORY_PROTECTION:
+    case _SC_SHARED_MEMORY_OBJECTS:
+    case _SC_POLL:
+    case _SC_SELECT:
+    case _SC_MONOTONIC_CLOCK:
+    case _SC_SHELL:
+    case _SC_REGEXP:
+    case _SC_XOPEN_SHM:
+      return 1;
+    case _SC_VERSION:
+    case _SC_2_VERSION:
+      return 200809L;
+    case _SC_PAGESIZE:
+      return 4096;
+    case _SC_RTSIG_MAX:
+      return 0;
+    case _SC_SIGQUEUE_MAX:
+      return 0;
+    case _SC_TIMER_MAX:
+      return 64;
+    case _SC_BC_BASE_MAX:
+      return 99;
+    case _SC_BC_DIM_MAX:
+      return 2048;
+    case _SC_BC_SCALE_MAX:
+      return 99;
+    case _SC_BC_STRING_MAX:
+      return 1000;
+    case _SC_COLL_WEIGHTS_MAX:
+      return 2;
+    case _SC_EXPR_NEST_MAX:
+      return 32;
+    case _SC_LINE_MAX:
+      return 2048;
+    case _SC_RE_DUP_MAX:
+      return 255;
+    case _SC_IOV_MAX:
+      return 1024;
+    case _SC_NPROCESSORS_CONF:
+    case _SC_NPROCESSORS_ONLN:
+      return 1;
+    case _SC_PHYS_PAGES:
+      return sysconf_meminfo(0);
+    case _SC_AVPHYS_PAGES:
+      return sysconf_meminfo(1);
+    case _SC_ATEXIT_MAX:
+      return 32;
+    case _SC_GETPW_R_SIZE_MAX:
+    case _SC_GETGR_R_SIZE_MAX:
+      return -1; /* indeterminate */
+    case _SC_LOGIN_NAME_MAX:
+      return 256;
+    case _SC_TTY_NAME_MAX:
+      return 32;
+    case _SC_HOST_NAME_MAX:
+      return 64;
+    case _SC_THREAD_THREADS_MAX:
+      return 1; /* one kernel thread per process today */
+    case _SC_XOPEN_VERSION:
+      return 700;
+    case _SC_XOPEN_UNIX:
+      return 1;
+    default:
+      errno = EINVAL;
+      return -1;
+  }
 }
 
 #endif /* __DAVECC_DAVEOS__ */

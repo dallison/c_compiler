@@ -659,6 +659,7 @@ int sigaction(int signal_number, const struct sigaction* action,
 }
 #endif
 
+#if !defined(__DAVECC_DAVEOS__)
 int getrlimit(int resource, struct rlimit* limit) {
   (void)resource;
   if (limit == NULL) {
@@ -675,6 +676,7 @@ int setrlimit(int resource, const struct rlimit* limit) {
   (void)limit;
   return 0;
 }
+#endif
 
 int getaddrinfo(const char* node, const char* service,
                 const struct addrinfo* hints, struct addrinfo** result) {

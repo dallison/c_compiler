@@ -30,9 +30,35 @@
 #define DAVEOS_SYS_MOUNT 220
 #define DAVEOS_SYS_UMOUNT 221
 #define DAVEOS_SYS_GETMOUNTS 222
+#define DAVEOS_SYS_PRLIMIT64 223
+#define DAVEOS_SYS_GETMEMINFO 224
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096
+
+/* RLIMIT_* ids — keep in sync with <sys/resource.h>. */
+#define DAVEOS_RLIMIT_CPU 0
+#define DAVEOS_RLIMIT_FSIZE 1
+#define DAVEOS_RLIMIT_DATA 2
+#define DAVEOS_RLIMIT_STACK 3
+#define DAVEOS_RLIMIT_CORE 4
+#define DAVEOS_RLIMIT_AS 5
+#define DAVEOS_RLIMIT_MEMLOCK 6
+#define DAVEOS_RLIMIT_NPROC 7
+#define DAVEOS_RLIMIT_NOFILE 8
+#define DAVEOS_RLIMIT_NLIMITS 9
+#define DAVEOS_RLIM_INFINITY (~(unsigned long long)0)
+
+struct daveos_rlimit {
+  unsigned long long soft;
+  unsigned long long hard;
+};
+
+struct daveos_meminfo {
+  unsigned long long page_size;
+  unsigned long long total_pages;
+  unsigned long long free_pages;
+};
 #ifndef MS_BIND
 #define MS_BIND DAVEOS_MS_BIND
 #endif
