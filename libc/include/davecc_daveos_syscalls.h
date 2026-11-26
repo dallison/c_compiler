@@ -58,6 +58,7 @@
 #define DAVEOS_SYS_PIDFD_OPEN 248
 #define DAVEOS_SYS_PIDFD_SEND_SIGNAL 249
 #define DAVEOS_SYS_WAITID 250
+#define DAVEOS_SYS_NETSTAT 251
 
 #define DAVEOS_NETIF_GET 0
 #define DAVEOS_NETIF_SET 1
@@ -65,6 +66,9 @@
 /* Linux-compatible clone / pidfd bits (DaveOS subset). */
 #define CLONE_PIDFD 0x1000
 #define PIDFD_NONBLOCK 0x800
+
+#define DAVEOS_NETSTAT_TCP 6
+#define DAVEOS_NETSTAT_UDP 17
 
 struct daveos_netif {
   char name[16];
@@ -74,6 +78,16 @@ struct daveos_netif {
   unsigned flags; /* bit0 = configured/up */
 };
 
+/* Host-endian; TCP state matches kernel TcpSock::State; UDP 0=bound 1=connected. */
+struct daveos_sockinfo {
+  unsigned proto;
+  unsigned state;
+  unsigned local_addr;
+  unsigned remote_addr;
+  unsigned short local_port;
+  unsigned short remote_port;
+};
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -81,6 +95,8 @@ int init_module(const char* path);
 int delete_module(const char* name);
 int daveos_netif(int op, struct daveos_netif* nif);
 int daveos_ping(unsigned addr, unsigned timeout_ms);
+/* Copy up to |max| AF_INET socket rows; returns count or -1. */
+int daveos_netstat(struct daveos_sockinfo* buf, int max);
 /*
  * Linux clone(2) syscall ABI (aarch64 argument order). With CLONE_PIDFD,
  * *parent_tid receives the new pidfd. Returns child pid to the parent, 0

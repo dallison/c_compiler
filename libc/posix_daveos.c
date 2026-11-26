@@ -397,6 +397,10 @@ int daveos_ping(unsigned addr, unsigned timeout_ms) {
   return Fail(syscall(DAVEOS_SYS_PING, (long)addr, (long)timeout_ms));
 }
 
+int daveos_netstat(struct daveos_sockinfo* buf, int max) {
+  return Fail(syscall(DAVEOS_SYS_NETSTAT, buf, (long)max));
+}
+
 int sendfd(int pipe_fd, int fd) {
   return Fail(syscall(DAVEOS_SYS_SENDFD, pipe_fd, fd));
 }
