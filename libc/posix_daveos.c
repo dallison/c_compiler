@@ -141,6 +141,14 @@ int timerfd_gettime(int fd, struct itimerspec* curr_value) {
   return Fail(syscall(DAVEOS_SYS_TIMERFD_GETTIME, fd, curr_value));
 }
 
+int gettimeofday(struct timeval* tv, void* tz) {
+  if (tv == NULL) {
+    errno = EFAULT;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_GETTIMEOFDAY, tv, tz));
+}
+
 int epoll_create(int size) {
   (void)size;
   return epoll_create1(0);

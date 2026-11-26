@@ -646,9 +646,12 @@ void AARCH64EmitUnconditionalBranchToSymbol(Assembler* assembler,
                sym->binding != SYM_BIND(weak);
   int32_t offset = known ? (int32_t)(sym->value - instruction_offset) : 0;
   if (!known) {
+    /* PIC calls and tail-calls to global/weak symbols must go via the PLT.
+     * Tail calls emit `b` (JUMP26); without a PLT reloc the linker patches
+     * a direct offset to an unresolved symbol and the branch lands at the
+     * image base (0x80000000 on DaveOS) — seen as SYNC with ELR=80000000. */
     int reloc_type = link ? R_AARCH64_CALL26 : R_AARCH64_JUMP26;
-    if (link && (sym->binding == SYM_BIND(global) ||
-                 sym->binding == SYM_BIND(weak)) &&
+    if ((sym->binding == SYM_BIND(global) || sym->binding == SYM_BIND(weak)) &&
         pic) {
       reloc_type = R_AARCH64_CALL_PLT;
     }

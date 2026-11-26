@@ -152,6 +152,18 @@ static void HandlePICRelocation(
       }
       break;
 
+    /* Tail-call `b sym` is JUMP26; older objects may still emit it for PIC
+     * externals. Route undefined / DSO-backed symbols through the PLT. */
+    case R_AARCH64_JUMP26:
+    case R_AARCH64_CALL26:
+      if (symbol != NULL &&
+          (!symbol->defined || symbol->from_dynamic_library)) {
+        symbol->got_index = append_func_to_got(dynamic, symbol);
+        symbol->plt_index = append_to_plt(dynamic, symbol);
+        reloc->type = R_AARCH64_CALL_PLT;
+      }
+      break;
+
     case R_AARCH64_ABS64: {
       Relocation* rel_reloc = NewDataAddressRelocation(
           symbol, reloc, R_AARCH64_RELATIVE, R_AARCH64_GLOB_DAT);

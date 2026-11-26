@@ -162,7 +162,14 @@ int clock_gettime(clockid_t clock_id, struct timespec* result) {
     errno = EFAULT;
     return -1;
   }
-#if defined(__DAVECC_NATIVE_LINUX__)
+#if defined(__DAVECC_DAVEOS__)
+  long syscall_result = syscall(DAVEOS_SYS_CLOCK_GETTIME, clock_id, result);
+  if (syscall_result < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+#elif defined(__DAVECC_NATIVE_LINUX__)
   long syscall_result = syscall(SYS_clock_gettime, clock_id, result);
   if (syscall_result < 0) {
     errno = (int)-syscall_result;
@@ -196,7 +203,11 @@ int timespec_getres(struct timespec* result, int base) {
     return 0;
   }
   if (result != NULL) {
-#if defined(__DAVECC_HAS_HOST_CLOCK__)
+#if defined(__DAVECC_DAVEOS__)
+    /* CNTPCT period; QEMU virt typically ~16 ns at 62.5 MHz. */
+    result->tv_sec = 0;
+    result->tv_nsec = 1;
+#elif defined(__DAVECC_HAS_HOST_CLOCK__)
     result->tv_sec = 0;
     result->tv_nsec = 1000;
 #else

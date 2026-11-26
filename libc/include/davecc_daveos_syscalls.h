@@ -36,6 +36,8 @@
 #define DAVEOS_SYS_DLOPEN 226
 #define DAVEOS_SYS_DLSYM 227
 #define DAVEOS_SYS_DLCLOSE 228
+#define DAVEOS_SYS_CLOCK_GETTIME 229
+#define DAVEOS_SYS_GETTIMEOFDAY 230
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096

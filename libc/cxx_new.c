@@ -12,8 +12,14 @@ void* __davecc_operator_new(unsigned long size) asm("_Znwm");
 void* __davecc_operator_new_array(unsigned long size) asm("_Znam");
 void* __davecc_operator_new32(unsigned int size) asm("_Znwj");
 void* __davecc_operator_new_array32(unsigned int size) asm("_Znaj");
+void* __davecc_operator_new_placement(unsigned long size, void* ptr) asm("_ZnwmPv");
+void* __davecc_operator_new_array_placement(unsigned long size,
+                                            void* ptr) asm("_ZnamPv");
 void __davecc_operator_delete(void* ptr) asm("_ZdlPv");
 void __davecc_operator_delete_array(void* ptr) asm("_ZdaPv");
+void __davecc_operator_delete_placement(void* ptr, void* place) asm("_ZdlPvS_");
+void __davecc_operator_delete_array_placement(void* ptr,
+                                              void* place) asm("_ZdaPvS_");
 
 static void* CXXAllocate(size_t size) {
   return malloc(size == 0 ? 1 : size);
@@ -52,6 +58,33 @@ __attribute__((weak)) void __davecc_operator_delete(void* ptr) {
 
 __attribute__((weak)) void __davecc_operator_delete_array(void* ptr) {
   __davecc_operator_delete(ptr);
+}
+
+/* Placement forms are not replaceable. Weak copies live here so the lean
+ * DaveOS shared libc (--no-cxx, no cxx_new_overloads.cc) still exports them;
+ * static archives prefer the strong defs from that .cc when both are linked. */
+__attribute__((weak)) void* __davecc_operator_new_placement(unsigned long size,
+                                                            void* ptr) {
+  (void)size;
+  return ptr;
+}
+
+__attribute__((weak)) void* __davecc_operator_new_array_placement(
+    unsigned long size, void* ptr) {
+  (void)size;
+  return ptr;
+}
+
+__attribute__((weak)) void __davecc_operator_delete_placement(void* ptr,
+                                                              void* place) {
+  (void)ptr;
+  (void)place;
+}
+
+__attribute__((weak)) void __davecc_operator_delete_array_placement(
+    void* ptr, void* place) {
+  (void)ptr;
+  (void)place;
 }
 
 // std::new_handler is `void (*)()`; std::set_new_handler / std::get_new_handler
