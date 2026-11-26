@@ -350,6 +350,14 @@ int daveos_getprocs(struct daveos_proc_info* buf, int max) {
   return Fail(syscall(DAVEOS_SYS_GETPROCS, buf, max));
 }
 
+int daveos_getmounts(struct daveos_mount_info* buf, int max) {
+  if (buf == NULL || max <= 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_GETMOUNTS, buf, max));
+}
+
 int mount(const char* source, const char* target, const char* filesystemtype,
           unsigned long mountflags, const void* data) {
   if (source == NULL || target == NULL) {

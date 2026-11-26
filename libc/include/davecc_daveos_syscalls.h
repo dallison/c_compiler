@@ -29,6 +29,7 @@
 #define DAVEOS_SYS_GETPROCS 219
 #define DAVEOS_SYS_MOUNT 220
 #define DAVEOS_SYS_UMOUNT 221
+#define DAVEOS_SYS_GETMOUNTS 222
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096
@@ -44,6 +45,12 @@ struct daveos_proc_info {
   unsigned ppid;
   unsigned state; /* 0=live, 1=zombie, 2=stopped */
   char name[16];
+};
+
+struct daveos_mount_info {
+  char source[64];
+  char target[64];
+  char fstype[16];
 };
 
 struct daveos_fd_set {
@@ -70,6 +77,9 @@ int recvfd(int pipe_fd);
 
 /* Copy up to |max| process rows; returns count or -1. */
 int daveos_getprocs(struct daveos_proc_info* buf, int max);
+
+/* Copy up to |max| mount-table rows; returns count or -1. */
+int daveos_getmounts(struct daveos_mount_info* buf, int max);
 
 /* Linux-like mount(2) / umount2(2); flags and data ignored by DaveOS. */
 int mount(const char* source, const char* target, const char* filesystemtype,
