@@ -3,6 +3,7 @@
  * Built only when compiling with -target aarch64-unknown-daveos-davecc.
  */
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
@@ -453,6 +454,46 @@ int setrlimit(int resource, const struct rlimit* limit) {
 int daveos_syslimit(int which, unsigned long long* new_limit,
                     unsigned long long* old_limit) {
   return Fail(syscall(DAVEOS_SYS_SYSLIMIT, which, new_limit, old_limit));
+}
+
+static char dl_error_buf[64];
+
+void* dlopen(const char* path, int mode) {
+  if (path == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  long h = syscall(DAVEOS_SYS_DLOPEN, path, mode);
+  if (h < 0) {
+    errno = ENOENT;
+    return NULL;
+  }
+  return (void*)(uintptr_t)h;
+}
+
+void* dlsym(void* handle, const char* symbol) {
+  if (symbol == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  long addr = syscall(DAVEOS_SYS_DLSYM, handle, symbol);
+  if (addr <= 0) {
+    errno = EINVAL;
+    return NULL;
+  }
+  return (void*)(uintptr_t)addr;
+}
+
+int dlclose(void* handle) {
+  if (handle == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_DLCLOSE, handle));
+}
+
+char* dlerror(void) {
+  return dl_error_buf[0] != '\0' ? dl_error_buf : (char*)"dlerror";
 }
 
 static long sysconf_rlimit_soft(int resource, long fallback) {

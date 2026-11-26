@@ -33,6 +33,9 @@
 #define DAVEOS_SYS_PRLIMIT64 223
 #define DAVEOS_SYS_GETMEMINFO 224
 #define DAVEOS_SYS_SYSLIMIT 225
+#define DAVEOS_SYS_DLOPEN 226
+#define DAVEOS_SYS_DLSYM 227
+#define DAVEOS_SYS_DLCLOSE 228
 
 /* mount(2) flags (Linux values). */
 #define DAVEOS_MS_BIND 4096

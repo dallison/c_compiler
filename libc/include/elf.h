@@ -31,16 +31,46 @@
 #define PT_PHDR 6
 
 #define DT_NULL 0
+#define DT_NEEDED 1
+#define DT_PLTRELSZ 2
+#define DT_PLTGOT 3
 #define DT_HASH 4
 #define DT_STRTAB 5
 #define DT_SYMTAB 6
+#define DT_RELA 7
+#define DT_RELASZ 8
+#define DT_RELAENT 9
 #define DT_STRSZ 10
 #define DT_SYMENT 11
+#define DT_INIT 12
+#define DT_FINI 13
+#define DT_SONAME 14
+#define DT_RPATH 15
+#define DT_REL 17
+#define DT_RELSZ 18
+#define DT_RELENT 19
+#define DT_PLTREL 20
+#define DT_JMPREL 23
+#define DT_BIND_NOW 24
+#define DT_INIT_ARRAY 25
+#define DT_FINI_ARRAY 26
+#define DT_INIT_ARRAYSZ 27
+#define DT_FINI_ARRAYSZ 28
+#define DT_RUNPATH 29
 #define DT_GNU_HASH 0x6ffffef5
+#define DT_RELACOUNT 0x6ffffff9
 #define DT_VERSYM 0x6fffffff
 #define DT_VERDEF 0x6ffffffc
 #define DT_VERDEFNUM 0x6ffffffd
 #define DT_VERNEED 0x6ffffffe
+
+#define R_AARCH64_ABS64 257
+#define R_AARCH64_GLOB_DAT 1025
+#define R_AARCH64_JUMP_SLOT 1026
+#define R_AARCH64_RELATIVE 1027
+
+#define ELF64_R_SYM(info) ((info) >> 32)
+#define ELF64_R_TYPE(info) ((Elf64_Word)(info))
 
 #define STB_LOCAL 0
 #define STB_GLOBAL 1
@@ -158,6 +188,12 @@ typedef struct {
     Elf64_Addr d_ptr;
   } d_un;
 } Elf64_Dyn;
+
+typedef struct {
+  Elf64_Addr r_offset;
+  Elf64_Xword r_info;
+  Elf64_Sxword r_addend;
+} Elf64_Rela;
 
 typedef struct {
   Elf32_Half vd_version;

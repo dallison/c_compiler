@@ -201,6 +201,7 @@ mode_t umask(mode_t mask) {
   return previous;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 void* dlopen(const char* path, int mode) {
   (void)path;
   (void)mode;
@@ -221,6 +222,7 @@ int dlclose(void* handle) {
 }
 
 char* dlerror(void) { return (char*)"dynamic loading is not available"; }
+#endif
 
 int getifaddrs(struct ifaddrs** list) {
   if (list != NULL) *list = NULL;

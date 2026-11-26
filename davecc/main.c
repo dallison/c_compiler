@@ -976,7 +976,8 @@ static void AddDefaultRuntime(Vector* linker_args, Vector* owned_paths,
   }
 
   if (runtime->static_only &&
-      !VectorContainsCString(linker_args, "-static")) {
+      !VectorContainsCString(linker_args, "-static") &&
+      !VectorContainsCString(linker_args, "-shared")) {
     VectorAppend(linker_args, "-static");
   }
 
