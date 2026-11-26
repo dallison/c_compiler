@@ -365,6 +365,18 @@ int delete_module(const char* name) {
   return Fail(syscall(DAVEOS_SYS_DELETE_MODULE, name));
 }
 
+int daveos_netif(int op, struct daveos_netif* nif) {
+  if (nif == NULL || (op != DAVEOS_NETIF_GET && op != DAVEOS_NETIF_SET)) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_NETIF, op, nif));
+}
+
+int daveos_ping(unsigned addr, unsigned timeout_ms) {
+  return Fail(syscall(DAVEOS_SYS_PING, (long)addr, (long)timeout_ms));
+}
+
 int sendfd(int pipe_fd, int fd) {
   return Fail(syscall(DAVEOS_SYS_SENDFD, pipe_fd, fd));
 }

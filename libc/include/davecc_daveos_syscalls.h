@@ -52,12 +52,27 @@
 #define DAVEOS_SYS_SETGROUPS 242
 #define DAVEOS_SYS_INIT_MODULE 243
 #define DAVEOS_SYS_DELETE_MODULE 244
+#define DAVEOS_SYS_NETIF 245
+#define DAVEOS_SYS_PING 246
+
+#define DAVEOS_NETIF_GET 0
+#define DAVEOS_NETIF_SET 1
+
+struct daveos_netif {
+  char name[16];
+  unsigned addr;
+  unsigned netmask;
+  unsigned gateway;
+  unsigned flags; /* bit0 = configured/up */
+};
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 int init_module(const char* path);
 int delete_module(const char* name);
+int daveos_netif(int op, struct daveos_netif* nif);
+int daveos_ping(unsigned addr, unsigned timeout_ms);
 #ifdef __cplusplus
 }
 #endif

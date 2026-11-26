@@ -363,6 +363,34 @@ const char* inet_ntop(int family, const void* source, char* destination,
   return destination;
 }
 
+int inet_ptoa(const char* presentation, uint32_t* addr) {
+  if (presentation == NULL || addr == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  unsigned char octets[4];
+  int ok = inet_pton(AF_INET, presentation, octets);
+  if (ok != 1) {
+    return ok;
+  }
+  *addr = ((uint32_t)octets[0] << 24) | ((uint32_t)octets[1] << 16) |
+          ((uint32_t)octets[2] << 8) | (uint32_t)octets[3];
+  return 1;
+}
+
+const char* inet_atop(uint32_t addr, char* destination, unsigned int size) {
+  if (destination == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  unsigned char octets[4];
+  octets[0] = (unsigned char)(addr >> 24);
+  octets[1] = (unsigned char)(addr >> 16);
+  octets[2] = (unsigned char)(addr >> 8);
+  octets[3] = (unsigned char)addr;
+  return inet_ntop(AF_INET, octets, destination, size);
+}
+
 ssize_t sendto(int sockfd, const void* buf, size_t len, int flags,
                const struct sockaddr* dest, socklen_t destlen) {
   if (dest == 0 || destlen == 0) {
