@@ -84,6 +84,7 @@ void LinkerInitConfigLayout(Linker* linker,
                             const char* layout_type_name) {
   bool ok;
   if (config_file != NULL) {
+    linker->custom_linker_script = true;
     ok = LinkerScriptParseFile(config_file, linker->elf_machine_type,
                                &linker->config);
     if (!ok) {
@@ -136,6 +137,7 @@ void LinkerInit(Linker* linker) {
   // Default to ELF64; overridden from the first object file read.
   linker->ops = ELFFormatOpsFor(true);
   linker->building_dso = false;
+  linker->custom_linker_script = false;
   linker->relocatable = false;
   linker->so_name = -1;
   linker->fully_static = false;
@@ -1941,8 +1943,12 @@ static void AssignSegmentSectionAddresses(Linker* linker, Segment* segment, uint
 }
 
 static ConfigSegment* FakeConfigSegment() {
-  ConfigSegment* s = malloc(sizeof(ConfigSegment));
+  ConfigSegment* s = calloc(1, sizeof(ConfigSegment));
   VectorInit(&s->regions);
+  /* Match LinkerConfigApplyTargetDefaults for ELF targets: DSOs page-align
+   * the writable/dynamic load using data_segment.config->alignment. A zero
+   * alignment makes (start + align - 1) & ~(align - 1) collapse to 0. */
+  s->alignment = 0x1000;
   return s;
 }
 
@@ -2056,10 +2062,11 @@ void LinkerLinkAllFiles(Linker* linker) {
   if (!data_init_done) {
     SegmentInit(&linker->data_segment, FakeConfigSegment());
   }
-  if (linker->building_dso) {
+  if (linker->building_dso && !linker->custom_linker_script) {
     // Shared objects use position-independent virtual addresses. The default
     // program layouts contain fixed executable addresses, so discard those
     // bases and lay the DSO segments out consecutively from its ELF headers.
+    // User -T/--script layouts keep their ORIGIN values (e.g. a fixed vDSO).
     ClearSegmentFixedAddresses(&linker->code_segment);
     ClearSegmentFixedAddresses(&linker->dynamic_segment);
     ClearSegmentFixedAddresses(&linker->data_segment);
@@ -2150,17 +2157,30 @@ void LinkerLinkAllFiles(Linker* linker) {
   // Assign code segment addresses.
   AssignSegmentSectionAddresses(linker, &linker->code_segment, 0, text_file_offset);
 
-  uint64_t end_of_segments =  SegmentEndAddress(&linker->code_segment);
+  uint64_t end_of_segments = SegmentEndAddress(&linker->code_segment);
   if (!linker->fully_static) {
     // Assign addresses to the dynamic section.
     uint64_t dynamic_start = end_of_segments;
     if (linker->building_dso) {
-      uint64_t alignment = linker->data_segment.config->alignment;
+      uint64_t alignment = linker->data_segment.config != NULL
+                               ? linker->data_segment.config->alignment
+                               : 0;
+      if (alignment < 2) {
+        alignment = (uint64_t)LINKER_DYNAMIC_SEGMENT_ALIGNMENT;
+      }
       dynamic_start = (dynamic_start + alignment - 1) & ~(alignment - 1);
     }
     AssignSegmentSectionAddresses(linker, &linker->dynamic_segment,
                                   dynamic_start, 0);
-    end_of_segments = SegmentEndAddress(&linker->dynamic_segment);
+    /* Never let an empty/miswired dynamic segment rewind past code. That
+     * previously produced PT_LOAD/PT_DYNAMIC with p_vaddr==0 and p_offset
+     * past the text image when a script omitted a data MEMORY region. */
+    uint64_t dyn_end = SegmentEndAddress(&linker->dynamic_segment);
+    if (dyn_end > end_of_segments) {
+      end_of_segments = dyn_end;
+    } else if (linker->building_dso && dynamic_start > end_of_segments) {
+      end_of_segments = dynamic_start;
+    }
   }
   
   if (!linker->fully_static && !linker->building_dso) {

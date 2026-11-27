@@ -28,6 +28,7 @@
 #if defined(__DAVECC_DAVEOS__)
 
 #include <davecc_daveos_syscalls.h>
+#include <vdso_daveos.h>
 
 /* DaveOS returns -1 on error without a negative errno code in x0. */
 static int Fail(long result) {
@@ -170,6 +171,26 @@ int gettimeofday(struct timeval* tv, void* tz) {
   if (tv == NULL) {
     errno = EFAULT;
     return -1;
+  }
+  {
+    int host_rc = __daveos_host_gettimeofday(tv, tz);
+    if (host_rc <= 0) {
+      if (host_rc < 0) {
+        errno = -host_rc;
+        return -1;
+      }
+      return 0;
+    }
+  }
+  {
+    int vdso_rc = __daveos_vdso_gettimeofday(tv, tz);
+    if (vdso_rc <= 0) {
+      if (vdso_rc < 0) {
+        errno = -vdso_rc;
+        return -1;
+      }
+      return 0;
+    }
   }
   return Fail(syscall(DAVEOS_SYS_GETTIMEOFDAY, tv, tz));
 }

@@ -4,6 +4,10 @@
 #include <string.h>
 #include <syscall.h>
 #include <time.h>
+#if defined(__DAVECC_DAVEOS__)
+#include <davecc_daveos_syscalls.h>
+#include <vdso_daveos.h>
+#endif
 
 enum {
   kTimeZoneNameCapacity = 256,
@@ -163,6 +167,26 @@ int clock_gettime(clockid_t clock_id, struct timespec* result) {
     return -1;
   }
 #if defined(__DAVECC_DAVEOS__)
+  {
+    int host_rc = __daveos_host_clock_gettime(clock_id, result);
+    if (host_rc <= 0) {
+      if (host_rc < 0) {
+        errno = -host_rc;
+        return -1;
+      }
+      return 0;
+    }
+  }
+  {
+    int vdso_rc = __daveos_vdso_clock_gettime(clock_id, result);
+    if (vdso_rc <= 0) {
+      if (vdso_rc < 0) {
+        errno = -vdso_rc;
+        return -1;
+      }
+      return 0;
+    }
+  }
   long syscall_result = syscall(DAVEOS_SYS_CLOCK_GETTIME, clock_id, result);
   if (syscall_result < 0) {
     errno = EINVAL;
@@ -194,6 +218,51 @@ int clock_gettime(clockid_t clock_id, struct timespec* result) {
   }
   errno = EINVAL;
   return -1;
+#endif
+}
+
+int clock_getres(clockid_t clock_id, struct timespec* result) {
+#if defined(__DAVECC_DAVEOS__)
+  {
+    int host_rc = __daveos_host_clock_getres(clock_id, result);
+    if (host_rc <= 0) {
+      if (host_rc < 0) {
+        errno = -host_rc;
+        return -1;
+      }
+      return 0;
+    }
+  }
+  {
+    int vdso_rc = __daveos_vdso_clock_getres(clock_id, result);
+    if (vdso_rc <= 0) {
+      if (vdso_rc < 0) {
+        errno = -vdso_rc;
+        return -1;
+      }
+      return 0;
+    }
+  }
+  long syscall_result = syscall(DAVEOS_SYS_CLOCK_GETRES, clock_id, result);
+  if (syscall_result < 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+#elif defined(__DAVECC_NATIVE_LINUX__) && defined(SYS_clock_getres)
+  long syscall_result = syscall(SYS_clock_getres, clock_id, result);
+  if (syscall_result < 0) {
+    errno = (int)-syscall_result;
+    return -1;
+  }
+  return 0;
+#else
+  (void)clock_id;
+  if (result != NULL) {
+    result->tv_sec = 0;
+    result->tv_nsec = 1;
+  }
+  return 0;
 #endif
 }
 #endif

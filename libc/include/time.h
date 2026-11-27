@@ -68,6 +68,7 @@ struct timespec {
 extern int timespec_get(struct timespec *ts, int base);
 extern int timespec_getres(struct timespec *ts, int base);
 extern int clock_gettime(clockid_t clock_id, struct timespec *tp);
+extern int clock_getres(clockid_t clock_id, struct timespec *res);
 extern int nanosleep(const struct timespec *requested, struct timespec *remaining);
 extern time_t   time(time_t *);
 

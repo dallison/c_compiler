@@ -105,6 +105,28 @@ clock_t clock(void) {
   return (clock_t)(value.tv_sec * CLOCKS_PER_SEC +
                    value.tv_nsec / (1000000000 / CLOCKS_PER_SEC));
 }
+#elif defined(__DAVECC_DAVEOS__)
+time_t time(time_t* result) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+    return (time_t)-1;
+  }
+  if (result != NULL) {
+    *result = ts.tv_sec;
+  }
+  return ts.tv_sec;
+}
+
+clock_t clock(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) != 0) {
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+      return (clock_t)-1;
+    }
+  }
+  return (clock_t)(ts.tv_sec * CLOCKS_PER_SEC +
+                   ts.tv_nsec / (1000000000 / CLOCKS_PER_SEC));
+}
 #else
 time_t time(time_t* result) {
   time_t value = (time_t)syscall(SYS_TIME);

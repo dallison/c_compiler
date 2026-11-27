@@ -500,6 +500,7 @@ LIBC_SRCS = [
     "libc/syscall.c",
     "libc/tmpfile.c",
     "libc/time.c",
+    "libc/vdso_daveos.c",
     "libc/cxx_tls.c",
     "libc/cxx_tls_stubs.c",
     "libc/threads.c",
@@ -2896,6 +2897,7 @@ libc_srcs=(
   "libc/posix_events.c"
   "libc/posix_daveos.c"
   "libc/posix_spawn.c"
+  "libc/vdso_daveos.c"
   "libc/regex.c"
   "libc/printf.c"
   "libc/printf_common.c"
@@ -6383,6 +6385,17 @@ sh_test(
         ":pcode",
         ":riscv",
         ":x86_64",
+    ],
+)
+
+sh_test(
+    name = "dso_phdr_layout_test",
+    srcs = ["tests/dso_phdr_layout_test.sh"],
+    args = [
+        "$(rootpath :davecc)",
+    ],
+    data = [
+        ":davecc",
     ],
 )
 

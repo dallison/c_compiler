@@ -28,6 +28,7 @@
 #include <syscall.h>
 #if defined(__DAVECC_DAVEOS__)
 #include <davecc_daveos_syscalls.h>
+#include <vdso_daveos.h>
 #endif
 
 static int Fail(long result) {
@@ -598,7 +599,18 @@ int sigaltstack(const stack_t* stack, stack_t* old_stack) {
   return 0;
 }
 
-int sched_getcpu(void) { return 0; }
+int sched_getcpu(void) {
+#if defined(__DAVECC_DAVEOS__)
+  unsigned cpu = 0;
+  if (__daveos_vdso_getcpu(&cpu, NULL) == 0) {
+    return (int)cpu;
+  }
+  if (syscall(DAVEOS_SYS_GETCPU, &cpu, NULL, NULL) == 0) {
+    return (int)cpu;
+  }
+#endif
+  return 0;
+}
 
 #if defined(__DAVECC_DAVEOS__)
 unsigned long getauxval(unsigned long type) {
