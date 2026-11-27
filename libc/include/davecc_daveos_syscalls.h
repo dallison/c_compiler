@@ -61,6 +61,7 @@
 #define DAVEOS_SYS_NETSTAT 251
 #define DAVEOS_SYS_CLOCK_GETRES 252
 #define DAVEOS_SYS_GETCPU 253
+#define DAVEOS_SYS_STATFS 254
 
 #define DAVEOS_NETIF_GET 0
 #define DAVEOS_NETIF_SET 1
@@ -169,6 +170,16 @@ struct daveos_mount_info {
   char fstype[16];
 };
 
+struct daveos_statfs {
+  unsigned long long bsize;
+  unsigned long long blocks;
+  unsigned long long bfree;
+  unsigned long long bavail;
+  unsigned long long files;
+  unsigned long long ffree;
+  char fstype[16];
+};
+
 struct daveos_fd_set {
   unsigned long long mask;
 };
@@ -196,6 +207,9 @@ int daveos_getprocs(struct daveos_proc_info* buf, int max);
 
 /* Copy up to |max| mount-table rows; returns count or -1. */
 int daveos_getmounts(struct daveos_mount_info* buf, int max);
+
+/* Filesystem capacity for |path|; returns 0 or -1. */
+int daveos_statfs(const char* path, struct daveos_statfs* buf);
 
 /* Linux-like mount(2) / umount2(2); flags and data ignored by DaveOS. */
 int mount(const char* source, const char* target, const char* filesystemtype,

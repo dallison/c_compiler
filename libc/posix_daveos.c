@@ -447,6 +447,14 @@ int daveos_getmounts(struct daveos_mount_info* buf, int max) {
   return Fail(syscall(DAVEOS_SYS_GETMOUNTS, buf, max));
 }
 
+int daveos_statfs(const char* path, struct daveos_statfs* buf) {
+  if (path == NULL || buf == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  return Fail(syscall(DAVEOS_SYS_STATFS, path, buf));
+}
+
 int mount(const char* source, const char* target, const char* filesystemtype,
           unsigned long mountflags, const void* data) {
   if (source == NULL || target == NULL) {
