@@ -340,7 +340,6 @@ void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
     .type = kTypeImplicit,
     .quals = kQualPlain,
     .type_record = NULL,
-    .error = false
   };
 
   TypeParser parser;
@@ -372,7 +371,9 @@ void ParseDeclarationSpecifier(Syntax* syntax, Storage* storage,
       // advance, stop rather than spinning forever.
       size_t prev_pos = syntax->lex->pos;
       Token prev_token = syntax->lex->current_token;
-      type_specifier = TypeParserParseAndCombineTypes(&parser, &type_specifier);
+      PartialTypeSpecifier combined;
+      TypeParserParseAndCombineTypes(&parser, &type_specifier, &combined);
+      type_specifier = combined;
       if (syntax->lex->pos == prev_pos &&
           syntax->lex->current_token == prev_token) {
         *type = TypeParserBuildTypeRecord(&parser, &type_specifier);

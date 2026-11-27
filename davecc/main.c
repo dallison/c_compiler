@@ -188,6 +188,10 @@ static bool FindIncludeDirectory(DriverResources* resources) {
       }
     }
   }
+  /* DaveOS self-hosted install: headers live in /usr/include. */
+  if (TryResourceDirectory(&resources->include_dir, "/usr/include", NULL)) {
+    return true;
+  }
   return TryResourceDirectory(&resources->include_dir, ".", "libc/include");
 }
 
@@ -218,6 +222,10 @@ static bool FindLibraryDirectory(DriverResources* resources) {
         return true;
       }
     }
+  }
+  /* DaveOS self-hosted install: guest libc archives live in /lib. */
+  if (TryResourceDirectory(&resources->lib_dir, "/lib", NULL)) {
+    return true;
   }
   return TryResourceDirectory(&resources->lib_dir, ".", "bazel-bin/libc");
 }

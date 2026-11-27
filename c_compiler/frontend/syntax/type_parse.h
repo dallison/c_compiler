@@ -140,12 +140,33 @@ typedef struct {
 } TypeSubstitutionScope;
 
 // Struct to hold information from a partial type specifier.
-typedef struct  {
-  Type type;
+// Sized to 16 bytes so AAPCS64 returns it in registers (x0/x1).  A larger
+// layout was returned via a hidden sret pointer that DaveCC's aarch64
+// daveos codegen mishandles, leaving type_record garbage after returns.
+typedef struct {
+  Type type; /* bit 31 (kPartialTypeError) marks an error */
   Qualifiers quals;
   TypeRecord* type_record;
-  bool error;
 } PartialTypeSpecifier;
+
+#define kPartialTypeError ((Type)(1u << 31))
+
+static inline bool PartialTypeHasError(const PartialTypeSpecifier* p) {
+  return (p->type & kPartialTypeError) != 0;
+}
+static inline void PartialTypeSetError(PartialTypeSpecifier* p) {
+  p->type |= kPartialTypeError;
+}
+static inline Type PartialTypeBits(const PartialTypeSpecifier* p) {
+  return p->type & ~kPartialTypeError;
+}
+#if defined(__cplusplus)
+static_assert(sizeof(PartialTypeSpecifier) == 16,
+              "PartialTypeSpecifier must fit in AAPCS64 register pair");
+#else
+_Static_assert(sizeof(PartialTypeSpecifier) == 16,
+               "PartialTypeSpecifier must fit in AAPCS64 register pair");
+#endif
 //
 // TypeParser
 //
@@ -167,8 +188,9 @@ TypeSubstitutionScope TypeParserPushTemplateSubstitution(
     TypeParser* parser, Struct* source, Struct* target);
 void TypeParserPopTemplateSubstitution(TypeSubstitutionScope* scope);
 
-PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
-                                                   PartialTypeSpecifier* prev);
+void TypeParserParseAndCombineTypes(TypeParser* parser,
+                                    PartialTypeSpecifier* prev,
+                                    PartialTypeSpecifier* out);
 TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* type);
 
 TypeRecord* TypeParserParseType(TypeParser* parser, bool needed);

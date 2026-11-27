@@ -2022,9 +2022,9 @@ static TypeRecord* NamedMemberTypedefType(TypeParser* parser, Symbol* symbol) {
   return ResolveConcreteDependentMemberType(parser, type);
 }
 
-static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_typedef) {
-  PartialTypeSpecifier result;
-  result.error = false;
+static void ParseTypeSpecifier(TypeParser* parser, bool allow_typedef,
+                                 PartialTypeSpecifier* result) {
+  *result = (PartialTypeSpecifier){0};
   
   Type type = kTypeImplicit;
   Qualifiers quals = kQualPlain;
@@ -2221,7 +2221,8 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
         LexCheckpointRestore(lex, &typename_name_start);
         LexCheckpointDestruct(&typename_name_start);
         FullyQualifiedIdentifierDestruct(&typename_name);
-        return ParseTypeSpecifier(parser, allow_typedef);
+        ParseTypeSpecifier(parser, allow_typedef, result);
+        return;
       } else if (!typename_name.is_qualified) {
         SyntaxError(parser->syntax, "typename requires a qualified type name");
       } else {
@@ -3365,10 +3366,9 @@ static PartialTypeSpecifier ParseTypeSpecifier(TypeParser* parser, bool allow_ty
     TypeParserDestruct(&composite_parser);
   }
 
-  result.type = type;
-  result.quals = quals;
-  result.type_record = type_record;
-  return result;
+  result->type = type;
+  result->quals = quals;
+  result->type_record = type_record;
 }
 
 // This is a list of all the valid type combinations.
@@ -3508,10 +3508,11 @@ static void QualifierComboError(Syntax* syntax, Qualifiers q1, Qualifiers q2) {
 // Where the 'int' and 'unsigned' are split by a storage specifier.
 // This function combines two type specifiers if it can and issues
 // errors and warnings as necessary.
-static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
-                                                PartialTypeSpecifier* t1,
-                                                PartialTypeSpecifier* t2) {
-  PartialTypeSpecifier result = {0};
+static void CombineTypeSpecifiers(Syntax* syntax,
+                                  PartialTypeSpecifier* t1,
+                                  PartialTypeSpecifier* t2,
+                                  PartialTypeSpecifier* result) {
+  *result = (PartialTypeSpecifier){0};
   // Check for a valid type.  You can't combine types that contain the
   // same bits:
   // e.g. short short
@@ -3537,82 +3538,84 @@ static PartialTypeSpecifier CombineTypeSpecifiers(Syntax* syntax,
           (t2->type == kTypeSigned && TypeIsUnsigned(t1->type_record));
       if (conflicting_sign) {
         TypeComboError2(syntax, t1->type_record, t2->type);
-        result.error = true;
+        PartialTypeSetError(result);
       } else if (t2->type == kTypeUnsigned) {
         t1->type_record->type &= ~kTypeSigned;
         t1->type_record->type |= kTypeUnsigned;
       }
       if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
         QualifierComboError(syntax, t1->quals, t2->quals);
-        result.error = true;
+        PartialTypeSetError(result);
       }
-      result.type = t1->type_record->type;
-      result.quals = t1->quals | t2->quals;
-      result.type_record = t1->type_record;
-      return result;
+      result->type = t1->type_record->type;
+      result->quals = t1->quals | t2->quals;
+      result->type_record = t1->type_record;
+      return;
     }
     if (t2->type_record != NULL) {
       TypeComboError3(syntax, t1->type_record, t2->type_record);
-      result.error = true;
+      PartialTypeSetError(result);
     } else if (t2->type != kTypeImplicit) {
       TypeComboError2(syntax, t1->type_record, t2->type);
-      result.error = true;
+      PartialTypeSetError(result);
     }
     if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
       QualifierComboError(syntax, t1->quals, t2->quals);
-      result.error = true;
+      PartialTypeSetError(result);
     }
-    result.type = t1->type;
-    result.quals = t1->quals | t2->quals;
-    result.type_record = t1->type_record;
-    return result;
+    result->type = t1->type;
+    result->quals = t1->quals | t2->quals;
+    result->type_record = t1->type_record;
+    return;
   }
-  result.type = t1->type | t2->type;
+  result->type = t1->type | t2->type;
   
-  bool type_ok = result.type == kTypeImplicit ||
+  bool type_ok = result->type == kTypeImplicit ||
                  (t1->type & t2->type) == 0;
-  if (type_ok && result.type != kTypeImplicit) {
-    type_ok = IsValidType(result.type);
+  if (type_ok && PartialTypeBits(result) != kTypeImplicit) {
+    type_ok = IsValidType(PartialTypeBits(result));
   }
   if (!type_ok) {
     TypeComboError1(syntax, t1->type, t2->type);
-    result.error = true;
+    PartialTypeSetError(result);
   }
   
   // Convert 'long double' to kTypeLongDouble.
-  if ((result.type & (kTypeLong | kTypeDouble)) == (kTypeLong | kTypeDouble)) {
-    result.type &= ~(kTypeLong | kTypeDouble);
-    result.type |= kTypeLongDouble;
+  if ((result->type & (kTypeLong | kTypeDouble)) == (kTypeLong | kTypeDouble)) {
+    result->type &= ~(kTypeLong | kTypeDouble);
+    result->type |= kTypeLongDouble;
   }
   
   // Can't combine qualifiers if they are the same.
   // e.g. const const
   if (!IsValidQualiferCombo(t1->quals, t2->quals)) {
     QualifierComboError(syntax, t1->quals, t2->quals);
-    result.error = true;
+    PartialTypeSetError(result);
   }
-  result.quals = t1->quals | t2->quals;
-  result.type_record = NULL;
+  result->quals = t1->quals | t2->quals;
+  result->type_record = NULL;
 
-  if (result.error) {
-    return result;
+  if (PartialTypeHasError(result)) {
+    return;
   }
-  return result;
+  return;
 }
 
-PartialTypeSpecifier TypeParserParseAndCombineTypes(TypeParser* parser,
-                                                   PartialTypeSpecifier* prev) {
-  PartialTypeSpecifier curr = ParseTypeSpecifier(parser, prev->type == kTypeImplicit);
+void TypeParserParseAndCombineTypes(TypeParser* parser,
+                                    PartialTypeSpecifier* prev,
+                                    PartialTypeSpecifier* out) {
+  PartialTypeSpecifier curr;
+  ParseTypeSpecifier(parser, prev->type == kTypeImplicit, &curr);
   if (prev->type == kTypeImplicit && prev->quals == kQualPlain) {
-    return curr;
+    *out = curr;
+    return;
   }
-  
-  return CombineTypeSpecifiers(parser->syntax, prev, &curr);
+  CombineTypeSpecifiers(parser->syntax, prev, &curr, out);
 }
 
 // Given a ParseTypeSpecifier, build a TypeRecord.
 TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* type) {
-  if (type->error) {
+  if (PartialTypeHasError(type)) {
     return NewTypeRecordWithSize(kTypeInt, kQualPlain);
   }
   if (type->type_record == NULL) {
@@ -3628,7 +3631,7 @@ TypeRecord* TypeParserBuildTypeRecord(TypeParser* parser, PartialTypeSpecifier* 
       }
       return NewComplexTypeRecord(element_type, type->quals);
     }
-    return NewTypeRecordWithSize(type->type, type->quals);
+    return NewTypeRecordWithSize(PartialTypeBits(type), type->quals);
   } else {
     // Add qualifiers to typedef copy.
     type->type_record =
@@ -3652,7 +3655,7 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     .type = kTypeImplicit,
     .quals = kQualPlain,
     .type_record = NULL,
-    .error = false };
+  };
 
   // Leading __attribute__((...)) specifiers (GCC extension) before the type.
   TypeParserSkipAttributes(parser);
@@ -3673,7 +3676,9 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
       // `int S::*` is a member-pointer declarator, not a second type specifier.
       break;
     }
-    PartialTypeSpecifier new_type_specifier = ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit);
+    PartialTypeSpecifier new_type_specifier;
+    ParseTypeSpecifier(parser, type_specifier.type == kTypeImplicit,
+                       &new_type_specifier);
     if (new_type_specifier.type == kTypeImplicit &&
         new_type_specifier.quals == kQualPlain &&
         new_type_specifier.type_record == NULL) {
@@ -3682,7 +3687,10 @@ TypeRecord* TypeParserParseType(TypeParser* parser, bool needed) {
     if (type_specifier.type == kTypeImplicit && type_specifier.quals == kQualPlain) {
       type_specifier = new_type_specifier;
     } else {
-      type_specifier = CombineTypeSpecifiers(parser->syntax, &type_specifier, &new_type_specifier);
+      PartialTypeSpecifier combined;
+      CombineTypeSpecifiers(parser->syntax, &type_specifier, &new_type_specifier,
+                            &combined);
+      type_specifier = combined;
     }
   }
   // No type?

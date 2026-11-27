@@ -712,4 +712,34 @@ long sysconf(int name) {
   }
 }
 
+int isatty(int fd) {
+  struct {
+    uint16_t rows;
+    uint16_t columns;
+    uint16_t xpixel;
+    uint16_t ypixel;
+  } window;
+  if (syscall(DAVEOS_SYS_IOCTL, (long)fd, (long)DAVEOS_TIOCGWINSZ, &window) ==
+      0) {
+    return 1;
+  }
+  errno = ENOTTY;
+  return 0;
+}
+
+ssize_t pread(int fd, void* buffer, size_t size, off_t offset) {
+  off_t cur = lseek(fd, 0, SEEK_CUR);
+  if (cur < 0) {
+    return -1;
+  }
+  if (lseek(fd, offset, SEEK_SET) < 0) {
+    return -1;
+  }
+  ssize_t n = read(fd, buffer, size);
+  int saved = errno;
+  (void)lseek(fd, cur, SEEK_SET);
+  errno = saved;
+  return n;
+}
+
 #endif /* __DAVECC_DAVEOS__ */

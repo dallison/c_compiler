@@ -216,6 +216,16 @@ static void ReadSymbolTable(ARArchive* archive, FILE* fp) {
   
   // Number of symbols to read.
   int32_t num_entries = ReadBigEndianInt(fp);
+  // Guard against a corrupt count (e.g. wrong seek) that would spin for
+  // minutes allocating "symbols".  SysV layout needs 4 bytes of count +
+  // 4 bytes of offset per entry inside the symbol-table member.
+  int64_t symtab_size = archive->symbol_table_file->size;
+  if (num_entries < 0 || symtab_size < 4 ||
+      (int64_t)num_entries > (symtab_size - 4) / 4) {
+    fprintf(stderr, "ar: Corrupted symbol table; count %d size %" PRId64 "\n",
+            num_entries, symtab_size);
+    exit(1);
+  }
   
   // Temporary vector to hold symbols we build.  We hold them
   // here and then insert them into the symbol table after they

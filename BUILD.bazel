@@ -2984,6 +2984,54 @@ cd "$$work"
 "$$archivist" r "$$out_file" *.o
 """,
 )
+
+# Sources + script for cross-building DaveCC tools onto DaveOS (no interpreters).
+filegroup(
+    name = "daveos_guest_tool_srcs",
+    srcs = glob([
+        "c_compiler/**/*.c",
+        "c_compiler/**/*.h",
+        "Linker/**/*.c",
+        "Linker/**/*.h",
+        "davecc/*.c",
+        "daveld/*.c",
+        "archivist/*.c",
+        "elfdump/*.c",
+        "6502asm/*.c",
+        "6502dasm/*.c",
+        "aarch64asm/*.c",
+        "aarch64dasm/*.c",
+        "armasm/*.c",
+        "armdasm/*.c",
+        "rvasm/*.c",
+        "riscvdasm/*.c",
+        "x86asm/*.c",
+        "x86_64dasm/*.c",
+        "xtensaasm/*.c",
+        "xtensadasm/*.c",
+        "bpfdasm/*.c",
+        "pcodedasm/*.c",
+        "wasmdasm/*.c",
+    ]) + [
+        "tools/build_daveos_tools.sh",
+        "tools/daveos_tool_lib_srcs.txt",
+        "tools/daveos_tool_includes.txt",
+        ":libc_headers",
+    ],
+)
+
+# Full include tree for installing onto DaveOS at /usr/include.
+filegroup(
+    name = "libc_include_tree",
+    srcs = glob(["libc/include/**"]),
+)
+
+exports_files([
+    "tools/build_daveos_tools.sh",
+    "tools/daveos_tool_lib_srcs.txt",
+    "tools/daveos_tool_includes.txt",
+])
+
 genrule(
     name = "libc_riscv32",
     srcs = LIBC_SRCS + FP_EXTENDED_SRCS + LIBC_CXX_SRCS + [":libc_headers"] + glob([

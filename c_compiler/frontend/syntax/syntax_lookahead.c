@@ -606,40 +606,24 @@ static bool GlobalScopeStartsType(Syntax* syntax) {
 // cv-qualifier, constexpr-family specifier, or a name that denotes a type),
 // without consuming anything.
 bool SyntaxLookingAtType(Syntax* syntax) {
-  switch (syntax->lex->current_token) {
-    case TOK(atomic):
-    case TOK(bitint):
-    // Complex and imaginary types are not implemented, but the specifier still
-    // starts a type: the type parser diagnoses it and consumes it, which no
-    // other parser does.
-    case TOK(complex):
-    case TOK(imaginary):
-    case TOK(char):
-    case TOK(char8_t):
-    case TOK(char16_t):
-    case TOK(char32_t):
-    case TOK(int):
-    case TOK(int128):
-    case TOK(short):
-    case TOK(long):
-    case TOK(float):
-    case TOK(double):
-    case TOK(class):
-    case TOK(struct):
-    case TOK(union):
-    case TOK(enum):
-    case TOK(bool):
-    case TOK(signed):
-    case TOK(unsigned):
-    case TOK(const):
-    case TOK(volatile):
-    case TOK(restrict):
-    case TOK(void):
-    case TOK(wchar_t):
-    case TOK(consteval):
-    case TOK(constexpr):
-    case TOK(constinit):
-      return true;
+  Token looking = syntax->lex->current_token;
+  /* Prefer an if-chain over a dense switch for the common type tokens. */
+  if (looking == TOK(atomic) || looking == TOK(bitint) ||
+      looking == TOK(complex) || looking == TOK(imaginary) ||
+      looking == TOK(char) || looking == TOK(char8_t) ||
+      looking == TOK(char16_t) || looking == TOK(char32_t) ||
+      looking == TOK(int) || looking == TOK(int128) || looking == TOK(short) ||
+      looking == TOK(long) || looking == TOK(float) || looking == TOK(double) ||
+      looking == TOK(class) || looking == TOK(struct) || looking == TOK(union) ||
+      looking == TOK(enum) || looking == TOK(bool) || looking == TOK(signed) ||
+      looking == TOK(unsigned) || looking == TOK(const) ||
+      looking == TOK(volatile) || looking == TOK(restrict) ||
+      looking == TOK(void) || looking == TOK(wchar_t) ||
+      looking == TOK(consteval) || looking == TOK(constexpr) ||
+      looking == TOK(constinit)) {
+    return true;
+  }
+  switch (looking) {
     case TOK(auto):
       return CompilerIsCXX();
     case TOK(decltype):

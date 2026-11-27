@@ -8,7 +8,6 @@
 
 #include "elf_reader.h"
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <string.h>
@@ -130,10 +129,10 @@ bool ReadFileContents(ELFReaderFile* elf, void* addr, int64_t length) {
   return true;
 }
 
-// Read and ELF file from disk.  This maps the file into memory using the
-// UNIX 'mmap' call.  The 'mmap' function takes the file descriptor of an
-// open file and maps its contents into the virtual memory of the process.
-// The address is chosen by the memory manager.
+// Read an ELF file (or archive member) into a heap buffer.  DaveOS file
+// MAP_PRIVATE is eager-fill and has been a source of linker faults; malloc +
+// pread is correct on every host and keeps section pointers stable for the
+// link.
 bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
   if (length == 0) {
     // First get the length of the file if needed.
@@ -143,37 +142,39 @@ bool ELFReaderFileRead(ELFReaderFile* elf, int64_t length, int64_t offset) {
     }
     length = elf->file_stat.st_size;
   }
-  
-  // Open the file.
+
+  if (length < 0) {
+    return false;
+  }
+
   int fd = open(elf->filename.value, O_RDONLY);
   if (fd < 0) {
     return false;
   }
 
-  // Offset must be page aligned.
-  int page_size = (int)sysconf(_SC_PAGESIZE);
-  int page_mask = page_size - 1;
-  int64_t aligned_offset = offset & ~page_mask;
-  int64_t addr_diff = offset & page_mask;
-  int64_t full_length = length + addr_diff;
-  
-  // Map it into memory.
-  void* addr = mmap(NULL, full_length, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd,
-                    aligned_offset);
-  if (addr == MAP_FAILED) {
+  void* addr = malloc((size_t)length);
+  if (addr == NULL) {
     close(fd);
     return false;
   }
 
-  // Now we have the file mapped into memory at address 'addr'.  We can
-  // access this memory directly.  It is mapped read-only so we can't
-  // write to it.
-  void* start_addr = (char*)addr + addr_diff;
-  bool ok = ReadFileContents(elf, start_addr, length);
-  if (!ok) {
-    munmap(addr, length);
+  size_t got = 0;
+  while (got < (size_t)length) {
+    ssize_t n = pread(fd, (char*)addr + got, (size_t)length - got,
+                      (off_t)(offset + (int64_t)got));
+    if (n <= 0) {
+      free(addr);
+      close(fd);
+      return false;
+    }
+    got += (size_t)n;
   }
   close(fd);
+
+  bool ok = ReadFileContents(elf, addr, length);
+  if (!ok) {
+    free(addr);
+  }
   return ok;
 }
 
