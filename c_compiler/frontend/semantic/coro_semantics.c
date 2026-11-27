@@ -4710,6 +4710,14 @@ static Symbol* NewCoroutineResumeFunction(ASTNode* node,
   Symbol* frame_param = NULL;
   TypeRecord* func =
       NewCoroutineResumeFunctionType(frame->type, &frame_param, location);
+  /* Resume runs the original member-function body after rewriting `this` into
+   * the frame. Keep the coroutine's class as the access context so private and
+   * protected members remain visible ([class.access] / [dcl.fct.def.coroutine]). */
+  if (node != NULL && node->type != NULL && TypeIsFunction(node->type) &&
+      node->type->info.function.cxx_member_owner != NULL) {
+    func->info.function.cxx_member_owner =
+        node->type->info.function.cxx_member_owner;
+  }
   ASTNode* cloned = ASTNodeClone((ASTNode*)body, IdentityCloneNode, NULL, NULL);
   CompoundStatementASTNode* resume_body = (CompoundStatementASTNode*)cloned;
   if (resume_body->statements->length > 0) {
