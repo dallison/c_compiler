@@ -645,10 +645,12 @@ unsigned long getauxval(unsigned long type) {
 
 int getpagesize(void) { return 4096; }
 
+#if !defined(__DAVECC_DAVEOS__)
 unsigned sleep(unsigned seconds) {
   (void)seconds;
   return 0;
 }
+#endif
 
 int setenv(const char* name, const char* value, int overwrite) {
   (void)name;

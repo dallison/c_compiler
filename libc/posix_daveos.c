@@ -18,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/select.h>
+#include <sys/stat.h>
 #include <sys/timerfd.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -740,6 +741,44 @@ ssize_t pread(int fd, void* buffer, size_t size, off_t offset) {
   (void)lseek(fd, cur, SEEK_SET);
   errno = saved;
   return n;
+}
+
+unsigned sleep(unsigned seconds) {
+  while (seconds > 0) {
+    unsigned chunk = seconds > 1000000u ? 1000000u : seconds;
+    if (syscall(DAVEOS_SYS_POLL, (void*)0, 0L, (long)(chunk * 1000u)) < 0) {
+      return seconds;
+    }
+    seconds -= chunk;
+  }
+  return 0;
+}
+
+int system(const char* command) {
+  if (command == NULL) {
+    struct stat st;
+    return stat("/bin/sh", &st) == 0 ? 1 : 0;
+  }
+  pid_t pid = fork();
+  if (pid < 0) {
+    return -1;
+  }
+  if (pid == 0) {
+    char* argv[4];
+    argv[0] = (char*)"/bin/sh";
+    argv[1] = (char*)"-c";
+    argv[2] = (char*)command;
+    argv[3] = NULL;
+    execve("/bin/sh", argv, environ);
+    _exit(127);
+  }
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0) {
+    if (errno != EINTR) {
+      return -1;
+    }
+  }
+  return status;
 }
 
 #endif /* __DAVECC_DAVEOS__ */
