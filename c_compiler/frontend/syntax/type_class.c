@@ -1235,18 +1235,21 @@ Symbol* TypeParserParseStruct(TypeParser* parser, bool is_union, bool is_class) 
       // No tag name, nothing to do.
       goto done;
     }
-    // A standalone `class X;` in a class or block declares X in that scope
-    // even when an enclosing scope already has an X ([dcl.type.elab]).
-    // `friend class X;` instead refers to the existing enclosing X.
-    bool redeclares_in_local_scope =
+    // A standalone `class X;` declares X in the current declarative region
+    // (class, block, or namespace) even when an enclosing scope already has
+    // an X ([dcl.type.elab]).  Without top-scope-only lookup, a nested
+    // `namespace N { class Scheduler; }` would wrongly bind to an outer
+    // `::Scheduler` while `class Scheduler { ... }` later creates a distinct
+    // `N::Scheduler`, so pointers of the two print identically but do not
+    // convert.  `friend class X;` still names the existing enclosing X.
+    bool standalone_forward =
         CompilerIsCXX() && !has_qualified_tag &&
-        parser->syntax->local_tag_stack != NULL &&
         !parser->syntax->parsing_friend_declaration_specifier &&
         !parser->parsing_type_id &&
         LexLookingAt(parser->lex, TOK(semicolon));
     if (has_qualified_tag) {
       tag = SyntaxFindQualifiedTag(parser->syntax, &qualified_tag);
-    } else if (redeclares_in_local_scope) {
+    } else if (standalone_forward) {
       tag = SyntaxFindTopScopeTag(parser->syntax, &tag_name);
     } else {
       tag = SyntaxFindTag(parser->syntax, &tag_name);
