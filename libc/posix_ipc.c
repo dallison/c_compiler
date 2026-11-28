@@ -593,11 +593,13 @@ int dl_iterate_phdr(int (*callback)(struct dl_phdr_info* info, size_t size,
   return 0;
 }
 
+#if !defined(__DAVECC_DAVEOS__)
 int sigaltstack(const stack_t* stack, stack_t* old_stack) {
   (void)stack;
   (void)old_stack;
   return 0;
 }
+#endif
 
 int sched_getcpu(void) {
 #if defined(__DAVECC_DAVEOS__)

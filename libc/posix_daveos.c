@@ -150,6 +150,10 @@ int sigprocmask(int how, const sigset_t* set, sigset_t* oldset) {
   return pthread_sigmask(how, set, oldset);
 }
 
+int sigaltstack(const stack_t* stack, stack_t* old_stack) {
+  return Fail(syscall(DAVEOS_SYS_SIGALTSTACK, stack, old_stack));
+}
+
 int eventfd(unsigned int initval, int flags) {
   return Fail(syscall(DAVEOS_SYS_EVENTFD, (long)initval, flags));
 }

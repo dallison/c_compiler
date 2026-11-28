@@ -84,6 +84,8 @@ typedef struct {
 #define SA_SIGINFO 0x00000004
 #define SA_ONSTACK 0x00000008
 #define SA_RESETHAND 0x00000010
+#define SS_ONSTACK 0x0001
+#define SS_DISABLE 0x0002
 #elif defined(__DAVECC_NATIVE_LINUX__)
 #define SA_SIGINFO 0x00000004
 #define SA_ONSTACK 0x08000000
