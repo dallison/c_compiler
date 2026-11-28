@@ -448,6 +448,8 @@ LIBC_SRCS = [
     "libc/posix_poll.c",
     "libc/posix_ipc.c",
     "libc/posix_pwd.c",
+    "libc/posix_shadow.c",
+    "libc/crypt.c",
     "libc/uname.c",
     "libc/memstream.c",
     "libc/posix_events.c",
@@ -2892,6 +2894,8 @@ libc_srcs=(
   "libc/posix_poll.c"
   "libc/posix_ipc.c"
   "libc/posix_pwd.c"
+  "libc/posix_shadow.c"
+  "libc/crypt.c"
   "libc/uname.c"
   "libc/memstream.c"
   "libc/posix_events.c"
@@ -5137,8 +5141,10 @@ sh_test(
     srcs = ["tests/daveos_target_test.sh"],
     args = [
         "$(rootpath :davecc)",
+        "$(rootpath :archivist)",
     ],
     data = [
+        ":archivist",
         ":davecc",
         ":libc_headers",
     ],

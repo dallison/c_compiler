@@ -258,17 +258,17 @@ int ioctl(int fd, unsigned long request, ...) {
       return -1;
     }
 #if defined(__DAVECC_DAVEOS__)
-    if (syscall(DAVEOS_SYS_IOCTL, fd, (long)TIOCGWINSZ, 0) < 0) {
+    if (syscall(DAVEOS_SYS_IOCTL, fd, (long)TIOCGWINSZ, window) < 0) {
       errno = ENOTTY;
       return -1;
     }
 #else
     (void)fd;
-#endif
     window->ws_row = 24;
     window->ws_col = 80;
     window->ws_xpixel = 0;
     window->ws_ypixel = 0;
+#endif
     return 0;
   }
 #if defined(__DAVECC_DAVEOS__)

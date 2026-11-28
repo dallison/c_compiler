@@ -38,6 +38,7 @@ typedef int sig_atomic_t;
 #define SIGCONT 18
 #define SIGSTOP 19
 #define SIGTSTP 20
+#define SIGWINCH 28
 #else
 #define SIGABRT 1
 #define SIGFPE 2
